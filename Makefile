@@ -105,6 +105,10 @@ reload: build
 	else \
 	  echo "(MCP children left alive — RESTART_MCP=1 to restart them after a tool-schema change)"; \
 	fi
+	@# The self-exit below is a clean exit 0 that KeepAlive respawns — to the mini heartbeat's
+	@# launchd-restart check that is a crash loop unless marked (dotfiles
+	@# scripts/lib/launchd-restarts.sh: one epoch line excuses one `runs` bump).
+	@d="$$HOME/.local/state/devhost/deliberate-restart"; mkdir -p "$$d" && date +%s >> "$$d/com.jkrumm.sideclaw-server" || true
 	@old=$$(launchctl print gui/$$(id -u)/com.jkrumm.sideclaw-server 2>/dev/null | awk '/^[[:space:]]*pid = /{print $$3; exit}'); \
 	shutdown_url="http://127.0.0.1:7705/api/shutdown$${FORCE:+?force=1}"; \
 	if curl -sf --max-time 3 -X POST -H "X-Sideclaw-Shutdown: 1" "$$shutdown_url" >/dev/null 2>&1; then \
