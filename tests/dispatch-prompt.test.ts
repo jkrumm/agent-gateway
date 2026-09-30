@@ -16,6 +16,7 @@ import {
   artifactText,
   assertSensitiveTierAllowed,
   buildPrompt,
+  DISPATCH_INPUT,
   IN_PLACE_ADDENDUM,
   isSalvageable,
   loadSkillPrompt,
@@ -91,6 +92,24 @@ describe("buildPrompt — structure", () => {
     for (const empty of [undefined, "", "   ", "\n\t "]) {
       expect(buildPrompt(SKILL, "b", empty, NONCE)).not.toContain("CONTEXT_");
     }
+  });
+});
+
+describe("DISPATCH_INPUT — the read-tier base opt-in", () => {
+  // The read worktree defaults to the remote default branch; `base: "head"` is the escape
+  // hatch for a read that genuinely wants the live checkout (see createReadWorktree).
+  test("defaults to 'default' when omitted", () => {
+    expect(DISPATCH_INPUT.parse({ cwd: "/repo", brief: "why" }).base).toBe("default");
+  });
+
+  test("accepts 'head'", () => {
+    expect(DISPATCH_INPUT.parse({ cwd: "/repo", brief: "why", base: "head" }).base).toBe("head");
+  });
+
+  test("rejects a value outside the enum", () => {
+    expect(DISPATCH_INPUT.safeParse({ cwd: "/repo", brief: "why", base: "origin" }).success).toBe(
+      false,
+    );
   });
 });
 

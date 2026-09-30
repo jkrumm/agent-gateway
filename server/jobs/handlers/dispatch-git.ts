@@ -722,7 +722,7 @@ export async function createWorktree(
 }
 
 /**
- * Create a throwaway worktree at the checkout's current HEAD, for a tier that only reads.
+ * Create a throwaway worktree for a tier that only reads.
  *
  * `readOnly: true` takes Edit and Write off the session. It does not take away Bash, and the
  * prompt is assembled from a brief the caller built out of Slack messages and issue bodies —
@@ -731,16 +731,17 @@ export async function createWorktree(
  * own copy instead, torn down when the episode ends: the same teardown, and the same "a
  * failed episode leaves the live checkout untouched" property, that implement already had.
  *
- * Cut from HEAD by default, not from `origin/<default>`: a read tier is answering a question
- * about *this* checkout, so the commit it is sitting on is the right thing to read, and there
- * is no artifact that will later need rebasing. That also means no fetch and no GitHub API
- * call, which is what keeps `investigate` working in a repo whose origin is not GitHub, or
- * missing entirely — the read tiers resolve no identity.
+ * Cut from the REMOTE DEFAULT BRANCH by default, not from HEAD: a read tier is normally
+ * answering a question an observer posed about the repository, and the live checkout may be
+ * sitting on a stale or feature tip — an answer cut from it can be confidently wrong about the
+ * default branch, which is exactly the failure this default replaced. `base: "head"` is the
+ * explicit opt-in for the rarer read that genuinely wants this checkout. `resolveReadBase`
+ * (below) owns the default-branch resolution and its HEAD fallback.
  *
- * `atOid`, when given, checks out that commit instead of HEAD — the seam `review` uses to
- * inspect a fetched PR/branch ref rather than the live checkout's own tip. The caller is
- * responsible for making sure the OID already resolves in `cwd`'s object database (e.g. via a
- * prior `git fetch`); this function does no fetching of its own either way.
+ * `atOid`, when given, checks out that commit instead of either — the seam `review` uses to
+ * inspect a fetched PR/branch ref rather than a branch tip. The caller is responsible for
+ * making sure the OID already resolves in `cwd`'s object database (e.g. via a prior
+ * `git fetch`); this function does no fetching of its own on the `atOid` path.
  *
  * `git worktree add` only materializes TRACKED content at the pinned commit — that is a side
  * effect of the underlying git command, not a deliberate security guard, so a read episode
@@ -751,7 +752,11 @@ export async function createWorktree(
  * write landing in the live checkout, and copying files IN doesn't touch that. Untracked files
  * are only ever copied from `cwd`'s OWN working tree, so this step is skipped for an `atOid`
  * checkout — the untracked scratch files of the live checkout have no relationship to a
- * fetched PR/branch ref, and copying them in would mix the two.
+ * fetched PR/branch ref, and copying them in would mix the two. It still runs for a
+ * default-branch read: `.env` and other local state are environment, not version, and are the
+ * gap the copy exists to close (the rare case of an untracked file shadowing a path newly
+ * tracked on the default branch is accepted — best effort, and skipping the copy reopens the
+ * original gap).
  *
  * The narrow claim, because the wide one would be false: this isolates the WORKING TREE. The
  * worktree shares `.git` with the live repo, and nothing confines the session's Bash to the
@@ -762,6 +767,7 @@ export async function createReadWorktree(
   cwd: string,
   jobKey: string,
   atOid?: string,
+  base: "default" | "head" = "default",
 ): Promise<DispatchWorktree> {
   const branch = `dispatch/read-${jobKey.slice(0, 8)}`;
   const root = worktreeRoot();
@@ -769,8 +775,17 @@ export async function createReadWorktree(
   mkdirSync(root, { recursive: true });
   if (existsSync(path)) rmSync(path, { recursive: true, force: true });
 
-  const baseOid = atOid ?? (await gitOrThrow(["rev-parse", "--verify", "HEAD^{commit}"], cwd));
-  const baseRef = atOid ? atOid.slice(0, 12) : "HEAD";
+  let baseOid: string;
+  let baseRef: string;
+  if (atOid) {
+    baseOid = atOid;
+    baseRef = atOid.slice(0, 12);
+  } else if (base === "head") {
+    baseOid = await gitOrThrow(["rev-parse", "--verify", "HEAD^{commit}"], cwd);
+    baseRef = "HEAD";
+  } else {
+    ({ baseOid, baseRef } = await resolveReadBase(cwd));
+  }
   try {
     await gitOrThrow(["worktree", "add", "--quiet", "-b", branch, path, baseOid], cwd, 120_000);
   } catch (err) {
@@ -784,6 +799,68 @@ export async function createReadWorktree(
   const wt: DispatchWorktree = { path, branch, base: baseOid, baseRef, pushable: false };
   if (!atOid) await copyUntrackedFiles(cwd, wt);
   return wt;
+}
+
+/**
+ * Resolve where a read worktree should be cut from when the caller named no explicit OID: the
+ * repository's REMOTE default branch, with the live checkout's HEAD as the offline fallback.
+ *
+ * The default is the default branch, not HEAD, because a read episode is normally answering a
+ * question an observer posed about the REPOSITORY — and the live checkout may be on a stale or
+ * feature tip, so an answer cut from it can be confidently wrong about the default branch (the
+ * incident this replaced). `review`'s explicit-`atOid` path is untouched: it names the ref it
+ * wants, and a read that genuinely wants the live checkout passes `base: "head"`.
+ *
+ * The branch name is resolved forge-agnostically over plain git — `git ls-remote --symref
+ * origin HEAD` (`parseSymrefHead`) — deliberately NOT through `resolveRepoIdentity`: that would
+ * drag in the GitHub API and refuse any repo whose origin is neither GitHub nor GitLab, while a
+ * read tier must stay useful in a repo of any origin. Resolution and fetch are both best
+ * effort: no origin, an unreachable remote, a remote that reports no symref, or a branch name
+ * unsafe to splice into a later git argv all fall back to HEAD rather than failing an episode
+ * whose whole job is to read a tree.
+ */
+async function resolveReadBase(cwd: string): Promise<{ baseOid: string; baseRef: string }> {
+  const defaultBranch = await resolveRemoteDefaultBranch(cwd);
+  if (defaultBranch) {
+    // Best effort: a stale origin/<default> only means the episode reads an older default tip,
+    // so a failed fetch (offline, throttled) degrades rather than costs the episode.
+    const fetched = await git(["fetch", "origin", defaultBranch], cwd, 120_000);
+    if (!fetched.ok) {
+      logger.warn(
+        {
+          event: "dispatch.read_fetch_failed",
+          project: cwd,
+          error: fetched.stderr.trim().slice(0, 200),
+        },
+        "could not fetch the remote default branch — reading the local ref instead",
+      );
+    }
+    for (const candidate of [`origin/${defaultBranch}`, defaultBranch]) {
+      const r = await git(["rev-parse", "--verify", "--quiet", `${candidate}^{commit}`], cwd);
+      if (r.ok && r.stdout.trim()) return { baseOid: r.stdout.trim(), baseRef: candidate };
+    }
+  }
+  const baseOid = await gitOrThrow(["rev-parse", "--verify", "HEAD^{commit}"], cwd);
+  return { baseOid, baseRef: "HEAD" };
+}
+
+/**
+ * Ask the remote (over plain git, no forge API) which branch its HEAD points at. Returns null
+ * when that cannot be established — no origin, an unreachable remote, a remote that reports no
+ * symref, or a branch name unsafe to splice into a later git argv — and the caller falls back
+ * to HEAD.
+ */
+async function resolveRemoteDefaultBranch(cwd: string): Promise<string | null> {
+  const listed = await git(["ls-remote", "--symref", "origin", "HEAD"], cwd, 30_000);
+  if (!listed.ok) return null;
+  const branch = parseSymrefHead(listed.stdout);
+  if (!branch) return null;
+  try {
+    assertSafeDefaultBranchName(branch);
+  } catch {
+    return null;
+  }
+  return branch;
 }
 
 // ── Untracked-file materialization (read tiers only) ──────────────────────────

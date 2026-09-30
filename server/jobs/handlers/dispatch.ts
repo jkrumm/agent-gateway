@@ -143,6 +143,15 @@ export const DISPATCH_INPUT = z.object({
         "In-place is refused for any tier but implement, for sensitive: true, and while " +
         "another in-place episode is running in the same repo.",
     ),
+  base: z
+    .enum(["default", "head"])
+    .default("default")
+    .describe(
+      "Read tiers only (investigate/author): which tree the episode reads. 'default' (the " +
+        "default) = the repository's remote default branch, with the live checkout's HEAD as " +
+        "the offline fallback; 'head' = the live checkout's current HEAD. Ignored by the " +
+        "implement tier, whose worktree is always cut from the default branch.",
+    ),
 });
 
 export type DispatchParams = z.infer<typeof DISPATCH_INPUT>;
@@ -505,6 +514,27 @@ export function buildPrompt(
   return out;
 }
 
+/**
+ * Handler-authored note naming the tree a read-tier worker is actually reading. The read
+ * worktree is cut from the remote default branch by default, not from the live checkout's HEAD
+ * (`createReadWorktree`), so a verdict that answers about this checkout's tip can be
+ * confidently wrong about the default branch — the incident this replaced. Naming the resolved
+ * ref lets the worker state it in the verdict. Appended to the prompt AFTER `buildPrompt`,
+ * outside the fenced brief, because it is the handler's own text and never attacker-controlled.
+ */
+function readBaseNote(wt: DispatchWorktree): string {
+  const what =
+    wt.baseRef === "HEAD"
+      ? "the live checkout's current HEAD"
+      : `the repository's default branch (${wt.baseRef})`;
+  return (
+    `\n\n## Which tree you are reading\n\n` +
+    `Your working tree is cut from ${what}, commit \`${wt.base}\`. Untracked and gitignored ` +
+    `files from the live checkout were copied in alongside it. Answer about that tree and state ` +
+    `the commit you read in your verdict.`
+  );
+}
+
 /** Is this failure worth retrying and salvaging? Only a SERIALIZATION failure is: the
  *  session ran, produced something, and merely failed to shape it. Everything else — a
  *  timeout, a non-zero exit, an unreachable worker backend, a missing result event — means the
@@ -831,7 +861,7 @@ export async function runDispatch(
   isCancelled?: (jobId: string) => boolean,
   resumeCtx?: DispatchResumeContext,
 ): Promise<DispatchOutput> {
-  const { cwd, brief, tier, context, model, sensitive, workspace } = parseParams(
+  const { cwd, brief, tier, context, model, sensitive, workspace, base } = parseParams(
     DISPATCH_INPUT,
     rawParams,
   );
@@ -869,7 +899,7 @@ export async function runDispatch(
   const profile = TIERS[tier];
   const skill = await loadSkillPrompt(tier);
   const nonce = newFenceNonce();
-  const prompt = buildPrompt(skill, brief, context, nonce, inPlace ? IN_PLACE_ADDENDUM : undefined);
+  let prompt = buildPrompt(skill, brief, context, nonce, inPlace ? IN_PLACE_ADDENDUM : undefined);
 
   logger.info(
     {
@@ -916,10 +946,11 @@ export async function runDispatch(
   // Edit and Write but not Bash, and the brief is attacker-influenced text — anyone can open
   // an issue on a public repo, and its body reaches an episode's context. A read tier sitting
   // in the live checkout is one injected `sed -i` away from editing a repo other agents are
-  // working in and that deploys on push. The read tiers get a throwaway copy of HEAD (see
-  // createReadWorktree, which needs no identity and no network); implement keeps its branch
-  // cut from the authoritative default. It costs no capability — the difference is which
-  // directory the session starts in.
+  // working in and that deploys on push. The read tiers get a throwaway copy of the repo's
+  // default branch — HEAD only when the remote is unreachable, or when the caller asked for
+  // the live checkout with `base: "head"` (see createReadWorktree); implement keeps its
+  // branch cut from the authoritative default. It costs no capability — the difference is
+  // which directory the session starts in.
   //
   // The ONE exception is implement + workspace "in-place": the episode's whole point is to
   // edit the live checkout, deliberately, for the owner's own direct-to-master review flow.
@@ -977,7 +1008,7 @@ export async function runDispatch(
       worktree = await createWorktree(cwd, jobKey, slugify(brief), identity.defaultBranch);
       note(`worktree ${worktree.branch}`);
     } else {
-      worktree = await createReadWorktree(cwd, jobKey);
+      worktree = await createReadWorktree(cwd, jobKey, undefined, base);
     }
     // Recorded the instant the worktree exists — well before the worker session starts — so a
     // process killed before the FIRST stream event still leaves this on the job row. A resume
@@ -1011,6 +1042,13 @@ export async function runDispatch(
       worktreeMeta = worktree;
       sessionCwd = worktree.path;
       strippedSettings = stripProjectSettings(worktree);
+      // A read-tier worker is told which tree it is actually reading: its worktree is cut
+      // from the remote default branch by default, not the live checkout's HEAD (see
+      // createReadWorktree), and `baseRef` would otherwise only be logged — a verdict that
+      // cannot say which commit it read is the failure this names. Handler-authored, so it is
+      // appended OUTSIDE the fenced brief. Implement's worktree is always a default branch and
+      // its own prompt already says so, so only the read tiers get the note.
+      if (tier !== "implement") prompt += readBaseNote(worktree);
     }
     // Recorded the instant the worktree exists — well before the worker session starts — so a
     // process killed before the FIRST stream event still leaves this on the job row (see the
