@@ -1079,6 +1079,20 @@ function stripBenignStderr(text: string): string {
     .trim();
 }
 
+/** True when a non-zero process exit must fail the attempt. A well-formed success result
+ *  envelope (`subtype: "success"`, not `is_error`) already carries the worker's answer; the
+ *  CLI has been observed to exit 1 after emitting one (since 2026-09-30, every Max-lane
+ *  session), and discarding a completed answer over the exit code alone broke review
+ *  angles/synthesis and narrative. Error envelopes (including `is_error` ones that still
+ *  say `subtype: "success"`, e.g. "Not logged in") and a missing envelope still fail. */
+export function exitCodeIsFailure(
+  exitCode: number,
+  envelope: { subtype?: string; is_error?: boolean } | undefined,
+): boolean {
+  if (exitCode === 0) return false;
+  return !(envelope?.subtype === "success" && envelope.is_error !== true);
+}
+
 /** Build the failure result for `runSessionAttempt`'s `exitCode !== 0` branch. Pure —
  *  extracted for direct unit coverage, same as `classifyErrorEnvelope`. Prefers the
  *  result envelope's own `subtype` over stderr when one arrived (e.g. `error_max_turns`
@@ -1791,7 +1805,20 @@ async function runSessionAttempt<T = unknown>(
     };
   }
 
-  if (exitCode !== 0) {
+  if (exitCode !== 0 && !exitCodeIsFailure(exitCode, envelope)) {
+    runnerLogger().warn(
+      {
+        event: "session.exit_nonzero_after_success",
+        project: cwd,
+        ...errCtx,
+        exitCode,
+        stderr: stderrTrimmed.slice(-1000),
+      },
+      "non-zero exit after a success result envelope — treating the session as successful",
+    );
+  }
+
+  if (exitCodeIsFailure(exitCode, envelope)) {
     emitAttribution("error", {
       durationMs,
       turns,
@@ -1799,6 +1826,23 @@ async function runSessionAttempt<T = unknown>(
       apiErrorStatus,
       subtype: envelope?.subtype,
     });
+    // The error string deliberately omits the envelope's `result` (model-influenced text),
+    // so an `is_error` envelope that says `subtype: "success"` ("Not logged in", auth
+    // failures) would otherwise be undiagnosable — log it here, never into `error`.
+    if (envelope?.is_error) {
+      runnerLogger().warn(
+        {
+          event: "session.exit_error_envelope",
+          project: cwd,
+          ...errCtx,
+          exitCode,
+          subtype: envelope.subtype,
+          apiErrorStatus,
+          result: envelope.result?.slice(0, 500),
+        },
+        "non-zero exit with an is_error result envelope",
+      );
+    }
     // exitCode + (the envelope's own subtype, when one arrived) are both
     // transport/CLI-sourced — safe to reuse verbatim as the classification text. See
     // `classifyExitFailure`'s doc comment for why the envelope wins over raw stderr.

@@ -10,6 +10,7 @@ import {
   gatewayContextTokens,
   classifyErrorEnvelope,
   classifyExitFailure,
+  exitCodeIsFailure,
   unclassifiedOutputFailure,
   backendFallbacksLastHour,
   recordFallback,
@@ -669,6 +670,31 @@ describe("classifyExitFailure", () => {
     expect(r.error).toBe("Session exited with code 1 after a success result envelope");
     const maxTurns = classifyExitFailure(1, { subtype: "error_max_turns" }, "", "");
     expect(maxTurns.error).toBe("Session exited with code 1 (error_max_turns)");
+  });
+});
+
+// ── exitCodeIsFailure — the exit-code gate in runSessionAttempt ─────────────────────
+
+describe("exitCodeIsFailure", () => {
+  test("success envelope + exit 1 → not a failure", () => {
+    expect(exitCodeIsFailure(1, { subtype: "success", is_error: false })).toBe(false);
+    expect(exitCodeIsFailure(1, { subtype: "success" })).toBe(false);
+  });
+
+  test("error envelope + exit 1 → failure", () => {
+    expect(exitCodeIsFailure(1, { subtype: "error_max_turns", is_error: true })).toBe(true);
+    // is_error wins over a `success` subtype ("Not logged in" arrives in this shape).
+    expect(exitCodeIsFailure(1, { subtype: "success", is_error: true })).toBe(true);
+    expect(exitCodeIsFailure(1, { is_error: true })).toBe(true);
+  });
+
+  test("no envelope + exit 1 → failure", () => {
+    expect(exitCodeIsFailure(1, undefined)).toBe(true);
+  });
+
+  test("exit 0 is never a failure here", () => {
+    expect(exitCodeIsFailure(0, undefined)).toBe(false);
+    expect(exitCodeIsFailure(0, { subtype: "success" })).toBe(false);
   });
 });
 
