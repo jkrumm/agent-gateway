@@ -1446,20 +1446,20 @@ export async function inPlaceRefusalReason(
   // secret-shaped text the file carried before it ran.
   const nowListing = await gitOrThrow(["ls-files", "--others", "--exclude-standard", "-z"], cwd);
   const nowUntracked = new Set(nowListing.split("\0").filter(Boolean));
-  let untrackedText = "";
+  const untrackedFiles: Array<{ file: string; text: string }> = [];
   for (const f of changedFiles) {
     if (!nowUntracked.has(f) || snap.untracked.includes(f)) continue;
     try {
-      untrackedText += `\n${readFileSync(join(cwd, f), "utf8")}`;
+      untrackedFiles.push({ file: f, text: readFileSync(join(cwd, f), "utf8") });
     } catch {
       // Gone, unreadable or a directory between listing and read — the diff already
       // covers everything tracked, and this is a warning path, not a gate.
     }
   }
-  const secrets = await addedLineSecrets(cwd, base, untrackedText);
+  const secrets = await addedLineSecrets(cwd, base, untrackedFiles);
   if (secrets.length > 0) {
     warnings.push(
-      `the episode's added lines match ${secrets.join(", ")} — review before committing`,
+      `the episode's added lines match ${describeSecretHits(secrets)} — review before committing`,
     );
   }
 
@@ -1542,13 +1542,101 @@ export async function diffRefusalReason(
   }
   const secrets = await addedLineSecrets(wt.path, `${wt.base}...HEAD`);
   if (secrets.length > 0) {
-    return `the change adds text matching ${secrets.join(", ")} — a dispatched episode must never commit a credential or an internal address to a branch that becomes a public, permanent artifact`;
+    return `the change adds text matching ${describeSecretHits(secrets)} — a dispatched episode must never commit a credential or an internal address to a branch that becomes a public, permanent artifact`;
   }
   return null;
 }
 
 /**
- * Secret-shaped strings among a change set's ADDED lines, by pattern name.
+ * A matched secret pattern and the location of the added line that carries it.
+ *
+ * The location is the point. `diffRefusalReason` discards the whole branch on a hit and the
+ * worker (or the human reading the verdict afterwards) has no other way to know what tripped
+ * it: a refusal naming only the pattern is unactionable and makes the re-dispatch the note
+ * recommends impossible to narrow. File and line come from the same `-U0` patch the scan
+ * already reads.
+ */
+interface SecretHit {
+  pattern: string;
+  file: string;
+  line: number;
+}
+
+/** The new-file path of a `+++ b/path` header, or "" for the `/dev/null` side of a deletion. */
+function diffHeaderPath(header: string): string {
+  const path = header.slice(4).trim();
+  return path === "/dev/null" ? "" : path.replace(/^b\//, "");
+}
+
+/**
+ * Added lines in a `git diff --no-renames -U0` patch that match `SECRET_PATTERNS`, each with
+ * its new-file location.
+ *
+ * `-U0` means a hunk holds only `-`/`+` lines, so the new-file counter advances on additions
+ * alone; the `@@ … +<start> @@` header seeds it for each hunk. The `+++` header is read only
+ * before a hunk's first line, so added content that itself starts with `++` (a TOML
+ * front-matter `+++`, which arrives as `++++`) is scanned as content, never mistaken for a
+ * path.
+ */
+function scanPatchAddedLines(patch: string): SecretHit[] {
+  const hits: SecretHit[] = [];
+  let file = "";
+  let line = 0;
+  let inHunk = false;
+  for (const raw of patch.split("\n")) {
+    if (raw.startsWith("diff --git ")) {
+      file = "";
+      line = 0;
+      inHunk = false;
+      continue;
+    }
+    if (!inHunk && raw.startsWith("+++ ")) {
+      file = diffHeaderPath(raw);
+      continue;
+    }
+    if (raw.startsWith("@@")) {
+      const start = /\+(\d+)/.exec(raw);
+      line = start ? Number.parseInt(start[1] as string, 10) : 0;
+      inHunk = true;
+      continue;
+    }
+    if (!raw.startsWith("+")) continue;
+    for (const p of SECRET_PATTERNS) {
+      if (p.re.test(raw)) hits.push({ pattern: p.name, file, line });
+    }
+    line++;
+  }
+  return hits;
+}
+
+/** Every line of a file with no base to diff against (a newly untracked one), located from 1. */
+function scanTextAddedLines(file: string, text: string): SecretHit[] {
+  const hits: SecretHit[] = [];
+  text.split("\n").forEach((raw, i) => {
+    for (const p of SECRET_PATTERNS) {
+      if (p.re.test(raw)) hits.push({ pattern: p.name, file, line: i + 1 });
+    }
+  });
+  return hits;
+}
+
+/** A refusal message fragment naming each hit's pattern and location, deduped and capped. */
+function describeSecretHits(hits: ReadonlyArray<SecretHit>): string {
+  const seen = new Set<string>();
+  const labels: string[] = [];
+  for (const h of hits) {
+    const label = `${h.pattern} at ${h.file}:${h.line}`;
+    if (seen.has(label)) continue;
+    seen.add(label);
+    labels.push(label);
+  }
+  const max = 5;
+  if (labels.length <= max) return labels.join(", ");
+  return `${labels.slice(0, max).join(", ")} (and ${labels.length - max} more)`;
+}
+
+/**
+ * Secret-shaped strings among a change set's ADDED lines, each with its file and line.
  *
  * The artifact scan (`assertNoSecrets`) covers the issue and PR *bodies*. It says nothing
  * about the code, and the code is the durable half: a branch pushed to a public repo is in
@@ -1558,20 +1646,22 @@ export async function diffRefusalReason(
  *
  * `base` is whatever diff range the caller's path uses — the worktree path scans
  * `${base}...HEAD` (committed work), the in-place path scans a snapshot base (uncommitted
- * edits). `extraText` is appended to the added lines before scanning (the in-place path
- * adds the whole content of newly untracked files, which have no base to diff against).
- * Added lines only: a credential already committed in this repo is not this episode's doing,
- * and refusing on it would disable the tier in precisely the repo that needs a fix. The
- * corollary is a real limit: a secret this episode merely MOVES between files is invisible
- * here, because the addition matches something the base already contained.
+ * edits). `extraFiles` carries the whole content of newly untracked files, which have no base
+ * to diff against, so the in-place path can still attribute a hit to a real path. Added lines
+ * only: a credential already committed in this repo is not this episode's doing, and refusing
+ * on it would disable the tier in precisely the repo that needs a fix. The corollary is a real
+ * limit: a secret this episode merely MOVES between files is invisible here, because the
+ * addition matches something the base already contained.
  */
-async function addedLineSecrets(cwd: string, base: string, extraText?: string): Promise<string[]> {
+async function addedLineSecrets(
+  cwd: string,
+  base: string,
+  extraFiles: ReadonlyArray<{ file: string; text: string }> = [],
+): Promise<SecretHit[]> {
   const patch = await gitOrThrow(["diff", "--no-renames", "-U0", base, "--"], cwd);
-  const added = patch
-    .split("\n")
-    .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
-    .join("\n");
-  return scanForSecrets(extraText === undefined ? added : `${added}\n${extraText}`);
+  const hits = scanPatchAddedLines(patch);
+  for (const { file, text } of extraFiles) hits.push(...scanTextAddedLines(file, text));
+  return hits;
 }
 
 /**
