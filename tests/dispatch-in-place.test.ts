@@ -305,14 +305,14 @@ describe("finishInPlace", () => {
     expect(result.note).toMatch(/WARNING: .*CI execution surface/);
   });
 
-  test("a secret-shaped added line is a warning naming the pattern", async () => {
+  test("a secret-shaped added line is a warning naming the pattern and its location", async () => {
     const snap = await snapshotInPlace(fx.repo);
     fx.write("episode.txt", `${SECRET_BODY}\n`);
     const result = await finishInPlace(fx.repo, snap, () => {}, {
       runCheckFn: passingCheck,
     });
     expect(result.outcome).toBe("applied_in_place");
-    expect(result.note).toMatch(/WARNING: .*AWS access key id/);
+    expect(result.note).toMatch(/WARNING: .*AWS access key id at episode\.txt:1/);
   });
 
   test("pre-existing secret-shaped text in the owner's dirty diff is NOT the episode's warning", async () => {
