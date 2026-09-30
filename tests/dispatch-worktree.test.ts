@@ -149,25 +149,55 @@ describe("createWorktree", () => {
 // ── createReadWorktree ────────────────────────────────────────────────────────
 
 describe("createReadWorktree", () => {
-  test("is cut from HEAD, not from the default branch, and is not pushable", async () => {
+  test("is cut from the remote default branch by default, not the live checkout's HEAD", async () => {
+    // The live checkout is ahead of origin/master, which is exactly the stale-tree case the
+    // default-branch read exists to fix.
+    fx.write("local-only.md", "not pushed\n");
+    const head = await fx.commit("local commit");
+    const originMaster = (await fx.originRefs()).master;
+    expect(head).not.toBe(originMaster);
+
+    const jobKey = key();
+    const wt = await createReadWorktree(fx.repo, jobKey);
+    expect(wt.base).toBe(originMaster);
+    expect(wt.baseRef).toBe("origin/master");
+    expect(wt.pushable).toBe(false);
+    expect(wt.branch).toBe(`dispatch/read-${jobKey.slice(0, 8)}`);
+    // The tree really is origin/master: the local-only commit's file is absent.
+    expect(existsSync(join(wt.path, "local-only.md"))).toBe(false);
+  });
+
+  test("base: 'head' opts into the live checkout's current HEAD", async () => {
     fx.write("local-only.md", "not pushed\n");
     const head = await fx.commit("local commit");
     expect(head).not.toBe((await fx.originRefs()).master);
 
-    const jobKey = key();
-    const wt = await createReadWorktree(fx.repo, jobKey);
+    const wt = await createReadWorktree(fx.repo, key(), undefined, "head");
     expect(wt.base).toBe(head);
     expect(wt.baseRef).toBe("HEAD");
     expect(wt.pushable).toBe(false);
-    expect(wt.branch).toBe(`dispatch/read-${jobKey.slice(0, 8)}`);
     expect(existsSync(join(wt.path, "local-only.md"))).toBe(true);
   });
 
-  test("needs no remote at all — no fetch, no identity, no GitHub", async () => {
+  test("falls back to HEAD when there is no remote at all", async () => {
     await git(["remote", "remove", "origin"], fx.repo);
+    const head = await git(["rev-parse", "HEAD"], fx.repo);
     const wt = await createReadWorktree(fx.repo, key());
+    expect(wt.base).toBe(head);
+    expect(wt.baseRef).toBe("HEAD");
     expect(wt.pushable).toBe(false);
     await removeWorktree(fx.repo, wt);
+  });
+
+  test("an atOid still wins over the base default — review's seam is untouched", async () => {
+    const originMaster = (await fx.originRefs()).master;
+    fx.write("local-only.md", "not pushed\n");
+    const head = await fx.commit("local commit");
+
+    const wt = await createReadWorktree(fx.repo, key(), head);
+    expect(wt.base).toBe(head);
+    expect(wt.baseRef).toBe(head.slice(0, 12));
+    expect(wt.base).not.toBe(originMaster);
   });
 
   test("cleans up after a failed add, same as the write tier", async () => {

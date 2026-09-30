@@ -168,16 +168,21 @@ both were tested and neither holds.
   repo, and its body reaches an episode's context), so a read tier in the live
   checkout was one injected `sed -i` away from editing a repo other agents
   work in and that deploys on push. Read tiers get `createReadWorktree` — a
-  detached copy of **HEAD**, needing no identity, no fetch and no GitHub API,
-  which is what keeps `investigate` working in a repo whose origin is not
-  GitHub or absent. Implement keeps its branch cut from the authoritative
-  default. `DispatchWorktree.pushable` distinguishes them as a property of the
+  detached copy of the repo's **remote default branch**, resolved
+  forge-agnostically over plain git (`git ls-remote --symref origin HEAD`)
+  rather than through `resolveRepoIdentity`, so it needs no GitHub API and
+  still works for a non-GitHub origin. Resolution and fetch are best effort:
+  an absent or unreachable origin falls back to a detached copy of HEAD — the
+  live checkout case — which is also reachable explicitly via `base: "head"`.
+  Implement keeps its branch cut from the authoritative default.
+  `DispatchWorktree.pushable` distinguishes them as a property of the
   object rather than a re-derived tier check, because `salvage` pushes
   whatever the session left behind and must never publish a read tier's
   leftovers. Narrow claim: this isolates the **working tree**. The worktree
   shares `.git`, and nothing confines the session's `Bash` to the filesystem
   below it.
-- **Read tiers also see untracked and gitignored content, not just HEAD.**
+- **Read tiers also see untracked and gitignored content, not just tracked
+  content.**
   `git worktree add` only ever materializes tracked content — a side effect of
   the command, not a deliberate guard, since the write exposure above is about
   a *write* landing in the live checkout and copying files *in* doesn't touch

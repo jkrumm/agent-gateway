@@ -399,7 +399,9 @@ boundary for a sensitive episode, not the permission profile.
   `server/routes/jobs.ts` (at submit) and `runDispatch` (belt and suspenders
   for a direct caller) — it is a policy boundary on repo/tier, not a sandbox.
 - Every tier runs in its own worktree, torn down in a `finally`; read tiers
-  even in a repo with no working origin, since it's a detached copy of HEAD.
+  are cut from the repo's remote default branch, falling back to a detached
+  copy of HEAD when the origin is absent or unreachable (`base: "head"` opts
+  into the live checkout explicitly).
 - Read tiers also materialize untracked/gitignored files (bounded, symlinks
   never followed) — the read exposure was never about copying files *in*.
 - Boot sweeps every stale worktree/branch left by a SIGKILL.
