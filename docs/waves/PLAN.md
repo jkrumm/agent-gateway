@@ -21,7 +21,7 @@ angles off Max where measured equal, and no model id outside `GET /api/routing`.
 **Left behind:**
 
 ## Wave 2 — dispatch git safety            <!-- status: pending -->
-- [ ] Read tiers fetch `origin/<default>` and cut from it, not the live checkout HEAD.
+- [x] Read tiers fetch `origin/<default>` and cut from it, not the live checkout HEAD (landed 12fa41b).
 - [ ] `revisionOf: <branch>` parameter on implement: the handler (which has credentials) fetches the prior branch and cuts the worktree from it; the worker never fetches. Same PR is updated (push to the same `dispatch/*` branch with `--force-with-lease`), no new PR per revision.
 - [ ] Before push: fetch, rebase onto the latest default branch, re-run the repo checks; a conflict fails the job with `conflict` (caller re-dispatches) — never hand-resolved by the worker.
 - [ ] New job `update_pr {repo, pr}`: rebase a `dispatch/*` PR onto the latest base, re-run checks, force-with-lease push; returns the new head SHA + check result. This is warden's merge-train primitive.
