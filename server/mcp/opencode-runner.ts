@@ -16,14 +16,18 @@
 // Deliberately NOT `--pure` (measured 2026-09-24: hangs — see AGENTS.md's Worker routing
 // section).
 //
-// ONLY supports `deepseek-v4.1-flash` (`DEEPSEEK_V41_FLASH`, routing.ts) — the rates, context
-// limit and provider config below are that one model's, and `runOpencodeAttempt` refuses any
-// other model outright rather than silently applying the wrong numbers to it.
+// Supports any model in the registry (`server/lib/models.ts`) whose `harnesses` include
+// `opencode`: limits, rates and effort variants in the generated provider config and the cost
+// computation come from the registry entry of the model in use, and `runOpencodeAttempt`
+// refuses an unregistered or non-opencode id outright. Two providers are always emitted
+// (`iu-chat`, `iu-responses`) over the same IU OpenAI base; the registry's `wire` picks which
+// one carries the model and therefore the `-m` prefix — GPT ids ride Responses only.
 
 import { randomUUID } from "node:crypto";
 import type { Subprocess } from "bun";
 import { getIuConfig } from "../lib/iu-openai.ts";
-import { DEEPSEEK_V41_FLASH, type Backend } from "../lib/routing.ts";
+import { getModel, type ModelEntry } from "../lib/models.ts";
+import type { Backend } from "../lib/routing.ts";
 import { IDLE_TIMEOUT_MS } from "../lib/idle-timeout.ts";
 import {
   extractJson,
@@ -81,8 +85,30 @@ export interface OpencodeArgsInput {
   prompt: string;
 }
 
-/** The full `opencode` argument vector, INCLUDING the binary as element 0. `-m iu/<model>`
- *  names the provider (`iu`, `buildOpencodeConfig` below) and the model id together —
+/** opencode provider ids `buildOpencodeConfig` emits — one per IU OpenAI-route wire. */
+export const OPENCODE_PROVIDER_CHAT = "iu-chat";
+export const OPENCODE_PROVIDER_RESPONSES = "iu-responses";
+
+/** The registry entry for a model this harness can drive, or a thrown refusal: unregistered,
+ *  or no `opencode` in its `harnesses` (e.g. the Anthropic-wire ids, which only `claude -p`
+ *  reaches). Also the only place `wire` is mapped to a provider. */
+export function opencodeModel(model: string): ModelEntry & { wire: "chat" | "responses" } {
+  const entry = getModel(model);
+  if (!entry) {
+    throw new Error(`opencode harness: unknown model "${model}" — not in the registry`);
+  }
+  if (!entry.harnesses.includes("opencode") || entry.wire === "anthropic") {
+    throw new Error(`opencode harness: model "${model}" is not usable on the opencode harness`);
+  }
+  return entry as ModelEntry & { wire: "chat" | "responses" };
+}
+
+function providerFor(entry: { wire: "chat" | "responses" }): string {
+  return entry.wire === "responses" ? OPENCODE_PROVIDER_RESPONSES : OPENCODE_PROVIDER_CHAT;
+}
+
+/** The full `opencode` argument vector, INCLUDING the binary as element 0. `-m <provider>/<model>`
+ *  names the provider (`iu-chat`/`iu-responses`, `buildOpencodeConfig` below) and the model id together —
  *  opencode has no bare `--model <id>` against a custom provider. The `--` before `prompt`
  *  is load-bearing, not decorative: measured 2026-09-24, a message starting with `-` (e.g. a
  *  brief that happens to begin "-foo bar") is parsed by opencode's own yargs CLI as an
@@ -96,7 +122,7 @@ export function buildOpencodeArgs(input: OpencodeArgsInput): string[] {
     "--dir",
     cwd,
     "-m",
-    `iu/${model}`,
+    `${providerFor(opencodeModel(model))}/${model}`,
     ...(variant ? ["--variant", variant] : []),
     ...(resumeSessionId ? ["--session", resumeSessionId] : []),
     "--format",
@@ -110,32 +136,6 @@ export interface OpencodeConfigInput {
   model: string;
   readOnly: boolean;
 }
-
-/** Rates confirmed against the IU gateway for `deepseek-v4.1-flash`, 2026-09-24: $0.15/MTok
- *  input, $0.60/MTok output, ~$0.003/MTok cache read — see routing.ts's AGENT_OC comment.
- *  Model-specific and NOT exported: `runOpencodeAttempt` refuses to run any model other than
- *  `DEEPSEEK_V41_FLASH` on this harness (see its own guard), so these numbers are never
- *  applied to a different model's usage by construction — nothing outside this file needs
- *  them directly, only `computeOpencodeCostUsd`/`buildOpencodeConfig` below. */
-const DEEPSEEK_V41_FLASH_RATE_INPUT_PER_MTOK = 0.15;
-const DEEPSEEK_V41_FLASH_RATE_OUTPUT_PER_MTOK = 0.6;
-const DEEPSEEK_V41_FLASH_RATE_CACHE_READ_PER_MTOK = 0.003;
-/** Real context/output window for `deepseek-v4.1-flash` over the IU OpenAI-compatible
- *  route, 2026-09-24 — mirrors `GATEWAY_CONTEXT_TOKENS`'s per-model measurement convention in
- *  session-runner.ts, just declared to opencode's own config schema instead of consumed via
- *  `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (a claude-harness-only env var). */
-const DEEPSEEK_V41_FLASH_CONTEXT_LIMIT = 850_000;
-const DEEPSEEK_V41_FLASH_OUTPUT_LIMIT = 65_536;
-
-/** opencode's `--variant` values this route ever passes — AGENT_OC uses `"high"`,
- *  AGENT_OC_IMPLEMENT uses `"max"` (routing.ts); `"none"` is declared for completeness (a
- *  `SIDECLAW_VARIANT_<TOOL>` override could reasonably ask for it) but nothing defaults to
- *  it. `runOpencodeAttempt` refuses any variant outside this set before spawning — an
- *  undeclared variant name is silently accepted by opencode itself (falls back to the base
- *  `options`), which would otherwise mask a typo'd override as "ran, just not the effort
- *  level asked for" instead of a clear refusal. */
-export const OPENCODE_DECLARED_VARIANTS = ["high", "max", "none"] as const;
-export type OpencodeVariant = (typeof OPENCODE_DECLARED_VARIANTS)[number];
 
 /** Every opencode permission key this config sets, verified against the live schema
  *  (`curl https://opencode.ai/config.json`, 2026-09-24 — `$defs.PermissionConfig`). Notably:
@@ -180,38 +180,40 @@ export const OPENCODE_PERMISSION_KEYS = [
  *  more than intended. */
 export function buildOpencodeConfig(input: OpencodeConfigInput): Record<string, unknown> {
   const { model, readOnly } = input;
+  const entry = opencodeModel(model);
+  const providerOptions = { baseURL: "{env:IU_OPENAI_BASE}", apiKey: "{env:IU_KEY}" };
+  const modelEntry = {
+    name: entry.name,
+    limit: { context: entry.limit.context, output: entry.limit.output },
+    cost: {
+      input: entry.rate.in,
+      output: entry.rate.out,
+      ...(entry.rate.cacheRead !== undefined ? { cache_read: entry.rate.cacheRead } : {}),
+    },
+    // A model that exposes effort levels runs at "high" by default; `--variant` picks another.
+    ...(entry.effort.length > 0
+      ? {
+          options: { reasoningEffort: "high" },
+          variants: Object.fromEntries(entry.effort.map((e) => [e, { reasoningEffort: e }])),
+        }
+      : {}),
+  };
   return {
     $schema: "https://opencode.ai/config.json",
     autoupdate: false,
     share: "disabled",
     provider: {
-      iu: {
+      [OPENCODE_PROVIDER_CHAT]: {
         npm: "@ai-sdk/openai-compatible",
-        name: "IU unified endpoint (OpenAI route)",
-        options: {
-          baseURL: "{env:IU_OPENAI_BASE}",
-          apiKey: "{env:IU_KEY}",
-        },
-        models: {
-          [model]: {
-            name: "DeepSeek V4.1 Flash",
-            limit: {
-              context: DEEPSEEK_V41_FLASH_CONTEXT_LIMIT,
-              output: DEEPSEEK_V41_FLASH_OUTPUT_LIMIT,
-            },
-            cost: {
-              input: DEEPSEEK_V41_FLASH_RATE_INPUT_PER_MTOK,
-              output: DEEPSEEK_V41_FLASH_RATE_OUTPUT_PER_MTOK,
-              cache_read: DEEPSEEK_V41_FLASH_RATE_CACHE_READ_PER_MTOK,
-            },
-            options: { reasoningEffort: "high" },
-            variants: {
-              high: { reasoningEffort: "high" },
-              max: { reasoningEffort: "max" },
-              none: { reasoningEffort: "none" },
-            },
-          },
-        },
+        name: "IU unified endpoint (OpenAI route, Chat Completions)",
+        options: providerOptions,
+        models: entry.wire === "chat" ? { [model]: modelEntry } : {},
+      },
+      [OPENCODE_PROVIDER_RESPONSES]: {
+        npm: "@ai-sdk/openai",
+        name: "IU unified endpoint (OpenAI route, Responses)",
+        options: providerOptions,
+        models: entry.wire === "responses" ? { [model]: modelEntry } : {},
       },
     },
     permission: {
@@ -504,12 +506,16 @@ export function computeOpencodeCostUsd(
     OpencodeAccum,
     "inputTokens" | "outputTokens" | "reasoningTokens" | "cacheReadTokens"
   >,
+  model: string,
 ): number {
+  const { rate } = opencodeModel(model);
   const outputBilled = accum.outputTokens + accum.reasoningTokens;
+  // No registry cache rate → 0.1x input (never free) — same convention as models.ts.
+  const cacheRead = rate.cacheRead ?? rate.in * 0.1;
   return (
-    (accum.inputTokens / 1_000_000) * DEEPSEEK_V41_FLASH_RATE_INPUT_PER_MTOK +
-    (outputBilled / 1_000_000) * DEEPSEEK_V41_FLASH_RATE_OUTPUT_PER_MTOK +
-    (accum.cacheReadTokens / 1_000_000) * DEEPSEEK_V41_FLASH_RATE_CACHE_READ_PER_MTOK
+    (accum.inputTokens / 1_000_000) * rate.in +
+    (outputBilled / 1_000_000) * rate.out +
+    (accum.cacheReadTokens / 1_000_000) * cacheRead
   );
 }
 
@@ -763,23 +769,16 @@ export async function runOpencodeAttempt<T>(
     );
   }
 
-  // Defense in depth, mirrored at the routing-table level (routing.ts's buildRoutingTable
-  // cross-field validation) — this is the layer that actually matters, since it guards a
-  // hand-built route (or a future routing.ts bug) too, not just a bad env override. The
-  // rates/limits in buildOpencodeConfig are this ONE model's; applying them to a different
-  // model's usage would silently misprice/miscap it.
-  if (model !== DEEPSEEK_V41_FLASH) {
+  // Defense in depth, mirrored at the routing-table level (routing.ts validates every route
+  // against the registry) — this is the layer that guards a hand-built route too. Refuses an
+  // unregistered/non-opencode model, and a variant the model's registry `effort` does not
+  // list: opencode itself silently accepts an undeclared variant (falls back to the base
+  // `options`), which would mask a typo'd override as "ran, just not the effort asked for".
+  const registryModel = opencodeModel(model);
+  if (variant !== undefined && !registryModel.effort.includes(variant)) {
     throw new Error(
-      `runOpencodeAttempt: the opencode harness only supports ${DEEPSEEK_V41_FLASH} — got "${model}"`,
-    );
-  }
-  if (
-    variant !== undefined &&
-    !(OPENCODE_DECLARED_VARIANTS as readonly string[]).includes(variant)
-  ) {
-    throw new Error(
-      `runOpencodeAttempt: unknown opencode variant "${variant}" — declared variants are ` +
-        OPENCODE_DECLARED_VARIANTS.join(", "),
+      `runOpencodeAttempt: unknown opencode variant "${variant}" for ${model} — declared variants are ` +
+        (registryModel.effort.join(", ") || "none"),
     );
   }
 
@@ -903,7 +902,7 @@ export async function runOpencodeAttempt<T>(
   stderrTrimmed = redactSecret(stderrTrimmed, iuKey);
 
   const durationMs = Math.round(performance.now() - startMs);
-  const costUsd = computeOpencodeCostUsd(accum);
+  const costUsd = computeOpencodeCostUsd(accum, model);
   const costFields = {
     costUsd,
     inputTokens: accum.inputTokens,

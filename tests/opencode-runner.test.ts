@@ -18,7 +18,8 @@ import {
   dbLockRetryDelayMs,
   INITIAL_OPENCODE_ACCUM,
   isDbLockedFailure,
-  OPENCODE_DECLARED_VARIANTS,
+  OPENCODE_PROVIDER_CHAT,
+  OPENCODE_PROVIDER_RESPONSES,
   OPENCODE_PERMISSION_KEYS,
   redactSecret,
   reduceOpencodeEvent,
@@ -34,7 +35,7 @@ function readFixture(name: string): unknown[] {
 }
 
 describe("buildOpencodeArgs", () => {
-  test("bare invocation — dir, model-as-iu/<model>, format json, -- before the prompt", () => {
+  test("bare invocation — dir, model-as-iu-chat/<model>, format json, -- before the prompt", () => {
     const argv = buildOpencodeArgs({
       bin: "/opt/homebrew/bin/opencode",
       cwd: "/tmp/wt-vps",
@@ -47,12 +48,22 @@ describe("buildOpencodeArgs", () => {
       "--dir",
       "/tmp/wt-vps",
       "-m",
-      "iu/deepseek-v4.1-flash",
+      "iu-chat/deepseek-v4.1-flash",
       "--format",
       "json",
       "--",
       "investigate the thing",
     ]);
+  });
+
+  test("a responses-wire (GPT) model is prefixed with the iu-responses provider", () => {
+    const argv = buildOpencodeArgs({
+      bin: "opencode",
+      cwd: "/tmp/wt",
+      model: "gpt-6.1-sol",
+      prompt: "p",
+    });
+    expect(argv[argv.indexOf("-m") + 1]).toBe("iu-responses/gpt-6.1-sol");
   });
 
   test("a prompt that starts with a dash is still the message, not a flag — the -- guard", () => {
@@ -146,28 +157,72 @@ describe("buildOpencodeConfig", () => {
     }
   });
 
-  test("provider options reference the env-injected key/base, never a literal", () => {
+  test("emits both providers, each referencing the env-injected key/base, never a literal", () => {
     const cfg = buildOpencodeConfig({ model: "deepseek-v4.1-flash", readOnly: false });
-    const provider = (cfg.provider as Record<string, unknown>).iu as Record<string, unknown>;
-    expect(provider.options).toEqual({
-      baseURL: "{env:IU_OPENAI_BASE}",
-      apiKey: "{env:IU_KEY}",
+    const providers = cfg.provider as Record<string, Record<string, unknown>>;
+    expect(Object.keys(providers).toSorted()).toEqual(
+      [OPENCODE_PROVIDER_CHAT, OPENCODE_PROVIDER_RESPONSES].toSorted(),
+    );
+    for (const provider of Object.values(providers)) {
+      expect(provider.options).toEqual({
+        baseURL: "{env:IU_OPENAI_BASE}",
+        apiKey: "{env:IU_KEY}",
+      });
+    }
+    expect(providers[OPENCODE_PROVIDER_CHAT]?.npm).toBe("@ai-sdk/openai-compatible");
+    expect(providers[OPENCODE_PROVIDER_RESPONSES]?.npm).toBe("@ai-sdk/openai");
+  });
+
+  test("a chat-wire model lands under iu-chat only, generated from the registry (limits, cost, variants)", () => {
+    const cfg = buildOpencodeConfig({ model: "deepseek-v4.1-flash", readOnly: false });
+    const providers = cfg.provider as Record<string, Record<string, unknown>>;
+    expect(providers[OPENCODE_PROVIDER_RESPONSES]?.models).toEqual({});
+    const models = providers[OPENCODE_PROVIDER_CHAT]?.models as Record<string, unknown>;
+    expect(Object.keys(models)).toEqual(["deepseek-v4.1-flash"]);
+    expect(models["deepseek-v4.1-flash"]).toEqual({
+      name: "DeepSeek V4.1 Flash",
+      limit: { context: 850_000, output: 65_536 },
+      cost: { input: 0.15, output: 0.6, cache_read: 0.003 },
+      options: { reasoningEffort: "high" },
+      variants: {
+        high: { reasoningEffort: "high" },
+        max: { reasoningEffort: "max" },
+        none: { reasoningEffort: "none" },
+      },
     });
   });
 
-  test("declares high, max and none as named variants — matching every variant AGENT_OC/AGENT_OC_IMPLEMENT actually pass", () => {
-    const cfg = buildOpencodeConfig({ model: "deepseek-v4.1-flash", readOnly: false });
-    const provider = (cfg.provider as Record<string, unknown>).iu as Record<string, unknown>;
-    const models = provider.models as Record<string, unknown>;
-    const modelEntry = models["deepseek-v4.1-flash"] as Record<string, unknown>;
-    expect(modelEntry.cost).toEqual({ input: 0.15, output: 0.6, cache_read: 0.003 });
-    expect(modelEntry.variants).toEqual({
-      high: { reasoningEffort: "high" },
-      max: { reasoningEffort: "max" },
-      none: { reasoningEffort: "none" },
+  test("a responses-wire (GPT) model lands under iu-responses only", () => {
+    const cfg = buildOpencodeConfig({ model: "gpt-6.1-sol", readOnly: false });
+    const providers = cfg.provider as Record<string, Record<string, unknown>>;
+    expect(providers[OPENCODE_PROVIDER_CHAT]?.models).toEqual({});
+    const models = providers[OPENCODE_PROVIDER_RESPONSES]?.models as Record<string, unknown>;
+    expect(Object.keys(models)).toEqual(["gpt-6.1-sol"]);
+    expect((models["gpt-6.1-sol"] as Record<string, unknown>).cost).toEqual({
+      input: 2,
+      output: 10,
     });
-    expect(Object.keys(modelEntry.variants as object).toSorted()).toEqual(
-      [...OPENCODE_DECLARED_VARIANTS].toSorted(),
+    expect(Object.keys((models["gpt-6.1-sol"] as { variants: object }).variants)).toEqual([
+      "low",
+      "high",
+      "max",
+    ]);
+  });
+
+  test("a model with no effort levels gets no options/variants block", () => {
+    const cfg = buildOpencodeConfig({ model: "gemini-3.5-flash", readOnly: false });
+    const providers = cfg.provider as Record<string, Record<string, unknown>>;
+    const models = providers[OPENCODE_PROVIDER_CHAT]?.models as Record<string, object>;
+    expect(models["gemini-3.5-flash"]).not.toHaveProperty("variants");
+    expect(models["gemini-3.5-flash"]).not.toHaveProperty("options");
+  });
+
+  test("refuses an unregistered model and an Anthropic-wire (claude-harness-only) model", () => {
+    expect(() => buildOpencodeConfig({ model: "not-a-model", readOnly: false })).toThrow(
+      /unknown model/,
+    );
+    expect(() => buildOpencodeConfig({ model: "DeepSeek-V4-Flash", readOnly: false })).toThrow(
+      /not usable on the opencode harness/,
     );
   });
 });
@@ -302,24 +357,44 @@ describe("isDbLockedFailure / dbLockRetryDelayMs", () => {
 
 describe("computeOpencodeCostUsd", () => {
   test("input/output/reasoning/cache-read at the deepseek-v4.1-flash rates, reasoning billed as output", () => {
-    const cost = computeOpencodeCostUsd({
-      inputTokens: 1_000_000,
-      outputTokens: 500_000,
-      reasoningTokens: 500_000,
-      cacheReadTokens: 1_000_000,
-    });
+    const cost = computeOpencodeCostUsd(
+      {
+        inputTokens: 1_000_000,
+        outputTokens: 500_000,
+        reasoningTokens: 500_000,
+        cacheReadTokens: 1_000_000,
+      },
+      "deepseek-v4.1-flash",
+    );
     // 1M input @ $0.15 + 1M (output+reasoning) @ $0.60 + 1M cache-read @ $0.003
     expect(cost).toBeCloseTo(0.15 + 0.6 + 0.003, 6);
   });
 
+  test("uses the rates of the model in use; no registry cache rate bills cache reads at 0.1x input", () => {
+    const cost = computeOpencodeCostUsd(
+      {
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000,
+        reasoningTokens: 0,
+        cacheReadTokens: 1_000_000,
+      },
+      "gpt-6.1-sol",
+    );
+    // $2 input + $10 output + 1M cache-read @ 0.1 x $2
+    expect(cost).toBeCloseTo(2 + 10 + 0.2, 6);
+  });
+
   test("zero tokens cost zero", () => {
     expect(
-      computeOpencodeCostUsd({
-        inputTokens: 0,
-        outputTokens: 0,
-        reasoningTokens: 0,
-        cacheReadTokens: 0,
-      }),
+      computeOpencodeCostUsd(
+        {
+          inputTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+          cacheReadTokens: 0,
+        },
+        "deepseek-v4.1-flash",
+      ),
     ).toBe(0);
   });
 });
@@ -452,14 +527,19 @@ describe("reduceOpencodeEvent over real captured FAILING streams (B1)", () => {
 });
 
 describe("runOpencodeAttempt — model/variant guards (I3, before any spawn or IU config call)", () => {
-  test("refuses any model other than deepseek-v4.1-flash", async () => {
-    await expect(
-      runOpencodeAttempt(
-        { cwd: "/tmp", prompt: "p", route: routeFor("dispatch") },
-        { current: 0 },
-        { model: "DeepSeek-V4-Pro", backend: "iu" },
-      ),
-    ).rejects.toThrow(/only supports deepseek-v4\.1-flash/);
+  test("refuses a model the registry does not list for the opencode harness", async () => {
+    for (const [model, message] of [
+      ["DeepSeek-V4-Flash", /not usable on the opencode harness/],
+      ["not-a-model", /unknown model/],
+    ] as const) {
+      await expect(
+        runOpencodeAttempt(
+          { cwd: "/tmp", prompt: "p", route: routeFor("dispatch") },
+          { current: 0 },
+          { model, backend: "iu" },
+        ),
+      ).rejects.toThrow(message);
+    }
   });
 
   test("refuses an undeclared variant", async () => {
