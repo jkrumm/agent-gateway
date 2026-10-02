@@ -239,8 +239,8 @@ const VERDICT_FIELDS = {
 // What the WORKER is held to is tighter than what the handler may RETURN: the handler folds
 // `artifactNote` into `verdict`, and the salvage wrapper carries up to 3000 chars of raw
 // worker text, so the output-side `verdict`/`recommendation` caps (4000/2000) stay loose while
-// the worker's own are the terse ones below. Overlong worker text is truncated by
-// `normalizeWorkerOutput` BEFORE it is validated, so a cap never discards a finished episode.
+// the worker's own are the terse ones below. Overlong `summary`/`verdict`/`recommendation`/`rootCause`/`decisionQuestion` is
+// normalized by `normalizeWorkerOutput` BEFORE validation (evidence and artifact fields stay strict).
 const WORKER_VERDICT_FIELDS = {
   ...VERDICT_FIELDS,
   verdict: z
@@ -483,8 +483,6 @@ export function normalizeWorkerOutput(data: unknown): unknown {
     const q = clampText(out.decisionQuestion, DECISION_QUESTION_MAX);
     if (q && out.nextAction === "human") out.decisionQuestion = q;
     else delete out.decisionQuestion;
-  } else if (out.nextAction !== "human") {
-    delete out.decisionQuestion;
   }
   return out;
 }

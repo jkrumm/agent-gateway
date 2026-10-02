@@ -134,3 +134,9 @@ describe("parseJsonLoose", () => {
     expect(parseJsonLoose('{"a":1}')).toEqual({ a: 1 });
   });
 });
+
+describe("parseJsonLoose trailing prose", () => {
+  test("object at index 0 followed by commentary still parses", () => {
+    expect(parseJsonLoose('{"a":1}\n\nHope that helps!')).toEqual({ a: 1 });
+  });
+});

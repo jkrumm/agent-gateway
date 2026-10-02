@@ -49,7 +49,7 @@ export function parseJsonLoose(raw: string): unknown {
   // If there's still extraneous prose, slice from first { to last }
   const first = s.indexOf("{");
   const last = s.lastIndexOf("}");
-  if (first > 0 && last > first) s = s.slice(first, last + 1);
+  if (first >= 0 && last > first) s = s.slice(first, last + 1);
   try {
     return JSON.parse(s);
   } catch {

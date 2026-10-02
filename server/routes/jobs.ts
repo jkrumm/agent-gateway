@@ -40,17 +40,18 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
             return { ok: false as const, error: `dispatch refused: ${decision.reason}` };
           }
         }
-        // A per-job `model` that `withModel` would silently ignore (unknown / unverified id)
-        // means the episode runs on the route's default while the caller believes otherwise —
-        // refuse loudly here instead. Non-string values fall through to the handler's zod.
-        const model = "model" in params ? params.model : undefined;
-        if (typeof model === "string" && !validateModel(model).ok) {
-          set.status = 400;
-          return {
-            ok: false as const,
-            error: `dispatch refused: model ${model} is not a verified registry model`,
-          };
-        }
+      }
+      // A per-job `model` that `withModel` would silently ignore (unknown / unverified id)
+      // means the episode runs on the route's default while the caller believes otherwise —
+      // refuse loudly here instead, for every tool that takes one (dispatch, review, overview,
+      // narrative). Non-string values fall through to the handler's zod.
+      const model = body.params?.model;
+      if (typeof model === "string" && !validateModel(model).ok) {
+        set.status = 400;
+        return {
+          ok: false as const,
+          error: `${body.tool} refused: model ${model} is not a verified registry model`,
+        };
       }
       const job = createJob(body.tool, body.params ?? {});
       return { ok: true as const, job };

@@ -73,7 +73,7 @@ describe("dispatch `model` refusal", () => {
 
   test("other tools are untouched, and triage is a known tool", async () => {
     expect(
-      (await post({ tool: "check", params: { cwd: repo, model: "no-such-model" } })).status,
+      (await post({ tool: "check", params: { cwd: repo } })).status,
     ).toBe(200);
     const triage = await post({
       tool: "triage",
@@ -85,5 +85,16 @@ describe("dispatch `model` refusal", () => {
 
   test("cleanup", () => {
     rmSync(repo, { recursive: true, force: true });
+  });
+});
+
+describe("`model` refusal beyond dispatch", () => {
+  test("review with an unknown model is refused too", async () => {
+    const { status, body } = await post({
+      tool: "review",
+      params: { cwd: "/tmp/x", model: "no-such-model" },
+    });
+    expect(status).toBe(400);
+    expect(body.error).toBe("review refused: model no-such-model is not a verified registry model");
   });
 });

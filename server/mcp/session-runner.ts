@@ -1054,7 +1054,9 @@ export function isIuNeverAnswered(text: string): boolean {
 /** HTTP statuses the IU gateway/API uses for "the server failed, the request itself was
  *  fine" — the closed set a post-output fallback may act on. */
 const SERVER_ERROR_STATUSES = new Set([500, 502, 503, 504, 529]);
-const SERVER_ERROR_TEXT_RE = /\b(500|502|503|504|529)\b/;
+// Anchored to a status-shaped prefix — a bare number ("took 500 ms") must not switch lanes.
+const SERVER_ERROR_TEXT_RE =
+  /(?:\b(?:IU|API|HTTP)(?: Error)?:?\s*|api_error_status=|\bstatus(?: code)?[ :=]\s*)(?:500|502|503|504|529)\b/i;
 
 /** Does this attempt's TRANSPORT-sourced evidence say the gateway/API failed server-side
  *  (5xx or a connection-level error) rather than refusing or rejecting the request? Pure.
