@@ -76,14 +76,16 @@ Return ONLY a JSON object with this exact structure (no explanation, no markdown
 JSON):
 
 {
-"verdict": "<2-5 sentences: what you changed and why, or why you changed nothing>",
+"verdict": "<at most 600 chars, 2-4 sentences: what you changed and why, or why you changed nothing>",
 "confidence": "high" | "medium" | "low",
 "evidence": [
 { "file": "<repo-relative path, or a command like 'bun test'>", "detail": "<what this showed, one sentence>" }
 ],
-"recommendation": "<what the reviewer should look at first, or the next step if you changed nothing>",
+"recommendation": "<at most 400 chars; what the reviewer should look at first, or the next step if you changed nothing>",
 "nextAction": "none" | "issue" | "implement" | "human",
-"summary": "<one line, under 200 chars — this is what gets posted to Slack>",
+"summary": "<one sentence, under 200 chars — this is what gets posted to Slack>",
+"rootCause": "<stable kebab-case key, at most 80 chars, e.g. stale-lockfile-after-rename>",
+"decisionQuestion": "<ONLY when nextAction is human: one question naming two options, under 200 chars — otherwise omit this field>",
 "prTitle": "<conventional-commit subject, or \"\" if you changed nothing>",
 "prBody": "<the PR body in markdown, or \"\" if you changed nothing>"
 }

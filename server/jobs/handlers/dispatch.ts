@@ -167,6 +167,35 @@ export type { DispatchTier } from "../../lib/dispatch-policy.ts";
 // a `summary` nobody can render. `z.strictObject` rejects extra keys; the enums reject
 // invented confidence/routing values; the length caps reject an essay in `summary`.
 
+const SUMMARY_MAX = 200;
+const VERDICT_MAX = 600;
+const RECOMMENDATION_MAX = 400;
+const ROOT_CAUSE_MAX = 80;
+const DECISION_QUESTION_MAX = 200;
+const ROOT_CAUSE_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+const ROOT_CAUSE_FIELD = z
+  .string()
+  .max(ROOT_CAUSE_MAX)
+  .regex(ROOT_CAUSE_RE)
+  .optional()
+  .describe(
+    `Stable kebab-case key (lowercase a-z, 0-9, single hyphens, at most ${ROOT_CAUSE_MAX} chars) ` +
+      "naming the underlying cause, e.g. stale-lockfile-after-rename. The same cause must " +
+      "always get the same key — name the mechanism, not the symptom, and never include " +
+      "ids, dates, paths or numbers.",
+  );
+
+const DECISION_QUESTION_FIELD = z
+  .string()
+  .min(1)
+  .max(DECISION_QUESTION_MAX)
+  .optional()
+  .describe(
+    `ONLY when nextAction is "human": one concrete question naming two options, at most ` +
+      `${DECISION_QUESTION_MAX} chars. Omit it for every other nextAction.`,
+  );
+
 const VERDICT_FIELDS = {
   verdict: z
     .string()
@@ -198,8 +227,36 @@ const VERDICT_FIELDS = {
   summary: z
     .string()
     .min(1)
-    .max(200)
+    .max(SUMMARY_MAX)
     .describe("One line for Slack. Hard-capped — this is a notification, not a report."),
+  // Additive and OPTIONAL at the schema level: results persisted before these fields existed,
+  // the handler's own salvage/withheld wrappers and any consumer pinned to schemaVersion 3
+  // must keep validating. Optional-ness is the compat decision; the prompt demands them.
+  rootCause: ROOT_CAUSE_FIELD,
+  decisionQuestion: DECISION_QUESTION_FIELD,
+};
+
+// What the WORKER is held to is tighter than what the handler may RETURN: the handler folds
+// `artifactNote` into `verdict`, and the salvage wrapper carries up to 3000 chars of raw
+// worker text, so the output-side `verdict`/`recommendation` caps (4000/2000) stay loose while
+// the worker's own are the terse ones below. Overlong worker text is truncated by
+// `normalizeWorkerOutput` BEFORE it is validated, so a cap never discards a finished episode.
+const WORKER_VERDICT_FIELDS = {
+  ...VERDICT_FIELDS,
+  verdict: z
+    .string()
+    .min(1)
+    .max(VERDICT_MAX)
+    .describe(
+      `What is going on and why the episode believes it. At most ${VERDICT_MAX} characters, 2-4 terse sentences.`,
+    ),
+  recommendation: z
+    .string()
+    .min(1)
+    .max(RECOMMENDATION_MAX)
+    .describe(
+      `The single most useful next step, concrete and actionable. At most ${RECOMMENDATION_MAX} characters.`,
+    ),
 };
 
 // Artifact text the WORKER authors but does NOT publish. Empty strings are legitimate and
@@ -353,11 +410,91 @@ export type DispatchOutput = z.infer<typeof DISPATCH_OUTPUT>;
 // a field the worker can write is not a marker — it is a suggestion. Leaving `degraded` in
 // the --json-schema also advertised its meaning, which is an invitation to a thin answer to
 // flag itself as a tool failure (or an injected brief to disguise a real one).
+//
+// `decisionQuestion` is gated on `nextAction`: the contract says it exists ONLY for `human`,
+// so a worker schema rejects it on any other action (the normalizer below strips it first, so
+// a stray one never costs an episode). "Required when human" is deliberately NOT a validation
+// failure — a human verdict without a question (an injection finding, an unreadable repo) is
+// still a finished episode, and failing it would burn a retry and end in a degraded salvage;
+// the prompt demands the question and `runDispatch` logs its absence instead.
+const gateDecisionQuestion = <T extends { nextAction: string; decisionQuestion?: string }>(
+  v: T,
+  ctx: z.RefinementCtx,
+): void => {
+  if (v.decisionQuestion === undefined || v.nextAction === "human") return;
+  ctx.addIssue({
+    code: "custom",
+    path: ["decisionQuestion"],
+    message: 'decisionQuestion is only allowed when nextAction is "human"',
+  });
+};
+
 export const WORKER_OUTPUT = {
-  investigate: z.strictObject(VERDICT_FIELDS),
-  author: z.strictObject({ ...VERDICT_FIELDS, ...ISSUE_FIELDS }),
-  implement: z.strictObject({ ...VERDICT_FIELDS, ...PR_FIELDS }),
+  investigate: z.strictObject(WORKER_VERDICT_FIELDS).superRefine(gateDecisionQuestion),
+  author: z
+    .strictObject({ ...WORKER_VERDICT_FIELDS, ...ISSUE_FIELDS })
+    .superRefine(gateDecisionQuestion),
+  implement: z
+    .strictObject({ ...WORKER_VERDICT_FIELDS, ...PR_FIELDS })
+    .superRefine(gateDecisionQuestion),
 } as const satisfies Record<DispatchTier, z.ZodType>;
+
+/** Truncate to `max` characters total, ending in an ellipsis. */
+function clampText(text: string, max: number): string {
+  const t = text.trim();
+  return t.length <= max ? t : `${t.slice(0, max - 1).trimEnd()}…`;
+}
+
+/** Coerce an arbitrary string into the `rootCause` key shape; "" when nothing usable is left. */
+function normalizeRootCause(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, ROOT_CAUSE_MAX)
+    .replace(/-+$/g, "");
+}
+
+/**
+ * Lenient pre-validation pass over the worker's raw object. The caps live in WORKER_OUTPUT
+ * (that is what the worker is shown via --json-schema), but a finished episode must never be
+ * thrown away for being wordy: overlong text is truncated with an ellipsis, a `rootCause`
+ * that is not quite kebab-case is coerced (or dropped when nothing usable remains), and a
+ * `decisionQuestion` that is empty or accompanies a non-human `nextAction` is dropped.
+ * Anything that is not a plain object, and every field it does not own, passes through
+ * untouched so the strict schema still judges the shape.
+ */
+export function normalizeWorkerOutput(data: unknown): unknown {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return data;
+  const out: Record<string, unknown> = { ...data };
+  for (const [key, max] of [
+    ["summary", SUMMARY_MAX],
+    ["verdict", VERDICT_MAX],
+    ["recommendation", RECOMMENDATION_MAX],
+  ] as const) {
+    if (typeof out[key] === "string") out[key] = clampText(out[key], max);
+  }
+  if (typeof out.rootCause === "string") {
+    const key = normalizeRootCause(out.rootCause);
+    if (key) out.rootCause = key;
+    else delete out.rootCause;
+  }
+  if (typeof out.decisionQuestion === "string") {
+    const q = clampText(out.decisionQuestion, DECISION_QUESTION_MAX);
+    if (q && out.nextAction === "human") out.decisionQuestion = q;
+    else delete out.decisionQuestion;
+  } else if (out.nextAction !== "human") {
+    delete out.decisionQuestion;
+  }
+  return out;
+}
+
+/** `SessionOptions.validate` for a tier: normalize leniently, then hold the result to the
+ *  strict worker schema. */
+export function workerValidator(tier: DispatchTier) {
+  const validate = zodValidator(WORKER_OUTPUT[tier]);
+  return (data: unknown) => validate(normalizeWorkerOutput(data));
+}
 
 // ── Per-tier session profile ──────────────────────────────────────────────────
 
@@ -409,8 +546,9 @@ left to do, rather than starting over or duplicating work already present.
 
 Your entire final message must be a single JSON object (optionally wrapped in one
 \`\`\`json fence) — no preamble such as "Here's what I found", no markdown headings, no
-commentary before or after, and never a tool call. Every field is required, \`summary\` must
-be under 200 characters, and \`confidence\` / \`nextAction\` must be one of the listed values
+commentary before or after, and never a tool call. Include \`rootCause\` (a kebab-case key),
+and \`decisionQuestion\` only when \`nextAction\` is \`human\`. \`summary\` must be under 200 characters, \`verdict\` under 600
+and \`recommendation\` under 400, and \`confidence\` / \`nextAction\` must be one of the listed values
 exactly. If your reduced budget only supports a partial answer, say so in \`verdict\` and set
 \`confidence: "low"\` — an honest thin verdict is correct, a fabricated thorough one is not.`;
 
@@ -719,6 +857,8 @@ function sensitiveScanText(output: DispatchOutput): string {
     output.summary,
     output.verdict,
     output.recommendation,
+    ...(output.rootCause ? [output.rootCause] : []),
+    ...(output.decisionQuestion ? [output.decisionQuestion] : []),
     ...output.evidence.flatMap((e) => [e.file, e.detail]),
   ]
     .filter((s) => s.length > 0)
@@ -753,6 +893,8 @@ function verdictMarkdown(output: DispatchOutput, jobId: string, hits: string[]):
     "## Next action",
     output.nextAction,
     "",
+    ...(output.rootCause ? ["## Root cause", output.rootCause, ""] : []),
+    ...(output.decisionQuestion ? ["## Decision question", output.decisionQuestion, ""] : []),
   ].join("\n");
 }
 
@@ -793,8 +935,10 @@ export function applySensitiveScan(
   const notice =
     `Verdict withheld: matched ${hits.join(", ")}. The full, unmodified text was saved ` +
     `locally at ${path} (owner-only, mode 0600) — it never left this machine.`;
+  // The new free-text fields carry the same unscanned worker text, so they are dropped, not kept.
+  const { rootCause: _rootCause, decisionQuestion: _decisionQuestion, ...rest } = output;
   return {
-    ...output,
+    ...rest,
     summary: excerpt(notice, 200),
     verdict: excerpt(notice, 4000),
     recommendation: excerpt(`Review the withheld file directly: ${path}`, 2000),
@@ -1077,7 +1221,7 @@ export async function runDispatch(
         // secrets cache, so any process running as this user can push — and a read-only
         // session still has Bash. See GIT_DENY_CREDENTIALS_ENV for the full argument.
         extraEnv: GIT_DENY_CREDENTIALS_ENV,
-        validate: zodValidator(WORKER_OUTPUT[tier]),
+        validate: workerValidator(tier),
         onActivity: relayProgress,
         onSessionId: resumeCtx?.onSessionId,
       });
@@ -1153,6 +1297,17 @@ export async function runDispatch(
     }
 
     const data = result.data;
+    if (data.nextAction === "human" && !data.decisionQuestion) {
+      logger.warn(
+        {
+          event: "dispatch.human_without_question",
+          tool: "dispatch",
+          project: cwd,
+          tier,
+        },
+        "worker returned nextAction human without a decisionQuestion",
+      );
+    }
     let artifactUrl: string | undefined;
     let branch: string | undefined;
     let changedFiles: string[] | undefined;

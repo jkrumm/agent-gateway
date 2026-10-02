@@ -37,12 +37,14 @@ Return ONLY a JSON object with this exact structure (no explanation, no markdown
 JSON):
 
 {
-"verdict": "<2-5 sentences: what is actually going on, and why you believe it>",
+"verdict": "<at most 600 chars, 2-4 sentences: what is actually going on, and why you believe it>",
 "confidence": "high" | "medium" | "low",
 "evidence": [
 { "file": "<repo-relative path, or a command like 'git log --oneline -5'>", "detail": "<what this showed, one sentence>" }
 ],
-"recommendation": "<the single most useful next step, concrete and actionable>",
+"recommendation": "<at most 400 chars; the single most useful next step, concrete and actionable>",
 "nextAction": "none" | "issue" | "implement" | "human",
-"summary": "<one line, under 200 chars — this is what gets posted to Slack>"
+"summary": "<one sentence, under 200 chars — this is what gets posted to Slack>",
+"rootCause": "<stable kebab-case key, at most 80 chars, e.g. stale-lockfile-after-rename>",
+"decisionQuestion": "<ONLY when nextAction is human: one question naming two options, under 200 chars — otherwise omit this field>"
 }

@@ -89,6 +89,7 @@ what tier you are running:
 - Cite what you actually looked at in `evidence`. An entry whose `file` you did not open is
   a fabrication — omit it instead.
 - Do not pad. `verdict` is prose for a human reading it on their phone.
+- Be terse — see "Terse output" below. Overlong fields are truncated mid-sentence.
 
 ## Output
 
@@ -106,3 +107,24 @@ result envelope empty and the whole run has to be repeated.
 
 `evidence` may be empty only if you genuinely inspected nothing — which should itself be
 rare and should push `confidence` to `low`.
+
+## Terse output
+
+Every text field is read on a phone and matched by a machine. Hard limits:
+
+- `summary` — **one sentence**, at most 200 characters. A notification, not a report.
+- `verdict` — at most **600 characters**. Findings and the reason you believe them, no narration of
+  how you searched.
+- `recommendation` — at most **400 characters**. One concrete next step.
+- `rootCause` — a stable **kebab-case key**, at most 80 characters, matching
+  `^[a-z0-9]+(-[a-z0-9]+)*$`, e.g. `stale-lockfile-after-rename`. It names the underlying
+  mechanism, not the symptom, so the **same cause always gets the same key** across episodes: no
+  ids, dates, hashes, paths, hostnames or numbers, no tool names unless the tool is the cause.
+  Reuse the key the brief gives you if it names one. Unknown cause: `unknown-<area>`, e.g.
+  `unknown-deploy-timeout`.
+- `decisionQuestion` — include it **only when `nextAction` is `human`**, and then always: at most
+  200 characters, one concrete question that names exactly two options, e.g. "Drop the legacy
+  `/v1` route now (breaks the mobile app), or keep it until the app ships?". Omit the field
+  entirely for every other `nextAction`. `human` is for product decisions, irreversible data
+  operations, spend and anything touching another person — not for missing permissions, a red
+  CI run or low confidence.
