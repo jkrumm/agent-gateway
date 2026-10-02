@@ -27,7 +27,7 @@ angles off Max where measured equal, and no model id outside `GET /api/routing`.
 - Open review items not done: `buildRoutingTable` override-validation duplication + stale "accepted" entry when model+harness overrides conflict (routing.ts ~547); `getModel(...) as ModelEntry` repeated; opencode default effort hardcoded `"high"`; fallow clones between opencode-runner/session-runner and unused exports; test gaps (triage over-limit inputs, `dispatch.human_without_question` e2e, `addUsage` null cost).
 - Intermediate commits d6f507b/062b646/3ebe193 may not typecheck alone (registry↔routing coupling); HEAD is green (1033 tests, lint 0 errors, oxfmt clean).
 
-## Wave 2 — dispatch git safety            <!-- status: pending -->
+## Wave 2 — dispatch git safety            <!-- status: active -->
 - [x] Read tiers fetch `origin/<default>` and cut from it, not the live checkout HEAD (landed 12fa41b).
 - [ ] `revisionOf: <branch>` parameter on implement: the handler (which has credentials) fetches the prior branch and cuts the worktree from it; the worker never fetches. Same PR is updated (push to the same `dispatch/*` branch with `--force-with-lease`), no new PR per revision.
 - [ ] Before push: fetch, rebase onto the latest default branch, re-run the repo checks; a conflict fails the job with `conflict` (caller re-dispatches) — never hand-resolved by the worker.
