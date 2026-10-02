@@ -125,7 +125,7 @@ latched so the fallback attempt itself is never switched again:
   the Requesty hop for every gateway id alike, so the only lever that reaches
   one on the `claude` harness is `MAX_THINKING_TOKENS` (the CLI's env var for
   Anthropic's `thinking.budget_tokens`), exported by `buildWorkerEnv` for any
-  non-Claude route. CLASSIFY (check/overview/review_router, DeepSeek-V4-Flash
+  non-Claude route. CLASSIFY (check/overview, DeepSeek-V4-Flash
   since 2026-09-23 — GLM is retired from every route) runs at 2048; JUDGE/
   PROSE stay on Claude and carry no `thinkingTokens`. `dispatch`/
   `dispatch_implement` carry none either — AGENT/AGENT_IMPLEMENT (this

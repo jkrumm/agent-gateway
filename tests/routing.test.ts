@@ -38,8 +38,8 @@ describe("buildRoutingTable defaults", () => {
     expect(overrides).toEqual([]);
   });
 
-  test("check, overview, review's router: DeepSeek-V4-Flash on iu, Haiku on max as the reverse lane (the CLASSIFY tier), thinking capped at 2048", () => {
-    for (const tool of ["check", "overview", "review_router"] as const) {
+  test("check, overview: DeepSeek-V4-Flash on iu, Haiku on max as the reverse lane (the CLASSIFY tier), thinking capped at 2048", () => {
+    for (const tool of ["check", "overview"] as const) {
       expect(routes[tool]).toEqual({
         model: DEEPSEEK_FLASH,
         backend: "iu",
@@ -111,6 +111,19 @@ describe("buildRoutingTable defaults", () => {
     });
   });
 
+  test("triage, review_router: deepseek-v4.1-flash on iu, no fallback, over the fixed iu-openai transport (the SINGLE_SHOT tier, no worker session)", () => {
+    for (const tool of ["triage", "review_router"] as const) {
+      expect(routes[tool]).toEqual({
+        model: DEEPSEEK_V41_FLASH,
+        backend: "iu",
+        fallback: null,
+        transport: "iu-openai",
+        harness: "claude",
+        variant: undefined,
+      });
+    }
+  });
+
   test("adversary stays gpt-5.6-terra on iu, no fallback, over the fixed iu-openai transport", () => {
     expect(routes.adversary).toEqual({
       model: "gpt-5.6-terra",
@@ -178,6 +191,8 @@ describe("buildRoutingTable env overrides", () => {
   test("a backend override on a fixed iu-openai transport tool is refused, whatever the value", () => {
     for (const [envKey, tool] of [
       ["SIDECLAW_BACKEND_ADVERSARY", "adversary"],
+      ["SIDECLAW_BACKEND_TRIAGE", "triage"],
+      ["SIDECLAW_BACKEND_REVIEW_ROUTER", "review_router"],
       ["SIDECLAW_BACKEND_READ_IMAGE", "read_image"],
       ["SIDECLAW_BACKEND_READ_DRAWING", "read_drawing"],
     ] as const) {
@@ -213,6 +228,16 @@ describe("buildRoutingTable env overrides", () => {
     expect(overrides).toEqual([{ tool: "review_ocr", field: "model", value: HAIKU }]);
   });
 
+  test("SIDECLAW_MODEL_TRIAGE: a verified id replaces the model, an unverified registry id is refused", () => {
+    const ok = buildRoutingTable({ SIDECLAW_MODEL_TRIAGE: HAIKU });
+    expect(ok.routes.triage.model).toBe(HAIKU);
+    expect(ok.overrides).toEqual([{ tool: "triage", field: "model", value: HAIKU }]);
+
+    const refused = buildRoutingTable({ SIDECLAW_MODEL_TRIAGE: "DeepSeek-V4-Pro" });
+    expect(refused.routes.triage.model).toBe(DEEPSEEK_V41_FLASH);
+    expect(refused.overrides[0]?.refused).toContain("unverified");
+  });
+
   test("a thinking-token override on review_ocr (fixed external-iu transport) is refused, whatever the value", () => {
     const { routes, overrides } = buildRoutingTable({
       SIDECLAW_THINKING_TOKENS_REVIEW_OCR: "4096",
@@ -229,23 +254,23 @@ describe("buildRoutingTable env overrides", () => {
   });
 
   test("a gateway model override on a max route forces iu and keeps a fixed-model fallback only", () => {
-    const { routes, overrides } = buildRoutingTable({ SIDECLAW_MODEL_REVIEW: "glm-5.3-flash" });
+    const { routes, overrides } = buildRoutingTable({ SIDECLAW_MODEL_REVIEW: DEEPSEEK_FLASH });
     expect(routes.review.backend).toBe("iu");
     // The backend flip is the override's most consequential side effect (metered IU instead
     // of Max), so /api/routing lists it next to the model override that caused it.
     expect(overrides).toEqual([
-      { tool: "review", field: "model", value: "glm-5.3-flash" },
+      { tool: "review", field: "model", value: DEEPSEEK_FLASH },
       {
         tool: "review",
         field: "backend",
         value: "iu",
-        implied: expect.stringContaining("forced by the glm-5.3-flash model override"),
+        implied: expect.stringContaining(`forced by the ${DEEPSEEK_FLASH} model override`),
       },
     ]);
     // review's declared fallback is same-model onto iu; with iu now primary there is
     // nowhere Max-servable to go.
     expect(routes.review.fallback).toBeNull();
-    const narrative = buildRoutingTable({ SIDECLAW_MODEL_NARRATIVE: "glm-5.3-flash" }).routes
+    const narrative = buildRoutingTable({ SIDECLAW_MODEL_NARRATIVE: DEEPSEEK_FLASH }).routes
       .narrative;
     expect(narrative.fallback).toBeNull();
   });
@@ -256,7 +281,78 @@ describe("buildRoutingTable env overrides", () => {
     expect(overrides).toEqual([]);
   });
 
-  test("no route runs on GLM any more — retired 2026-09-23, the id stays only for an env override", () => {
+  test("an unregistered model override is refused, default stays", () => {
+    const { routes, overrides } = buildRoutingTable({ SIDECLAW_MODEL_CHECK: "not-a-model" });
+    expect(routes.check.model).toBe(DEEPSEEK_FLASH);
+    expect(overrides).toEqual([
+      {
+        tool: "check",
+        field: "model",
+        value: "not-a-model",
+        refused: expect.stringContaining("unknown model"),
+      },
+    ]);
+  });
+
+  test("a registered but UNVERIFIED model override is refused, default stays", () => {
+    for (const id of [GLM_FLASH, "DeepSeek-V4-Pro", "gpt-6-sol"]) {
+      const { routes, overrides } = buildRoutingTable({ SIDECLAW_MODEL_DISPATCH: id });
+      expect(routes.dispatch.model).toBe(DEEPSEEK_V41_FLASH);
+      expect(routes.dispatch.harness).toBe("opencode");
+      expect(overrides).toEqual([
+        {
+          tool: "dispatch",
+          field: "model",
+          value: id,
+          refused: expect.stringContaining("unverified"),
+        },
+      ]);
+    }
+  });
+
+  test("a verified Responses-wire (GPT) id is accepted on dispatch and keeps the opencode harness", () => {
+    const { routes, overrides } = buildRoutingTable({ SIDECLAW_MODEL_DISPATCH: "gpt-6.1-sol" });
+    expect(routes.dispatch.model).toBe("gpt-6.1-sol");
+    expect(routes.dispatch.harness).toBe("opencode");
+    expect(routes.dispatch.variant).toBe("high");
+    expect(overrides).toEqual([{ tool: "dispatch", field: "model", value: "gpt-6.1-sol" }]);
+  });
+
+  test("a GPT id on a claude-harness tool is refused — Responses-only ids have no claude -p path", () => {
+    const { routes, overrides } = buildRoutingTable({ SIDECLAW_MODEL_CHECK: "gpt-6.1-sol" });
+    expect(routes.check.model).toBe(DEEPSEEK_FLASH);
+    expect(routes.check.harness).toBe("claude");
+    expect(overrides).toEqual([
+      {
+        tool: "check",
+        field: "model",
+        value: "gpt-6.1-sol",
+        refused: expect.stringContaining("reachable only via the opencode harness"),
+      },
+    ]);
+  });
+
+  test("a model override without the route's variant drops it, reported as implied", () => {
+    const { routes, overrides } = buildRoutingTable({
+      SIDECLAW_MODEL_DISPATCH: "gemini-3.5-flash",
+    });
+    expect(routes.dispatch.model).toBe("gemini-3.5-flash");
+    expect(routes.dispatch.variant).toBeUndefined();
+    expect(overrides).toContainEqual({
+      tool: "dispatch",
+      field: "variant",
+      value: "high",
+      implied: expect.stringContaining("exposes no"),
+    });
+  });
+
+  test("a variant the model does not expose is refused", () => {
+    const { routes, overrides } = buildRoutingTable({ SIDECLAW_VARIANT_DISPATCH: "ultra" });
+    expect(routes.dispatch.variant).toBe("high");
+    expect(overrides[0]?.refused).toContain("exposes no");
+  });
+
+  test("no route runs on GLM any more — retired 2026-09-23, the id stays only as an (unverified, hence refused) registry entry", () => {
     const { routes } = buildRoutingTable({});
     for (const route of Object.values(routes)) {
       expect(route.model).not.toBe(GLM_FLASH);
@@ -294,6 +390,8 @@ describe("buildRoutingTable env overrides", () => {
   test("a thinking-token override on a fixed iu-openai transport tool is refused, whatever the value", () => {
     for (const [envKey, tool] of [
       ["SIDECLAW_THINKING_TOKENS_ADVERSARY", "adversary"],
+      ["SIDECLAW_THINKING_TOKENS_TRIAGE", "triage"],
+      ["SIDECLAW_THINKING_TOKENS_REVIEW_ROUTER", "review_router"],
       ["SIDECLAW_THINKING_TOKENS_READ_IMAGE", "read_image"],
       ["SIDECLAW_THINKING_TOKENS_READ_DRAWING", "read_drawing"],
     ] as const) {
@@ -364,7 +462,7 @@ describe("buildRoutingTable env overrides", () => {
         tool: "dispatch",
         field: "harness",
         value: "claude",
-        implied: expect.stringContaining("a Claude id can only run on the claude harness"),
+        implied: expect.stringContaining("it can only run on the claude harness"),
       },
     ]);
   });
@@ -378,6 +476,7 @@ describe("buildRoutingTable env overrides", () => {
   test("a harness override on a fixed iu-openai/external-iu transport tool is refused, whatever the value", () => {
     for (const [envKey, tool] of [
       ["SIDECLAW_HARNESS_ADVERSARY", "adversary"],
+      ["SIDECLAW_HARNESS_TRIAGE", "triage"],
       ["SIDECLAW_HARNESS_REVIEW_OCR", "review_ocr"],
     ] as const) {
       const { routes, overrides } = buildRoutingTable({ [envKey]: "opencode" });
@@ -451,9 +550,9 @@ describe("withModel", () => {
   });
 
   test("a Claude override on a max route keeps max and the iu fallback", () => {
-    const r = withModel(routeFor("review"), "claude-opus-5[1m]");
+    const r = withModel(routeFor("review"), "claude-sonnet-5");
     expect(r).toEqual({
-      model: "claude-opus-5[1m]",
+      model: "claude-sonnet-5",
       backend: "max",
       fallback: { backend: "iu" },
       transport: "session",
@@ -482,22 +581,43 @@ describe("withModel", () => {
     expect(r.variant).toBeUndefined();
   });
 
-  test("withModel(non-claude id) keeps the route's own harness", () => {
-    const r = withModel(routeFor("dispatch"), "some-other-gateway-model");
+  test("withModel(opencode-capable verified id) keeps the route's own harness and a variant the model exposes", () => {
+    const r = withModel(routeFor("dispatch"), "gpt-6.1-sol");
     expect(r.harness).toBe("opencode");
     expect(r.variant).toBe("high");
   });
 
+  test("withModel drops a variant the new model does not expose", () => {
+    const r = withModel(routeFor("dispatch"), "gemini-3.5-flash");
+    expect(r.harness).toBe("opencode");
+    expect(r.variant).toBeUndefined();
+  });
+
+  test("withModel(claude-capable gateway id) on an opencode route forces harness claude", () => {
+    const r = withModel(routeFor("dispatch"), DEEPSEEK_FLASH);
+    expect(r.harness).toBe("claude");
+    expect(r.variant).toBeUndefined();
+  });
+
+  test("withModel refuses (returns the route unchanged) an unknown, unverified or harness-incompatible id", () => {
+    const check = routeFor("check");
+    const dispatch = routeFor("dispatch");
+    expect(withModel(check, "not-a-model")).toBe(check);
+    expect(withModel(check, "DeepSeek-V4-Pro")).toBe(check); // registered, unverified
+    expect(withModel(check, "gpt-6.1-sol")).toBe(check); // verified but opencode-only, check is claude
+    expect(withModel(dispatch, GLM_FLASH)).toBe(dispatch);
+  });
+
   test("a gateway override on a max route is forced onto iu with no Max-servable fallback", () => {
-    const r = withModel(routeFor("review"), "some-gateway-model");
+    const r = withModel(routeFor("review"), DEEPSEEK_FLASH);
     expect(r.backend).toBe("iu");
     expect(r.fallback).toBeNull();
   });
 
-  test("a gateway override on check keeps the fixed Haiku fallback", () => {
-    const r = withModel(routeFor("check"), "some-gateway-model");
+  test("a gateway override keeps a fixed Haiku fallback as declared", () => {
+    const r = withModel({ ...routeFor("check"), model: SONNET }, DEEPSEEK_FLASH);
     expect(r).toEqual({
-      model: "some-gateway-model",
+      model: DEEPSEEK_FLASH,
       backend: "iu",
       fallback: { backend: "max", model: HAIKU },
       transport: "session",
@@ -508,7 +628,7 @@ describe("withModel", () => {
   });
 
   test("transport is preserved across a model override", () => {
-    const r = withModel(routeFor("adversary"), "gpt-6-terra");
+    const r = withModel(routeFor("adversary"), "gemini-3.5-flash");
     expect(r.transport).toBe("iu-openai");
   });
 });

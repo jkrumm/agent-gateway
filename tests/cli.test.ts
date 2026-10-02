@@ -3,7 +3,7 @@
 // pure JSON — all against exported pure functions plus one mocked-fetch round trip, so no
 // test spawns a server.
 
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test, afterAll } from "bun:test";
@@ -14,6 +14,7 @@ import {
   renderCheckResult,
   renderVerdictResult,
   requestBody,
+  triageRequestBody,
   resolveContext,
   resolveRepoSpec,
   run,
@@ -621,6 +622,20 @@ describe("human-readable rendering", () => {
     expect(text).toContain("recommendation: next step");
   });
 
+  test("renderVerdictResult prints rootCause and decisionQuestion when present", () => {
+    const text = renderVerdictResult({
+      ...VERDICT,
+      confidence: "high" as const,
+      nextAction: "human" as const,
+      outcome: "verdict_only" as const,
+      schemaVersion: 3 as const,
+      rootCause: "stale-lockfile-after-rename",
+      decisionQuestion: "Drop the column or keep it? A: drop. B: keep.",
+    });
+    expect(text).toContain("rootCause: stale-lockfile-after-rename");
+    expect(text).toContain("decisionQuestion: Drop the column or keep it?");
+  });
+
   test("renderCheckResult renders a check result", () => {
     const checkResult = {
       passed: false,
@@ -634,5 +649,80 @@ describe("human-readable rendering", () => {
     expect(text).toContain("1/2 failed: test (1 error)");
     expect(text).toContain("[ok] lint");
     expect(text).toContain("[FAIL] test — assertion failed");
+  });
+});
+
+// ── triage: no repo, two files in, the validated answer out ────────────────────────
+
+describe("triage command", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sideclaw-cli-triage-"));
+  const promptFile = join(dir, "prompt.txt");
+  const schemaFile = join(dir, "schema.json");
+  const badSchemaFile = join(dir, "bad.json");
+  writeFileSync(promptFile, "classify this event");
+  writeFileSync(
+    schemaFile,
+    JSON.stringify({ type: "object", properties: { action: { type: "string" } } }),
+  );
+  writeFileSync(badSchemaFile, "{not json");
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("parses both flags; either missing is a usage error", () => {
+    expect(parseArgs(["triage", "--prompt-file", "p", "--schema-file", "s"]).command).toEqual({
+      kind: "triage",
+      promptFile: "p",
+      schemaFile: "s",
+    });
+    expect(() => parseArgs(["triage", "--prompt-file", "p"])).toThrow(/--schema-file/);
+    expect(() => parseArgs(["triage", "stray"])).toThrow(/no positional/);
+  });
+
+  test("triageRequestBody reads the prompt text and parses the schema", () => {
+    const { command } = parseArgs(["triage", "--prompt-file", "p", "--schema-file", "s"]);
+    const body = triageRequestBody(command as never, (path) =>
+      path === "p" ? "the prompt" : '{"type":"object"}',
+    );
+    expect(body).toEqual({
+      tool: "triage",
+      params: { prompt: "the prompt", schema: { type: "object" } },
+    });
+  });
+
+  test("round trip: submits without a repo, --json prints only the job result, exit 0", async () => {
+    let posted: string | undefined;
+    const result = { result: { action: "ignore" }, model: "m", latencyMs: 5, attempts: 1 };
+    const { code, out } = await runWith(
+      ["triage", "--prompt-file", promptFile, "--schema-file", schemaFile, "--json"],
+      {
+        "POST /api/jobs": (init) => {
+          posted = init?.body as string;
+          return { body: { ok: true, job: { id: "j1" } } };
+        },
+        "GET /api/jobs/j1": () => ({ body: { ok: true, job: { ...DONE_JOB, result } } }),
+      },
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual(result);
+    expect(JSON.parse(posted ?? "")).toEqual({
+      tool: "triage",
+      params: {
+        prompt: "classify this event",
+        schema: { type: "object", properties: { action: { type: "string" } } },
+      },
+    });
+  });
+
+  test("an unreadable prompt file or an invalid schema file exits 2", async () => {
+    const missing = await runWith(
+      ["triage", "--prompt-file", join(dir, "nope"), "--schema-file", schemaFile],
+      {},
+    );
+    expect(missing.code).toBe(2);
+    const bad = await runWith(
+      ["triage", "--prompt-file", promptFile, "--schema-file", badSchemaFile],
+      {},
+    );
+    expect(bad.code).toBe(2);
+    expect(bad.err).toContain("not valid JSON");
   });
 });

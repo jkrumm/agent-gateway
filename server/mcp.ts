@@ -13,6 +13,7 @@ import { registerExcalidrawDiagramTool } from "./mcp/tools/excalidraw-diagram.ts
 import { registerDispatchTool } from "./mcp/tools/dispatch.ts";
 import { registerOverviewTool } from "./mcp/tools/overview.ts";
 import { registerNarrativeTool } from "./mcp/tools/narrative.ts";
+import { registerTriageTool } from "./mcp/tools/triage.ts";
 import { logger } from "./mcp/logger.ts";
 import { setProcessKind } from "./lib/process-context.ts";
 import { logRoutingOverrides, logStaleQuotaEnvVars } from "./lib/routing.ts";
@@ -39,6 +40,7 @@ registerExcalidrawDiagramTool(server);
 registerDispatchTool(server);
 registerOverviewTool(server);
 registerNarrativeTool(server);
+registerTriageTool(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

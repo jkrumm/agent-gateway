@@ -487,6 +487,11 @@ export interface TextCompleteResult {
  * thinking at all while still billing at its reasoning-tier rate. Set it explicitly to get
  * what you pay for.
  *
+ * `jsonObject` sends `response_format: {type: "json_object"}` (JSON mode) — only pass it for
+ * a model the registry marks `jsonObject` (server/lib/models.ts); the gateway may reject it on
+ * others. JSON mode guarantees syntactically valid JSON, not a schema — callers still validate
+ * (`singleShotJson`, single-shot.ts).
+ *
  * `maxTokens` is sent as `max_completion_tokens` — the OpenAI leg's current parameter name;
  * `max_tokens` is the deprecated one and some models on this gateway reject it outright.
  *
@@ -499,6 +504,7 @@ export async function textComplete(opts: {
   tool?: string;
   reasoningEffort?: "none" | "low" | "medium" | "high" | "xhigh";
   maxTokens?: number;
+  jsonObject?: boolean;
   timeoutMs?: number;
 }): Promise<TextCompleteResult> {
   const model = opts.model;
@@ -510,6 +516,7 @@ export async function textComplete(opts: {
   };
   if (opts.reasoningEffort !== undefined) body.reasoning_effort = opts.reasoningEffort;
   if (opts.maxTokens) body.max_completion_tokens = opts.maxTokens;
+  if (opts.jsonObject) body.response_format = { type: "json_object" };
 
   const data = await iuFetch("/chat/completions", body, { idleTimeoutMs: opts.timeoutMs });
   const latencyMs = Math.round(performance.now() - t0);

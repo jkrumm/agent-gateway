@@ -64,7 +64,7 @@ Full forensic story (why BTM denies this specific label/executable):
 ## MCP Server
 
 sideclaw exposes workflow tools (`check`, `review`, `dispatch`, `overview`,
-`narrative`, `otel`) plus the synchronous multimodal tools (`read_image`,
+`narrative`, `triage`, `otel`) plus the synchronous multimodal tools (`read_image`,
 `read_drawing`, `excalidraw_diagram`) plus the job-polling tools
 (`job_status`, `job_wait`) as an MCP server — a **separate process** from the
 LaunchAgent, spawned on-demand by Claude Code via stdio transport.
@@ -110,7 +110,7 @@ MCP door — the CLI adds no capability, only reach.
 
 ### Async job model (durable, off the MCP transport)
 
-The long tools (`check`/`review`/`dispatch`/`overview`/`narrative`) do
+The long tools (`check`/`review`/`dispatch`/`overview`/`narrative`/`triage`) do
 **not** block the MCP call. A 13-minute worker run held open as a single MCP
 request destabilizes the stdio transport (and the SDK's 60s client timeout).
 Instead:
@@ -142,7 +142,7 @@ derived from the worker's stream-json output: `turns`, `lastAction` (e.g.
 Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on
 `/mcp` disconnect, but the HTTP server is launchd-managed. Jobs survive MCP
 reconnects; disk persistence survives an HTTP restart: on boot `recover()`
-re-queues an interrupted `check`/`overview`/`narrative`/`review` **once**
+re-queues an interrupted `check`/`overview`/`narrative`/`review`/`triage` **once**
 (all read-only and idempotent) and marks everything else `interrupted`
 (`dispatch` is never auto re-run — an `implement` episode may already have
 pushed). `make reload` refuses while jobs are running unless `FORCE=1` (which
@@ -268,12 +268,12 @@ reactive fallback, why the proactive quota-ceiling pre-check was removed
 ignored by the Requesty hop, so `MAX_THINKING_TOKENS` (mapped by the CLI onto
 Anthropic's `thinking.budget_tokens`) is the only control that reaches
 DeepSeek-V4-Flash or DeepSeek-V4-Pro there. Unset means the model's own `max`
-default, its worst setting. The CLASSIFY tier (check, overview,
-review_router) runs at 2048; AGENT (dispatch's investigate/author) and
+default, its worst setting. The CLASSIFY tier (check, overview)
+runs at 2048 (`triage` and review's router are single-shot, no budget — below); AGENT (dispatch's investigate/author) and
 AGENT_IMPLEMENT (implement, DeepSeek-V4-Pro) at 8192 —
 `server/lib/routing.ts`'s dated comments carry the ccbench/POC evidence.
 **No route runs on GLM any more** (retired 2026-09-23, owner decision; the
-`GLM_FLASH` id survives only so an env override naming it still resolves), so
+`GLM_FLASH` id survives only as an unverified registry entry, which routing refuses), so
 every non-Claude lane here is DeepSeek. `session-runner.ts`'s `buildWorkerEnv` exports `MAX_THINKING_TOKENS`
 only for non-Claude models — a Claude route's `thinkingTokens` (currently none
 set) would be a no-op there anyway, since thinking on Claude is controlled a
@@ -284,7 +284,7 @@ different way. JUDGE/PROSE (review, otel, narrative, excalidraw) carry no
 `claude -p`** (2026-09-24, `harness: "opencode"` on `ToolRoute` — AGENT_OC/
 AGENT_OC_IMPLEMENT — every other tool stays `"claude"`). `opencode run` talks
 to `deepseek-v4.1-flash` over the IU endpoint's **OpenAI-compatible** route
-(`iu/deepseek-v4.1-flash` — a different id and transport from the IU-native-
+(`iu-chat/deepseek-v4.1-flash` — a different id and transport from the IU-native-
 Anthropic `DeepSeek-V4-Flash`/`DeepSeek-V4-Pro` every other gateway route
 uses; `claude -p` cannot reach it at all). Measured against DeepSeek-V4-Pro on
 `claude -p` (three re-run implement briefs): ~40x cheaper, ~2-4x faster, a
@@ -293,10 +293,16 @@ volume-floor logic in a HyperDX config — not a clean sweep, and 95-98% cache
 hit vs V4-Pro's 8%. `variant` (opencode's `--variant`, a reasoning-effort
 knob) is `"high"` for investigate/author, `"max"` for implement — the same
 higher-stakes-write-tier split AGENT_IMPLEMENT used to encode; opencode's
-model/harness combination is validated AFTER every override
-(`buildRoutingTable`'s cross-field pass, routing.ts) — a Claude model always
-normalizes harness back to `claude`, and `deepseek-v4.1-flash` (only
-reachable via opencode) with harness `claude` is refused rather than applied.
+model/harness combination is validated against the model registry
+(`server/lib/models.ts` — id, wire, harnesses, limits, rates, `verified`; also
+served as `models` by `GET /api/routing`) AFTER every override
+(`buildRoutingTable`'s cross-field pass, routing.ts): an unregistered or
+unverified id is refused, a claude-capable id (every Claude id) normalizes
+harness back to `claude`, and an opencode-only id (`deepseek-v4.1-flash`, GPT
+ids) with harness `claude` is refused rather than applied. The opencode config
+carries two providers over the same IU OpenAI base — `iu-chat`
+(`@ai-sdk/openai-compatible`) and `iu-responses` (`@ai-sdk/openai`, GPT ids
+only) — generated from the registry.
 Overrides: `SIDECLAW_HARNESS_<TOOL>=claude|opencode`, `SIDECLAW_VARIANT_<TOOL>=<v>`
 (a bare `SIDECLAW_HARNESS_DISPATCH=claude` is refused on its own — pair it
 with a `SIDECLAW_MODEL_DISPATCH` override naming a Claude id). A fallback
@@ -331,6 +337,25 @@ Two constraints carried over regardless of backend:
   on CLI 2.1.220 — a probe overwrote its canary). `check`/`review` are
   read-only; `dispatch` is read-only in `investigate`/`author`, writable
   only in `implement`.
+
+### Triage — single-shot, no worker session
+
+`triage` (`server/jobs/handlers/triage.ts`, MCP tool + `sideclaw triage
+--prompt-file F --schema-file F`) is one tool-less completion, not a session:
+`singleShotJson` (`server/lib/single-shot.ts`) calls `textComplete` over the IU
+OpenAI transport on route `triage` (`transport: "iu-openai"`, deepseek-v4.1-flash,
+no fallback — like `adversary`), with `response_format: json_object` when the
+registry says the model supports it and `max_completion_tokens` ≥
+max(16000, registry `minOutput`). The caller supplies `{ prompt, schema }` where
+`schema` is a JSON Schema (top level `type: "object"`), compiled with zod's
+`z.fromJSONSchema` (zod 4, "semi-experimental"); the answer is parsed (a
+```` ```json ```` fence is tolerated) and validated, re-asked ONCE with the
+rejection reason appended, then the job fails. Result: `{ result, model,
+latencyMs, usage?, attempts }`. The caller's prompt is the task itself, so it is
+NOT fenced as DATA (`prompt-fence.ts` would tell the model to ignore it); the
+output contract comes after it and the answer is machine-validated. Boot recovery
+re-queues it once, like `check`. `review`'s angle router runs on the same helper
+(route `review_router`, diff inline in the prompt, fail-soft to no extra angles).
 
 ### Dispatch — bounded episodes inside another repo
 
@@ -426,6 +451,9 @@ boundary for a sensitive episode, not the permission profile.
   along in the PR body as advisory instead.
 - The brief is untrusted and fenced with per-run nonce delimiters, re-asserted
   after the data block.
+- A per-job `model` that is not a verified registry model is refused at
+  `POST /api/jobs` with 400 `dispatch refused: model <id> is not a verified
+  registry model` (`withModel` alone would silently keep the default).
 - Salvage retries only a serialization failure (fresh session, no `--resume`)
   and marks it `degraded: true`; a real failure throws.
 

@@ -7,6 +7,7 @@ import {
 import { cancelJob, createJob, getJob, jobHealth, listJobs, queueStats } from "../jobs/store.ts";
 import { isJobTool } from "../jobs/types.ts";
 import { DEFAULT_DISPATCH_TIER, resolveDispatchTarget } from "../lib/dispatch-policy.ts";
+import { validateModel } from "../lib/routing.ts";
 
 // HTTP surface for the async job system. The MCP tools are thin clients of these
 // routes (server/mcp/job-client.ts). Hosted in the always-on HTTP server so jobs
@@ -38,6 +39,17 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
             set.status = 400;
             return { ok: false as const, error: `dispatch refused: ${decision.reason}` };
           }
+        }
+        // A per-job `model` that `withModel` would silently ignore (unknown / unverified id)
+        // means the episode runs on the route's default while the caller believes otherwise —
+        // refuse loudly here instead. Non-string values fall through to the handler's zod.
+        const model = "model" in params ? params.model : undefined;
+        if (typeof model === "string" && !validateModel(model).ok) {
+          set.status = 400;
+          return {
+            ok: false as const,
+            error: `dispatch refused: model ${model} is not a verified registry model`,
+          };
         }
       }
       const job = createJob(body.tool, body.params ?? {});

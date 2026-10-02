@@ -102,6 +102,12 @@ export interface ReviewCommand {
   branch?: string;
 }
 
+export interface TriageCommand {
+  kind: "triage";
+  promptFile: string;
+  schemaFile: string;
+}
+
 export interface JobsCommand {
   kind: "jobs";
   running: boolean;
@@ -125,6 +131,7 @@ export type ParsedCommand =
   | DispatchCommand
   | CheckCommand
   | ReviewCommand
+  | TriageCommand
   | JobsCommand
   | JobRefCommand
   | SimpleCommand
@@ -205,6 +212,8 @@ export function parseArgs(argv: string[]): Parsed {
       return { command: parseCheck(rest.slice(1)), options };
     case "review":
       return { command: parseReview(rest.slice(1)), options };
+    case "triage":
+      return { command: parseTriage(rest.slice(1)), options };
     case "jobs":
       return { command: parseJobs(rest.slice(1)), options };
     case "status":
@@ -393,6 +402,24 @@ function parseReview(args: string[]): ReviewCommand {
   return command;
 }
 
+function parseTriage(args: string[]): TriageCommand {
+  const { flags, positionals } = parseFlags(
+    args,
+    { "--prompt-file": "value", "--schema-file": "value" },
+    "triage",
+  );
+  if (positionals.length > 0)
+    throw new CliUsageError("sideclaw triage takes no positional arguments");
+  const promptFile = flagValue(flags, "--prompt-file");
+  const schemaFile = flagValue(flags, "--schema-file");
+  if (promptFile === undefined || schemaFile === undefined) {
+    throw new CliUsageError(
+      "sideclaw triage requires --prompt-file <file> and --schema-file <file>",
+    );
+  }
+  return { kind: "triage", promptFile, schemaFile };
+}
+
 function parseJobs(args: string[]): JobsCommand {
   const { flags, positionals } = parseFlags(args, { "--running": "boolean" }, "jobs");
   if (positionals.length > 0)
@@ -405,7 +432,7 @@ function parseJobs(args: string[]): JobsCommand {
 export type JobCommand = DispatchCommand | CheckCommand | ReviewCommand;
 
 export interface RequestBody {
-  tool: "dispatch" | "check" | "review";
+  tool: "dispatch" | "check" | "review" | "triage";
   params: Record<string, unknown>;
 }
 
@@ -438,6 +465,32 @@ export function requestBody(
       return { tool: "review", params };
     }
   }
+}
+
+/** The POST /api/jobs body for `triage`: the prompt file's text and the JSON Schema file's
+ *  parsed object. Unlike the repo-bound jobs it needs no cwd. */
+export function triageRequestBody(
+  command: TriageCommand,
+  read: (path: string) => string,
+): RequestBody {
+  const readFile = (path: string, flag: string): string => {
+    try {
+      return read(path);
+    } catch (err) {
+      throw new CliUsageError(
+        `could not read ${flag} file ${path}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+  const prompt = readFile(command.promptFile, "--prompt-file");
+  let schema: unknown;
+  try {
+    schema = JSON.parse(readFile(command.schemaFile, "--schema-file"));
+  } catch (err) {
+    if (err instanceof CliUsageError) throw err;
+    throw new CliUsageError(`--schema-file ${command.schemaFile} is not valid JSON`);
+  }
+  return { tool: "triage", params: { prompt, schema } };
 }
 
 export interface RepoResolution {
@@ -512,6 +565,8 @@ export function renderVerdictResult(r: DispatchOutput): string {
   lines.push(`confidence: ${r.confidence}`);
   lines.push(`outcome: ${r.outcome}`);
   lines.push(`nextAction: ${r.nextAction}`);
+  if (typeof r.rootCause === "string") lines.push(`rootCause: ${r.rootCause}`);
+  if (typeof r.decisionQuestion === "string") lines.push(`decisionQuestion: ${r.decisionQuestion}`);
   lines.push(`recommendation: ${r.recommendation}`);
   if (typeof r.artifactUrl === "string") lines.push(`artifact: ${r.artifactUrl}`);
   if (typeof r.branch === "string") lines.push(`branch: ${r.branch}`);
@@ -760,13 +815,19 @@ async function execute(
   switch (command.kind) {
     case "dispatch":
     case "check":
-    case "review": {
-      const cwd = await resolveCwd(ctx, base, command);
-      const contextText =
-        command.kind === "dispatch"
-          ? resolveContext(command.context, (p) => readFileSync(p, "utf8"))
-          : undefined;
-      const body = requestBody(command, { cwd, context: contextText });
+    case "review":
+    case "triage": {
+      let body: RequestBody;
+      if (command.kind === "triage") {
+        body = triageRequestBody(command, (p) => readFileSync(p, "utf8"));
+      } else {
+        const cwd = await resolveCwd(ctx, base, command);
+        const contextText =
+          command.kind === "dispatch"
+            ? resolveContext(command.context, (p) => readFileSync(p, "utf8"))
+            : undefined;
+        body = requestBody(command, { cwd, context: contextText });
+      }
       const jobId = await submitJob(ctx.fetchFn, base, body);
       if (options.noWait) {
         if (options.json) io.out(`${JSON.stringify({ jobId }, null, 2)}\n`);
@@ -990,6 +1051,7 @@ Usage:
   sideclaw dispatch [flags] <brief...>        hand one episode to a repo
   sideclaw check [--repo R] [--commands "a,b"]   run validation in a repo
   sideclaw review [--repo R] [--scope S | --pr N | --branch B]   multi-angle review
+  sideclaw triage --prompt-file F --schema-file F   one tool-less model call → JSON
   sideclaw jobs [--running]                   list recent jobs
   sideclaw status <jobId>                     one-shot job state
   sideclaw wait <jobId>                       block until a job reaches a terminal state
@@ -1000,7 +1062,7 @@ Usage:
 
 Global flags (any subcommand):
   --json          emit only JSON on stdout, nothing else
-  --no-wait       submit and print the jobId, exit 0 (dispatch/check/review)
+  --no-wait       submit and print the jobId, exit 0 (dispatch/check/review/triage)
   --quiet         suppress the progress lines on stderr
   --timeout <s>   stop waiting after N seconds (default: no ceiling)
   -h, --help      show help
@@ -1033,10 +1095,19 @@ const REVIEW_HELP = `sideclaw review [--repo <name|path>] [--scope S | --pr N | 
   --pr/--branch review a ref fetched from origin.
 `;
 
+const TRIAGE_HELP = `sideclaw triage --prompt-file <file> --schema-file <file>
+
+  --prompt-file   the whole task, instructions and material together (no tools, no repo)
+  --schema-file   a JSON Schema file for the answer; the top level must be "type": "object"
+  The job's result is { result, model, latencyMs, usage, attempts } — with --json,
+  \`.result\` is the validated answer.
+`;
+
 function helpText(topic: string | undefined): string {
   if (topic === "dispatch") return DISPATCH_HELP;
   if (topic === "check") return CHECK_HELP;
   if (topic === "review") return REVIEW_HELP;
+  if (topic === "triage") return TRIAGE_HELP;
   return USAGE;
 }
 

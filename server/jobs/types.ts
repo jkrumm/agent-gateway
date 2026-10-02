@@ -13,7 +13,8 @@ export type JobTool =
   | "excalidraw_diagram"
   | "dispatch"
   | "overview"
-  | "narrative";
+  | "narrative"
+  | "triage";
 
 // Not exported — nothing outside this file needs the raw list, only the `isJobTool` guard
 // built from it (fallow flagged the export itself as consumer-less; the guard is the public
@@ -25,6 +26,7 @@ const JOB_TOOLS: readonly JobTool[] = [
   "dispatch",
   "overview",
   "narrative",
+  "triage",
 ];
 
 export function isJobTool(value: string): value is JobTool {
@@ -36,7 +38,7 @@ export function isJobTool(value: string): value is JobTool {
  *   pending → running → done | failed
  *   pending → cancelled              (POST /api/jobs/:id/cancel: never ran)
  *   running → cancelled              (POST /api/jobs/:id/cancel: worker SIGTERMed)
- *   running → pending                (restart recovery: check/overview/narrative/review, once)
+ *   running → pending                (restart recovery: check/overview/narrative/review/triage, once)
  *   running → interrupted            (restart recovery: everything else, or a 2nd interruption)
  *
  * `pending` jobs are admitted but waiting for a concurrency slot. `interrupted`

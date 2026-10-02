@@ -280,6 +280,7 @@ const REQUEUE_ON_RECOVER: ReadonlySet<JobTool> = new Set<JobTool>([
   "overview",
   "narrative",
   "review",
+  "triage",
 ]);
 const MAX_RECOVER_ATTEMPTS = 2;
 
@@ -798,7 +799,7 @@ function finish(
  *  BEFORE the ordinary requeue/interrupt logic below ever sees it — an operator asked for this
  *  job to stop, and the process dying between the SIGTERM and `execute()`'s catch observing it
  *  must never look like an ordinary crash-recovery candidate. Without this check a
- *  `REQUEUE_ON_RECOVER` tool (check/overview/narrative/review) would silently resume the exact
+ *  `REQUEUE_ON_RECOVER` tool (check/overview/narrative/review/triage) would silently resume the exact
  *  job the cancel was trying to stop.
  *
  *  Otherwise, `dispatch` rows go through `dispatchRecoveryStatusFor` (below) — resume in place,

@@ -48,8 +48,8 @@ Phase 3 — Synthesis (single claude-sonnet-5 session, ~15s)
 Selection has two layers. A **deterministic floor** is picked from changed file
 extensions (instant, free, always covers the basics). A **triage router** then
 adds content-driven angles that file types can't detect — it reads the diff once
-on `routeFor("review_router")` (glm-5.3-flash on IU, claude-haiku-4-5 on Max as the
-reverse fallback) and returns the extra angles it judges relevant. Total angles are
+on `routeFor("review_router")` (one tool-less single-shot call, deepseek-v4.1-flash over the IU
+OpenAI transport, the diff inline in the prompt — no worker session, no Max lane) and returns the extra angles it judges relevant. Total angles are
 capped at `MAX_ANGLES` (8); the floor is kept first, router extras fill the rest.
 
 The router prompt carries an **ISO/IEC 25010:2023 coverage checklist** — the nine quality
@@ -157,19 +157,19 @@ Each agent loads project context via `--setting-sources user,project`:
 
 Angle + synthesis sessions run on **claude-sonnet-5** over the **Max** backend
 (`routeFor("review")`), falling back to IU per-token only when a Max session dies
-with a quota error. The router triage runs on the cheap CLASSIFY tier
-(`glm-5.3-flash` on IU), and the adversary critic uses the **IU OpenAI transport**
+with a quota error. The router runs as one single-shot call
+(`deepseek-v4.1-flash` over the IU OpenAI transport), and the adversary critic uses the **IU OpenAI transport**
 (`gpt-5.6-terra`) directly — IU per-token, zero Max, and a different model family
 so its bias profile is uncorrelated with the claude-sonnet-5 reviewers. The live
 table is always `GET /api/routing`.
 
-| Component                                                                                             | Model               |
-| ----------------------------------------------------------------------------------------------------- | ------------------- |
-| 1 router triage session (own `review_router` route — the cheap CLASSIFY tier, same as check/overview) | DeepSeek-V4-Flash   |
-| 2–8 angle sessions (3 in flight)                                                                      | claude-sonnet-5     |
-| 1 adversary critic (single HTTPS call, no agent)                                                      | gpt-5.6-terra       |
-| 1 OpenCodeReview run (own `review_ocr` route, external CLI, parallel with router + angles)            | deepseek-v4.1-flash |
-| 1 synthesis session                                                                                   | claude-sonnet-5     |
+| Component                                                                                  | Model               |
+| ------------------------------------------------------------------------------------------ | ------------------- |
+| 1 router call (own `review_router` route — single-shot, no agent, same tier as `triage`)   | deepseek-v4.1-flash |
+| 2–8 angle sessions (3 in flight)                                                           | claude-sonnet-5     |
+| 1 adversary critic (single HTTPS call, no agent)                                           | gpt-5.6-terra       |
+| 1 OpenCodeReview run (own `review_ocr` route, external CLI, parallel with router + angles) | deepseek-v4.1-flash |
+| 1 synthesis session                                                                        | claude-sonnet-5     |
 
 OCR reads the repo itself with its own tool loop rather than working off a single diff
 string, so its own IU-billed token spend (`review_ocr` in the `sideclaw-iu` usage sink) runs
