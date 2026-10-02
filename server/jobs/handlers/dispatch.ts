@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from "fs";
+import { existsSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
@@ -21,6 +21,8 @@ import {
 } from "../../lib/dispatch-policy.ts";
 import { dataBlock, endOfData, fencePreamble, newFenceNonce } from "../../lib/prompt-fence.ts";
 import { loadSkillFile } from "../../lib/worker-io.ts";
+import type { DispatchTier, DispatchWorkspace } from "../../lib/dispatch-policy.ts";
+import { releaseRepoLease, repoLeaseRefusal, tryAcquireRepoLease } from "../../lib/repo-lease.ts";
 import { runCheck, type CheckOutput } from "./check.ts";
 import {
   commitCount,
@@ -29,12 +31,15 @@ import {
   createWorktree,
   currentHeadState,
   diffRefusalReason,
+  findOpenPullRequest,
+  isRevisableBranch,
   GIT_DENY_CREDENTIALS_ENV,
   inPlaceChangedFiles,
   inPlaceRefusalReason,
   openIssue,
   openPullRequest,
   pushBranch,
+  rebaseOntoDefault,
   removeWorktree,
   resolveRepoIdentity,
   restoreStrippedSettings,
@@ -142,6 +147,16 @@ export const DISPATCH_INPUT = z.object({
         "changedFiles and the owner reviews and commits the uncommitted edits themselves. " +
         "In-place is refused for any tier but implement, for sensitive: true, and while " +
         "another in-place episode is running in the same repo.",
+    ),
+  revisionOf: z
+    .string()
+    .optional()
+    .describe(
+      "Implement tier (workspace 'worktree') only: the `dispatch/…` branch of an earlier " +
+        "episode to CONTINUE. The handler fetches that branch and cuts the worktree from its " +
+        "tip; the push goes to the same branch with --force-with-lease and the existing open " +
+        "PR is updated — no new PR per revision. Refused for any other tier/workspace, for a " +
+        "name outside `dispatch/` and when the branch is not on origin.",
     ),
   base: z
     .enum(["default", "head"])
@@ -295,7 +310,7 @@ const PR_FIELDS = {
 // ride along in the opened PR instead of withholding it (see `checksBlockPush`, below).
 export const DISPATCH_SCHEMA_VERSION = 3;
 
-/** Machine-readable classification of how this episode ended — the thirteen ways `runDispatch`
+/** Machine-readable classification of how this episode ended — the fifteen ways `runDispatch`
  *  can return, so a consumer never has to substring-match `artifactNote`'s prose to tell them
  *  apart. Two ordering rules a consumer should know: `withheld` overwrites whatever this would
  *  otherwise have been (the real verdict was scanned out, so no tier-specific outcome is
@@ -312,6 +327,11 @@ export const DISPATCH_SCHEMA_VERSION = 3;
  *  - branch_no_pr   implement: pushed, but the worker authored no PR text.
  *  - pr_failed      implement: pushed, but opening the pull request threw.
  *  - pr_opened      implement: full success — `artifactUrl` + `branch` both set.
+ *  - pr_updated     implement + `revisionOf`: pushed to the prior branch (force-with-lease)
+ *                   and the EXISTING open PR now carries it — `artifactUrl` is that PR.
+ *  - conflict       implement: the rebase onto the latest default branch failed. Nothing was
+ *                   pushed and the worktree is gone; the caller re-dispatches from the new
+ *                   base (a worker never hand-resolves a conflict).
  *  - applied_in_place  implement, workspace in-place: edits are UNCOMMITTED in the live
  *                      checkout, `changedFiles` lists them; nothing was pushed. The owner
  *                      reviews and commits. A check failure still lands here (reported in
@@ -331,6 +351,8 @@ export const DISPATCH_OUTCOMES = [
   "branch_no_pr",
   "pr_failed",
   "pr_opened",
+  "pr_updated",
+  "conflict",
   "applied_in_place",
   "salvaged",
   "withheld",
@@ -779,6 +801,28 @@ export function assertInPlaceAllowed(tier: DispatchTier, sensitive: boolean): vo
  *  safe move is refusing the episode outright, before it ever spawns. */
 const IN_PLACE_OPENCODE_CONFIG_PATHS = ["opencode.json", "opencode.jsonc", ".opencode"];
 
+/** `revisionOf` continues an earlier episode's branch, so it only means something for an
+ *  implement episode in a worktree, and only for a branch this tool owns — refused up front,
+ *  before a worktree exists, rather than silently ignored (the caller would then read a fresh
+ *  PR as the revision it asked for). */
+function assertRevisionAllowed(
+  tier: DispatchTier,
+  workspace: DispatchWorkspace,
+  revisionOf: string | undefined,
+): void {
+  if (revisionOf === undefined) return;
+  if (tier !== "implement" || workspace !== "worktree") {
+    throw new Error(
+      `dispatch refused: revisionOf is only valid with tier 'implement' and workspace 'worktree'`,
+    );
+  }
+  if (!isRevisableBranch(revisionOf)) {
+    throw new Error(
+      `dispatch refused: revisionOf must name a dispatch/<slug> branch (got '${revisionOf}')`,
+    );
+  }
+}
+
 /** Refuse an in-place `implement` episode outright when the resolved route runs the opencode
  *  harness AND the live repo root carries its own `opencode.json`/`opencode.jsonc`/`.opencode/`.
  *  Worktree tiers are unaffected — `stripProjectSettings` already removes these from the
@@ -798,51 +842,6 @@ export function assertInPlaceOpencodeConfigAllowed(cwd: string, harness: Harness
         `worktree to strip it from first. Use the default worktree workspace instead.`,
     );
   }
-}
-
-// ── In-place concurrency — at most one episode per repo, in this process ────────
-//
-// Two workers editing the same live checkout simultaneously would interleave edits in a
-// tree the owner is also using, and the snapshot/change-set attribution could not tell
-// their edits apart. A module-level map is exact for the single-process server launchd
-// guarantees (`sweepStaleWorktrees`' stated assumption); a crash clears it with the
-// process. Keyed on the canonical repo root so two paths to the same repo contend
-// correctly. Released in `runDispatch`'s `finally`.
-const inPlaceLocks = new Map<string, string>();
-
-/** Take the repo's in-place lock, or report the job that holds it. */
-export function tryAcquireInPlaceLock(
-  cwd: string,
-  jobId: string,
-): { ok: true } | { ok: false; holder: string } {
-  const key = realpathSync(cwd);
-  const holder = inPlaceLocks.get(key);
-  if (holder !== undefined) return { ok: false, holder };
-  inPlaceLocks.set(key, jobId);
-  return { ok: true };
-}
-
-/** Best effort by construction: called from `runDispatch`'s `finally`, where a throw would
- *  replace whatever the try/catch already decided to report. Falls back to the raw `cwd`
- *  string as the map key if the path can no longer be resolved (the repo was moved or
- *  deleted mid-episode) — better to leak one stale map entry than to throw out of a
- *  cleanup path. */
-export function releaseInPlaceLock(cwd: string): void {
-  let key: string;
-  try {
-    key = realpathSync(cwd);
-  } catch (err) {
-    logger.warn(
-      {
-        event: "dispatch.in_place_lock_release_failed",
-        project: cwd,
-        error: String(err),
-      },
-      "could not resolve the real path to release the in-place lock — falling back to the raw cwd",
-    );
-    key = cwd;
-  }
-  inPlaceLocks.delete(key);
 }
 
 /** Every free-text field of the verdict that reaches the caller. `confidence` and
@@ -982,7 +981,14 @@ function reconstructWorktree(meta: Record<string, unknown>): DispatchWorktree {
   ) {
     throw new Error("dispatch resume refused: persisted worktree metadata is malformed");
   }
-  return { path, branch, base, baseRef, pushable };
+  return {
+    path,
+    branch,
+    base,
+    baseRef,
+    pushable,
+    ...(typeof meta.remoteHead === "string" ? { remoteHead: meta.remoteHead } : {}),
+  };
 }
 
 /** Run one dispatch episode and return its verdict. Throws on failure — the store turns a
@@ -1003,7 +1009,7 @@ export async function runDispatch(
   isCancelled?: (jobId: string) => boolean,
   resumeCtx?: DispatchResumeContext,
 ): Promise<DispatchOutput> {
-  const { cwd, brief, tier, context, model, sensitive, workspace, base } = parseParams(
+  const { cwd, brief, tier, context, model, sensitive, workspace, base, revisionOf } = parseParams(
     DISPATCH_INPUT,
     rawParams,
   );
@@ -1033,6 +1039,7 @@ export async function runDispatch(
     // would spawn.
     assertInPlaceOpencodeConfigAllowed(cwd, routeFor("dispatch_implement").harness);
   }
+  assertRevisionAllowed(tier, workspace, revisionOf);
   // A resumed row never re-runs this: the store refuses to resume an in-place row (see the
   // runDispatch doc comment), so `resuming` and `inPlace` cannot both be true.
   const resuming = resumeCtx?.resume !== undefined;
@@ -1111,22 +1118,18 @@ export async function runDispatch(
   const resumingWorktree = resuming && !inPlace;
   let worktree: DispatchWorktree | undefined;
   let snapshot: InPlaceSnapshot | undefined;
-  // True only once `tryAcquireInPlaceLock` below actually succeeds for THIS invocation — the
+  // True only once `tryAcquireRepoLease` below actually succeeds for THIS invocation — the
   // finally must release the lock it took, never a lock another job holds. Taken inside the
   // try (rather than before it, as before) so a throw between acquiring it and setting this
   // flag is impossible by construction: the two happen on the same line.
   let lockHeld = false;
   try {
-    if (inPlace) {
-      const lock = tryAcquireInPlaceLock(cwd, jobKey);
-      if (!lock.ok) {
-        throw new Error(
-          `dispatch refused: an in-place episode is already running in this repo (job ` +
-            `${lock.holder}) — in-place runs serialize per repo because their edits would ` +
-            `interleave in one live checkout.`,
-        );
-      }
+    if (tier === "implement") {
+      const lease = tryAcquireRepoLease(cwd, jobKey);
+      if (!lease.ok) throw new Error(repoLeaseRefusal(lease.holder));
       lockHeld = true;
+    }
+    if (inPlace) {
       // Recorded before the session starts — the snapshot is the in-place run's only
       // attribution baseline, exactly what `onWorktreeReady`'s persisted metadata is for a
       // worktree run. It is NOT persisted as worktree metadata (the store would then
@@ -1147,7 +1150,13 @@ export async function runDispatch(
       }
       note(`resuming ${worktree.branch}`);
     } else if (tier === "implement" && identity) {
-      worktree = await createWorktree(cwd, jobKey, slugify(brief), identity.defaultBranch);
+      worktree = await createWorktree(
+        cwd,
+        jobKey,
+        slugify(brief),
+        identity.defaultBranch,
+        revisionOf,
+      );
       note(`worktree ${worktree.branch}`);
     } else {
       worktree = await createReadWorktree(cwd, jobKey, undefined, base);
@@ -1457,7 +1466,7 @@ export async function runDispatch(
     // acquired it: a refused acquisition (another job already holds it) must never release
     // that other job's lock.
     if (worktree) await removeWorktree(cwd, worktree);
-    if (inPlace && lockHeld) releaseInPlaceLock(cwd);
+    if (lockHeld) releaseRepoLease(cwd);
   }
 }
 
@@ -1469,7 +1478,7 @@ export async function runDispatch(
  *  silently wave a red run through. Re-checked for cancellation after the check returns too:
  *  the race a cancel arriving while the check itself was still running, which the try/catch
  *  above can't observe. */
-async function runRepoCheck(
+export async function runRepoCheck(
   cwd: string,
   note: (s: string) => void,
   checkCtx: {
@@ -1627,7 +1636,7 @@ export async function finishInPlace(
 /** Failing check steps rendered into `artifactNote`-sized text: step name + its first few
  *  error lines, bounded to ~1500 chars so a chatty test runner's dump stays a note rather than
  *  a second log. */
-function renderFailedChecks(steps: CheckOutput["steps"]): string {
+export function renderFailedChecks(steps: CheckOutput["steps"]): string {
   const rendered = steps
     .filter((s) => !s.passed)
     .map((s) => `${s.name}: ${(s.errors ?? []).slice(0, 3).join(" | ") || "(no error detail)"}`)
@@ -1641,7 +1650,7 @@ function renderFailedChecks(steps: CheckOutput["steps"]): string {
  *  recorded at all: that shape means the check tool itself is confused, not that it found
  *  nothing wrong, and treating it as passing would be the one silent failure mode this
  *  function exists to rule out — fail-safe, not fail-open. */
-function checksBlockPush(check: CheckOutput): boolean {
+export function checksBlockPush(check: CheckOutput): boolean {
   const failedSteps = check.steps.filter((s) => !s.passed);
   const advisorySteps = failedSteps.filter((s) => s.name === "fallow");
   return !check.passed && (failedSteps.length === 0 || advisorySteps.length < failedSteps.length);
@@ -1675,6 +1684,28 @@ export async function depositBranch(
       note: " No branch was pushed: the episode changed nothing.",
     };
   }
+
+  // Rebase onto the LATEST default branch before anything is judged or pushed: the checks
+  // below then run on what would actually merge, and the diff bounds see the PR as a whole.
+  // A conflict is the caller's to re-dispatch — never hand-resolved here.
+  note("rebasing");
+  const rebase = await rebaseOntoDefault(worktree, identity.defaultBranch);
+  if (!rebase.ok) {
+    // The committed work is the expensive part of the episode and the caller re-dispatches
+    // against the new base — bundle it first (same salvage dir as the crash paths) so the old
+    // diff can ride along as context instead of being paid for twice.
+    const bundle = await salvageWorktree(worktree.path, worktree.path, worktree.branch);
+    return {
+      outcome: "conflict",
+      note:
+        ` Nothing was pushed: rebasing ${worktree.branch} onto the latest ${identity.defaultBranch} ` +
+        `failed (${rebase.reason}). The worktree is discarded — re-dispatch the work from the ` +
+        `new base.` +
+        (bundle ? ` The episode's commits were bundled at ${bundle.path}.` : ""),
+    };
+  }
+  worktree.base = rebase.base;
+  worktree.baseRef = `origin/${identity.defaultBranch}`;
 
   const diff = await summarizeDiff(worktree);
   const refusal = await diffRefusalReason(worktree, diff);
@@ -1740,14 +1771,49 @@ export async function depositBranch(
       branch: worktree.branch,
       outcome: "checks_failed",
       note:
-        ` The branch was pushed but NO pull request was opened: the repo's checks failed ` +
-        `(${checkOutput.summary}). ${renderFailedChecks(checkOutput.steps)} Fix the failures, ` +
-        `then open the PR by hand — the work is not lost.`,
+        (worktree.remoteHead
+          ? ` The prior branch was updated (force-with-lease) but its checks failed `
+          : ` The branch was pushed but NO pull request was opened: the repo's checks failed `) +
+        `(${checkOutput.summary}). ${renderFailedChecks(checkOutput.steps)} ` +
+        (worktree.remoteHead
+          ? `Fix the failures in a further revision.`
+          : `Fix the failures, then open the PR by hand — the work is not lost.`),
     };
   }
 
   note(`pushing ${worktree.branch}`);
   await pushBranch(worktree, identity);
+
+  // A revision pushed to a branch that already has an open PR: that push IS the update.
+  if (worktree.remoteHead) {
+    let existing: Awaited<ReturnType<typeof findOpenPullRequest>>;
+    try {
+      existing = await findOpenPullRequest(identity, worktree.branch);
+    } catch (err) {
+      // The branch is already pushed. Opening a second PR on a lookup blip would be rejected
+      // as a duplicate and read as a failure of the work — say what actually failed instead.
+      logger.warn(
+        { event: "dispatch.pr_lookup_failed", branch: worktree.branch, error: String(err) },
+        "could not look up the existing PR for a revision",
+      );
+      return {
+        branch: worktree.branch,
+        outcome: "pr_failed",
+        note:
+          ` The prior branch was updated (force-with-lease) but the existing pull request could ` +
+          `not be looked up: ${err instanceof Error ? err.message : String(err)} The PR picks ` +
+          `the push up on its own; retry only if it does not.${advisory}`,
+      };
+    }
+    if (existing) {
+      return {
+        artifactUrl: existing.url,
+        branch: worktree.branch,
+        outcome: "pr_updated",
+        note: ` The existing pull request was updated by a force-with-lease push.${advisory}`,
+      };
+    }
+  }
 
   if (!text) {
     // Changes exist but the episode did not author a PR — it decided against one, or

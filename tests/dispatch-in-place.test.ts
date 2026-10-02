@@ -16,10 +16,9 @@ import {
   DISPATCH_OUTCOMES,
   DISPATCH_SCHEMA_VERSION,
   finishInPlace,
-  releaseInPlaceLock,
   runDispatch,
-  tryAcquireInPlaceLock,
 } from "../server/jobs/handlers/dispatch.ts";
+import { releaseRepoLease, tryAcquireRepoLease } from "../server/lib/repo-lease.ts";
 import { inPlaceChangedFiles, snapshotInPlace } from "../server/jobs/handlers/dispatch-git.ts";
 import { SessionCancelledError } from "../server/mcp/session-runner.ts";
 import { git as fixtureGit, run as fixtureRun, Fixture, makeFixture } from "./git-fixture.ts";
@@ -110,7 +109,7 @@ describe("runDispatch — in-place refusals before anything runs", () => {
       expect(await fx.linkedWorktrees()).toEqual([]);
       expect(await fx.localBranches()).toEqual(["master"]);
     } finally {
-      releaseInPlaceLock(fx.repo);
+      releaseRepoLease(fx.repo);
     }
   });
 
@@ -129,19 +128,19 @@ describe("runDispatch — in-place refusals before anything runs", () => {
       ).rejects.toThrow(/refused/);
       expect(await fx.linkedWorktrees()).toEqual([]);
     } finally {
-      releaseInPlaceLock(fx.repo);
+      releaseRepoLease(fx.repo);
     }
   });
 
   test("a second in-place submission for the same repo while one holds the lock is refused", async () => {
-    const first = tryAcquireInPlaceLock(fx.repo, "job-first");
+    const first = tryAcquireRepoLease(fx.repo, "job-first");
     try {
       expect(first.ok).toBe(true);
       await expect(
         runDispatch({ cwd: fx.repo, brief: "b", tier: "implement", workspace: "in-place" }),
       ).rejects.toThrow(/already running in this repo \(job job-first\)/);
     } finally {
-      releaseInPlaceLock(fx.repo);
+      releaseRepoLease(fx.repo);
     }
   });
 
@@ -153,18 +152,18 @@ describe("runDispatch — in-place refusals before anything runs", () => {
       ).rejects.toThrow(/dispatch refused:.*\.opencode/);
       expect(await fx.linkedWorktrees()).toEqual([]);
     } finally {
-      releaseInPlaceLock(fx.repo);
+      releaseRepoLease(fx.repo);
     }
   });
 
   test("the lock is per-repo — a different repo is not refused", async () => {
     const other = await makeFixture();
     try {
-      expect(tryAcquireInPlaceLock(fx.repo, "job-a").ok).toBe(true);
-      expect(tryAcquireInPlaceLock(other.repo, "job-b").ok).toBe(true);
+      expect(tryAcquireRepoLease(fx.repo, "job-a").ok).toBe(true);
+      expect(tryAcquireRepoLease(other.repo, "job-b").ok).toBe(true);
     } finally {
-      releaseInPlaceLock(fx.repo);
-      releaseInPlaceLock(other.repo);
+      releaseRepoLease(fx.repo);
+      releaseRepoLease(other.repo);
       other.cleanup();
     }
   });

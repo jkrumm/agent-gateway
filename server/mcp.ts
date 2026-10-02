@@ -14,6 +14,7 @@ import { registerDispatchTool } from "./mcp/tools/dispatch.ts";
 import { registerOverviewTool } from "./mcp/tools/overview.ts";
 import { registerNarrativeTool } from "./mcp/tools/narrative.ts";
 import { registerTriageTool } from "./mcp/tools/triage.ts";
+import { registerUpdatePrTool } from "./mcp/tools/update-pr.ts";
 import { logger } from "./mcp/logger.ts";
 import { setProcessKind } from "./lib/process-context.ts";
 import { logRoutingOverrides, logStaleQuotaEnvVars } from "./lib/routing.ts";
@@ -41,6 +42,7 @@ registerDispatchTool(server);
 registerOverviewTool(server);
 registerNarrativeTool(server);
 registerTriageTool(server);
+registerUpdatePrTool(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

@@ -29,6 +29,16 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
       // skipping this route. Only engages for `dispatch`, and only when `cwd`/`tier` parse as
       // plain strings — anything else falls through to the handler's own zod validation, whose
       // "invalid params" error shape is out of scope here.
+      if (body.tool === "update_pr") {
+        const cwd = (body.params as Record<string, unknown> | undefined)?.cwd;
+        if (typeof cwd === "string") {
+          const decision = resolveDispatchTarget({ cwd, tier: "implement" });
+          if (!decision.ok) {
+            set.status = 400;
+            return { ok: false as const, error: `update_pr refused: ${decision.reason}` };
+          }
+        }
+      }
       if (body.tool === "dispatch") {
         const params = body.params ?? {};
         const cwd = params.cwd;

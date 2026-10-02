@@ -14,7 +14,8 @@ export type JobTool =
   | "dispatch"
   | "overview"
   | "narrative"
-  | "triage";
+  | "triage"
+  | "update_pr";
 
 // Not exported — nothing outside this file needs the raw list, only the `isJobTool` guard
 // built from it (fallow flagged the export itself as consumer-less; the guard is the public
@@ -27,6 +28,7 @@ const JOB_TOOLS: readonly JobTool[] = [
   "overview",
   "narrative",
   "triage",
+  "update_pr",
 ];
 
 export function isJobTool(value: string): value is JobTool {

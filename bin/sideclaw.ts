@@ -83,9 +83,16 @@ export interface DispatchCommand {
   repo: RepoSpec;
   tier?: DispatchTier;
   workspace?: DispatchWorkspace;
+  revisionOf?: string;
   model?: string;
   context?: ContextSpec;
   sensitive: boolean;
+}
+
+export interface UpdatePrCommand {
+  kind: "update-pr";
+  repo: RepoSpec;
+  pr: number;
 }
 
 export interface CheckCommand {
@@ -131,6 +138,7 @@ export type ParsedCommand =
   | DispatchCommand
   | CheckCommand
   | ReviewCommand
+  | UpdatePrCommand
   | TriageCommand
   | JobsCommand
   | JobRefCommand
@@ -214,6 +222,8 @@ export function parseArgs(argv: string[]): Parsed {
       return { command: parseReview(rest.slice(1)), options };
     case "triage":
       return { command: parseTriage(rest.slice(1)), options };
+    case "update-pr":
+      return { command: parseUpdatePr(rest.slice(1)), options };
     case "jobs":
       return { command: parseJobs(rest.slice(1)), options };
     case "status":
@@ -307,6 +317,7 @@ function parseDispatch(args: string[]): DispatchCommand {
       "--repo": "value",
       "--tier": "value",
       "--workspace": "value",
+      "--revision-of": "value",
       "--model": "value",
       "--context": "value",
       "--sensitive": "boolean",
@@ -342,6 +353,9 @@ function parseDispatch(args: string[]): DispatchCommand {
     }
     command.workspace = workspace as DispatchWorkspace;
   }
+
+  const revisionOf = flagValue(flags, "--revision-of");
+  if (revisionOf !== undefined) command.revisionOf = revisionOf;
 
   const model = flagValue(flags, "--model");
   if (model !== undefined) command.model = model;
@@ -402,6 +416,23 @@ function parseReview(args: string[]): ReviewCommand {
   return command;
 }
 
+function parseUpdatePr(args: string[]): UpdatePrCommand {
+  const { flags, positionals } = parseFlags(
+    args,
+    { "--repo": "value", "--pr": "value" },
+    "update-pr",
+  );
+  if (positionals.length > 0)
+    throw new CliUsageError("sideclaw update-pr takes no positional arguments");
+  const prRaw = flagValue(flags, "--pr");
+  if (prRaw === undefined) throw new CliUsageError("sideclaw update-pr requires --pr <number>");
+  return {
+    kind: "update-pr",
+    repo: parseRepo(flagValue(flags, "--repo")),
+    pr: parsePositiveInt(prRaw, "--pr"),
+  };
+}
+
 function parseTriage(args: string[]): TriageCommand {
   const { flags, positionals } = parseFlags(
     args,
@@ -429,10 +460,10 @@ function parseJobs(args: string[]): JobsCommand {
 
 // ── Mapping (pure) ───────────────────────────────────────────────────────────────
 
-export type JobCommand = DispatchCommand | CheckCommand | ReviewCommand;
+export type JobCommand = DispatchCommand | CheckCommand | ReviewCommand | UpdatePrCommand;
 
 export interface RequestBody {
-  tool: "dispatch" | "check" | "review" | "triage";
+  tool: "dispatch" | "check" | "review" | "triage" | "update_pr";
   params: Record<string, unknown>;
 }
 
@@ -447,6 +478,7 @@ export function requestBody(
       const params: Record<string, unknown> = { cwd: resolved.cwd, brief: command.brief };
       if (command.tier !== undefined) params.tier = command.tier;
       if (command.workspace !== undefined) params.workspace = command.workspace;
+      if (command.revisionOf !== undefined) params.revisionOf = command.revisionOf;
       if (command.model !== undefined) params.model = command.model;
       if (resolved.context !== undefined) params.context = resolved.context;
       if (command.sensitive) params.sensitive = true;
@@ -457,6 +489,8 @@ export function requestBody(
       if (command.commands !== undefined) params.commands = command.commands;
       return { tool: "check", params };
     }
+    case "update-pr":
+      return { tool: "update_pr", params: { cwd: resolved.cwd, pr: command.pr } };
     case "review": {
       const params: Record<string, unknown> = { cwd: resolved.cwd };
       if (command.scope !== undefined) params.scope = command.scope;
@@ -816,6 +850,7 @@ async function execute(
     case "dispatch":
     case "check":
     case "review":
+    case "update-pr":
     case "triage": {
       let body: RequestBody;
       if (command.kind === "triage") {
@@ -1051,6 +1086,7 @@ Usage:
   sideclaw dispatch [flags] <brief...>        hand one episode to a repo
   sideclaw check [--repo R] [--commands "a,b"]   run validation in a repo
   sideclaw review [--repo R] [--scope S | --pr N | --branch B]   multi-angle review
+  sideclaw update-pr [--repo R] --pr N        rebase a dispatch/* PR onto the latest base, re-check, push
   sideclaw triage --prompt-file F --schema-file F   one tool-less model call → JSON
   sideclaw jobs [--running]                   list recent jobs
   sideclaw status <jobId>                     one-shot job state
@@ -1062,7 +1098,7 @@ Usage:
 
 Global flags (any subcommand):
   --json          emit only JSON on stdout, nothing else
-  --no-wait       submit and print the jobId, exit 0 (dispatch/check/review/triage)
+  --no-wait       submit and print the jobId, exit 0 (dispatch/check/review/update-pr/triage)
   --quiet         suppress the progress lines on stderr
   --timeout <s>   stop waiting after N seconds (default: no ceiling)
   -h, --help      show help
@@ -1078,6 +1114,7 @@ Flags:
                         path (default: the git root of the current directory)
   --tier <tier>         investigate | author | implement (default investigate)
   --workspace <ws>      worktree | in-place (default worktree, implement tier only)
+  --revision-of <branch>  implement only: continue this dispatch/* branch and update its PR
   --model <id>          model override (e.g. claude-opus-5[1m])
   --context <text|@file>  raw supporting material, passed as data (leading @ reads a file)
   --sensitive           mark the repo secret-bearing; the server refuses this outside the
@@ -1095,6 +1132,13 @@ const REVIEW_HELP = `sideclaw review [--repo <name|path>] [--scope S | --pr N | 
   --pr/--branch review a ref fetched from origin.
 `;
 
+const UPDATE_PR_HELP = `sideclaw update-pr [--repo <name|path>] --pr N
+
+  Rebases the open dispatch/* PR onto the latest default branch, re-runs the repo's checks,
+  force-with-lease pushes. Result: { status: updated|up_to_date|conflict, headSha, checks }.
+  A conflict is reported, never hand-resolved — re-dispatch from the new base.
+`;
+
 const TRIAGE_HELP = `sideclaw triage --prompt-file <file> --schema-file <file>
 
   --prompt-file   the whole task, instructions and material together (no tools, no repo)
@@ -1108,6 +1152,7 @@ function helpText(topic: string | undefined): string {
   if (topic === "check") return CHECK_HELP;
   if (topic === "review") return REVIEW_HELP;
   if (topic === "triage") return TRIAGE_HELP;
+  if (topic === "update-pr") return UPDATE_PR_HELP;
   return USAGE;
 }
 

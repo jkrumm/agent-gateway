@@ -380,7 +380,7 @@ describe("GET /api/dispatch-schema", () => {
     expect(body.ok).toBe(true);
     expect(body.version).toBe(DISPATCH_SCHEMA_VERSION);
     expect(body.outcomes.toSorted()).toEqual([...DISPATCH_OUTCOMES].toSorted());
-    expect(body.outcomes).toHaveLength(13);
+    expect(body.outcomes).toHaveLength(15);
     expect(body.output.type).toBe("object");
     expect(Object.keys(body.output.properties)).toContain("outcome");
     expect(Object.keys(body.output.properties)).toContain("schemaVersion");

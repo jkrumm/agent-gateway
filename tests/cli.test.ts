@@ -31,6 +31,28 @@ function bodyFor(argv: string[], cwd = "/repo"): RequestBody {
   return requestBody(job, { cwd, context });
 }
 
+describe("wave 2 additions", () => {
+  test("dispatch --revision-of maps to params.revisionOf", () => {
+    expect(
+      bodyFor(["dispatch", "--tier", "implement", "--revision-of", "dispatch/x-1", "redo"]),
+    ).toEqual({
+      tool: "dispatch",
+      params: { cwd: "/repo", brief: "redo", tier: "implement", revisionOf: "dispatch/x-1" },
+    });
+  });
+
+  test("update-pr maps to the update_pr job", () => {
+    expect(bodyFor(["update-pr", "--pr", "42"])).toEqual({
+      tool: "update_pr",
+      params: { cwd: "/repo", pr: 42 },
+    });
+  });
+
+  test("update-pr requires --pr", () => {
+    expect(() => parseArgs(["update-pr"])).toThrow(/--pr/);
+  });
+});
+
 describe("argv parsing → POST body", () => {
   test("dispatch, defaults only", () => {
     const { command } = parseArgs(["dispatch", "fix the bug"]);

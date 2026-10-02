@@ -13,6 +13,7 @@ import {
 import { homedir } from "os";
 import { dirname, join } from "path";
 import { Octokit } from "@octokit/rest";
+import { z } from "zod";
 import { appLogger as logger } from "../../logger.ts";
 
 // Everything in this file runs in the SIDECLAW PROCESS, never inside a worker session.
@@ -472,11 +473,12 @@ export async function resolveRepoIdentity(cwd: string): Promise<RepoIdentity> {
  * shell, so worker-authored titles/bodies carrying newlines and quotes survive intact, and
  * there is no stdin plumbing to stub around.
  */
-async function glabApi(
+async function glabRaw(
   endpoint: string,
+  method: "GET" | "POST",
   fields: Record<string, string>,
-): Promise<Record<string, unknown>> {
-  const args = ["api", "--hostname", "gitlab.com", endpoint, "--method", "POST"];
+): Promise<unknown> {
+  const args = ["api", "--hostname", "gitlab.com", endpoint, "--method", method];
   for (const [key, value] of Object.entries(fields)) {
     args.push("--raw-field", `${key}=${value}`);
   }
@@ -494,10 +496,17 @@ async function glabApi(
     throw new Error(`glab ${endpoint} failed (${r.code}): ${r.stderr.trim().slice(0, 400)}`);
   }
   try {
-    return JSON.parse(r.stdout) as Record<string, unknown>;
+    return JSON.parse(r.stdout);
   } catch {
     throw new Error(`glab ${endpoint} returned non-JSON output: ${r.stdout.trim().slice(0, 200)}`);
   }
+}
+
+async function glabApi(
+  endpoint: string,
+  fields: Record<string, string>,
+): Promise<Record<string, unknown>> {
+  return (await glabRaw(endpoint, "POST", fields)) as Record<string, unknown>;
 }
 
 /** `group/sub/repo` percent-encoded for a GitLab API path — a nested namespace keeps its
@@ -572,6 +581,131 @@ export async function openIssue(
   return data.html_url;
 }
 
+/** The worktree's current HEAD commit. */
+export async function headOid(wt: DispatchWorktree): Promise<string> {
+  return gitOrThrow(["rev-parse", "--verify", "HEAD^{commit}"], wt.path);
+}
+
+/** A PR/MR as the merge train needs it: where it points, its head, and whether it is open. */
+export interface PullRequestInfo {
+  url: string;
+  number: number;
+  state: "open" | "closed" | "merged";
+  /** Source branch name. */
+  headRef: string;
+  headSha: string;
+  /** The branch it merges into. */
+  baseRef: string;
+  /** False for a fork PR — its head branch is not in this repo, so it is never ours to push. */
+  sameRepo: boolean;
+}
+
+function githubState(data: { state: string; merged?: boolean }): PullRequestInfo["state"] {
+  if (data.merged) return "merged";
+  return data.state === "open" ? "open" : "closed";
+}
+
+function githubPrInfo(data: {
+  html_url: string;
+  number: number;
+  state: string;
+  merged?: boolean;
+  head: { ref: string; sha: string; repo: { full_name: string } | null };
+  base: { ref: string; repo: { full_name: string } };
+}): PullRequestInfo {
+  return {
+    url: data.html_url,
+    number: data.number,
+    state: githubState(data),
+    headRef: data.head.ref,
+    headSha: data.head.sha,
+    baseRef: data.base.ref,
+    sameRepo: data.head.repo?.full_name === data.base.repo.full_name,
+  };
+}
+
+const GITLAB_MR = z.object({
+  web_url: z.string(),
+  iid: z.number(),
+  state: z.string(),
+  source_branch: z.string(),
+  target_branch: z.string(),
+  sha: z.string(),
+  source_project_id: z.number(),
+  target_project_id: z.number(),
+});
+
+function gitlabState(raw: string): PullRequestInfo["state"] {
+  if (raw === "opened") return "open";
+  return raw === "merged" ? "merged" : "closed";
+}
+
+/** Parsed, not cast: `runUpdatePr` trusts `state`/`sameRepo` for its safety checks before a
+ *  force push, so a response missing a field must fail loudly rather than coerce to
+ *  `undefined === undefined`. */
+function gitlabMrInfo(raw: unknown): PullRequestInfo {
+  const parsed = GITLAB_MR.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error(
+      `glab returned an unexpected merge request shape: ${parsed.error.message.slice(0, 200)}`,
+    );
+  }
+  const mr = parsed.data;
+  return {
+    url: mr.web_url,
+    number: mr.iid,
+    state: gitlabState(mr.state),
+    headRef: mr.source_branch,
+    headSha: mr.sha,
+    baseRef: mr.target_branch,
+    sameRepo: mr.source_project_id === mr.target_project_id,
+  };
+}
+
+/** Fetch one PR/MR by number. */
+export async function getPullRequest(id: RepoIdentity, number: number): Promise<PullRequestInfo> {
+  if (id.kind === "gitlab") {
+    const data = await glabRaw(gitlabProjectEndpoint(id, `merge_requests/${number}`), "GET", {});
+    return gitlabMrInfo(data);
+  }
+  const gh = await octokit();
+  const { data } = await gh.pulls
+    .get({ owner: id.owner, repo: id.repo, pull_number: number })
+    .catch((err: unknown) => {
+      throw describeGithubFailure(err, `read PR #${number} in ${id.owner}/${id.repo}`);
+    });
+  return githubPrInfo(data);
+}
+
+/** The OPEN PR/MR whose head is `branch`, or null. A revision pushes to this branch and must
+ *  update that PR rather than open a second one. */
+export async function findOpenPullRequest(
+  id: RepoIdentity,
+  branch: string,
+): Promise<PullRequestInfo | null> {
+  if (id.kind === "gitlab") {
+    const list = await glabRaw(
+      gitlabProjectEndpoint(
+        id,
+        `merge_requests?state=opened&source_branch=${encodeURIComponent(branch)}`,
+      ),
+      "GET",
+      {},
+    );
+    const first: unknown = Array.isArray(list) ? list[0] : undefined;
+    return first ? gitlabMrInfo(first) : null;
+  }
+  const gh = await octokit();
+  const { data } = await gh.pulls
+    .list({ owner: id.owner, repo: id.repo, state: "open", head: `${id.owner}:${branch}` })
+    .catch((err: unknown) => {
+      throw describeGithubFailure(err, `list PRs for ${branch} in ${id.owner}/${id.repo}`);
+    });
+  const first = data[0];
+  // `pulls.list` items carry no `merged` flag and are open by construction.
+  return first ? githubPrInfo({ ...first, merged: false }) : null;
+}
+
 /**
  * Open a pull request. Draft by default: a branch produced by an unattended episode is a
  * proposal, and "ready for review" is one click away for a human who has looked at it —
@@ -634,6 +768,14 @@ export interface DispatchWorktree {
    * when it failed to serialize — would happily publish a read-only episode's leftovers.
    */
   pushable: boolean;
+  /**
+   * The remote tip this worktree was cut from when it continues an EXISTING `dispatch/*`
+   * branch (a revision, or an `update_pr`). Set means `pushBranch` pushes with
+   * `--force-with-lease` pinned to this OID — the rebase rewrites history, so a plain push is
+   * rejected, and a bare `--force` would clobber a commit someone else pushed meanwhile.
+   * Absent for a branch this episode created: it does not exist on the remote yet.
+   */
+  remoteHead?: string;
 }
 
 /** The marker persisted as an in-place episode's `worktree_meta` — recognized by the
@@ -673,7 +815,9 @@ export async function createWorktree(
   jobKey: string,
   slug: string,
   defaultBranch: string,
+  revisionOf?: string,
 ): Promise<DispatchWorktree> {
+  if (revisionOf) return createRevisionWorktree(cwd, jobKey, revisionOf);
   const branch = `dispatch/${slug}-${jobKey.slice(0, 8)}`;
   const root = worktreeRoot();
   const path = join(root, jobKey);
@@ -719,6 +863,107 @@ export async function createWorktree(
     "worktree created",
   );
   return { path, branch, base: baseOid, baseRef: base, pushable: true };
+}
+
+/** Branches this tool owns and a revision/`update_pr` may continue: `dispatch/<slug>`, never
+ *  a read tier's `dispatch/read-<8 hex>` throwaway (an implement slug that merely starts with
+ *  "read-" always carries its own `-<jobKey>` suffix, so it is not caught), and a charset that cannot express a ref-name hazard. */
+const REVISABLE_BRANCH_RE = /^dispatch\/(?!read-[0-9a-f]{8}$)[a-z0-9][a-z0-9-]*$/;
+
+export function isRevisableBranch(branch: string): boolean {
+  return REVISABLE_BRANCH_RE.test(branch);
+}
+
+/**
+ * Cut a worktree from the remote tip of an existing `dispatch/*` branch, so the episode
+ * CONTINUES that work and its push updates the same PR. The fetch happens here, in the
+ * handler, with the handler's credentials — the worker never fetches (it has none).
+ *
+ * `base` is the prior tip, so `commitCount` counts only what this revision added and an
+ * empty revision reports `no_changes`. `remoteHead` pins the later force-with-lease push.
+ */
+async function createRevisionWorktree(
+  cwd: string,
+  jobKey: string,
+  branch: string,
+): Promise<DispatchWorktree> {
+  if (!isRevisableBranch(branch)) {
+    throw new Error(`dispatch refused: revisionOf must name a dispatch/* branch, got '${branch}'`);
+  }
+  const fetched = await git(
+    ["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`],
+    cwd,
+    120_000,
+  );
+  if (!fetched.ok) {
+    throw new Error(
+      `dispatch refused: cannot fetch revisionOf branch '${branch}' from origin — ` +
+        fetched.stderr.trim().slice(0, 200),
+    );
+  }
+  const priorOid = await gitOrThrow(["rev-parse", "--verify", `origin/${branch}^{commit}`], cwd);
+  const root = worktreeRoot();
+  const path = join(root, jobKey);
+  mkdirSync(root, { recursive: true });
+  if (existsSync(path)) rmSync(path, { recursive: true, force: true });
+  try {
+    // -B: a leftover local `dispatch/*` branch from a killed episode is tool-owned garbage
+    // and must not block the revision; a branch checked out in another worktree still fails.
+    await gitOrThrow(["worktree", "add", "--quiet", "-B", branch, path, priorOid], cwd, 120_000);
+  } catch (err) {
+    await discardWorktree(cwd, path, branch);
+    throw err;
+  }
+  logger.info(
+    { event: "dispatch.worktree", project: cwd, branch, base: priorOid, revision: true, path },
+    "revision worktree created from the prior branch tip",
+  );
+  return {
+    path,
+    branch,
+    base: priorOid,
+    baseRef: `origin/${branch}`,
+    pushable: true,
+    remoteHead: priorOid,
+  };
+}
+
+/**
+ * Rebase the episode's branch onto the latest remote default branch, with no hooks. Returns
+ * the new pinned base on success; on any rebase failure the rebase is aborted (the branch is
+ * left exactly as committed) and the reason returned — the caller reports `conflict` and the
+ * CALLER re-dispatches. A worker never resolves a conflict: it has no credentials and a
+ * hand-merged resolution is unreviewed code written under pressure.
+ *
+ * The fetch of the default branch must succeed (unlike `createWorktree`'s best-effort one):
+ * rebasing onto a stale base and reporting `up_to_date` or pushing would defeat the point.
+ * A fetch failure fails the job; the caller retries.
+ */
+export async function rebaseOntoDefault(
+  wt: DispatchWorktree,
+  defaultBranch: string,
+): Promise<{ ok: true; base: string; rebased: boolean } | { ok: false; reason: string }> {
+  const fetched = await git(["fetch", "origin", defaultBranch], wt.path, 120_000);
+  if (!fetched.ok) {
+    throw new Error(
+      `could not fetch origin/${defaultBranch} before the rebase: ${fetched.stderr.trim().slice(0, 200)}`,
+    );
+  }
+  const target = await gitOrThrow(
+    ["rev-parse", "--verify", `origin/${defaultBranch}^{commit}`],
+    wt.path,
+  );
+  const contains = await git(["merge-base", "--is-ancestor", target, "HEAD"], wt.path);
+  if (contains.ok) return { ok: true, base: target, rebased: false };
+  const rebase = await git(["-c", "core.hooksPath=/dev/null", "rebase", target], wt.path, 120_000);
+  if (rebase.ok) return { ok: true, base: target, rebased: true };
+  await git(["rebase", "--abort"], wt.path);
+  const reason = (rebase.stderr.trim() || rebase.stdout.trim()).slice(0, 400);
+  logger.warn(
+    { event: "dispatch.rebase_conflict", branch: wt.branch, reason },
+    "rebase onto the latest default branch failed",
+  );
+  return { ok: false, reason };
 }
 
 /**
@@ -1659,8 +1904,8 @@ async function addedLineSecrets(cwd: string, base: string, extraText?: string): 
  * and names exactly one branch, so there is no shape of worker output that turns this into a
  * push to another ref; the default-branch check is explicit rather than implied by the
  * refspec, because that is the invariant a reader needs to see stated; and the `dispatch/`
- * prefix means a push can only ever land in the namespace this tool owns. There is no force
- * flag anywhere — the branch is new, so a push that would need one is a bug worth failing on.
+ * prefix means a push can only ever land in the namespace this tool owns. The only force is
+ * `--force-with-lease` pinned to `wt.remoteHead`, and only for a branch the episode continued.
  */
 export async function pushBranch(wt: DispatchWorktree, id: RepoIdentity): Promise<void> {
   if (!wt.pushable) {
@@ -1678,9 +1923,13 @@ export async function pushBranch(wt: DispatchWorktree, id: RepoIdentity): Promis
       `worktree HEAD is ${head}, not the episode's branch ${wt.branch} — refusing to push a branch this episode did not create`,
     );
   }
-  await gitOrThrow(
-    ["push", "origin", `refs/heads/${wt.branch}:refs/heads/${wt.branch}`],
-    wt.path,
-    180_000,
-  );
+  const refspec = `refs/heads/${wt.branch}:refs/heads/${wt.branch}`;
+  // A branch this episode created is new on the remote: a plain push, so one that would need
+  // force is a bug worth failing on. A continued branch (revision / update_pr) was rewritten
+  // by the rebase, so it is pushed with a lease pinned to the tip it was cut from — it fails
+  // if anyone pushed in between, and never clobbers a ref the handler has not seen.
+  const args = wt.remoteHead
+    ? ["push", `--force-with-lease=refs/heads/${wt.branch}:${wt.remoteHead}`, "origin", refspec]
+    : ["push", "origin", refspec];
+  await gitOrThrow(args, wt.path, 180_000);
 }

@@ -394,6 +394,22 @@ excluded from `changedFiles`; never reverted, stashed or committed by the
 handler. Never auto-resumed on boot (`interrupted` instead) — no worktree to
 reconstruct and no durable snapshot to attribute a re-run against.
 
+**Revisions, rebase, `update_pr`, lease** (2026-10-02). `revisionOf: <dispatch/* branch>`
+(implement + worktree only) makes the **handler** fetch that branch and cut the
+worktree from its tip — the worker never fetches; the push is `--force-with-lease`
+pinned to the fetched tip and the existing open PR is updated (`pr_updated`), no new PR.
+Every implement push first rebases onto a freshly fetched default branch (fetch must
+succeed); a conflict aborts, bundles the commits into the salvage dir and returns
+`conflict` — the caller re-dispatches, nothing is hand-resolved. **`update_pr {cwd, pr}`**
+(job tool, MCP tool, `sideclaw update-pr --pr N`) is the same rebase + checks + lease push
+for an open same-repo `dispatch/*` PR targeting the default branch → `{status:
+updated|up_to_date|conflict, headSha, checks}`; checks are skipped when nothing moved and a
+red result is still pushed (the merge train reads `checks`). **One implement-class episode
+per repo at a time, across every caller** (`server/lib/repo-lease.ts`, in-process map —
+exact because the server is single-process): worktree, in-place and `update_pr` all take it;
+a second is refused with the holder's job id. `DISPATCH_SCHEMA_VERSION` is still 3 although
+`pr_updated`/`conflict` are new outcomes — bump to 4 together with warden's pin.
+
 **`sensitive`** opens `investigate` for secret-bearing repos (`dotfiles-private`,
 `homelab-private`) — refused outright at any other tier, before a worktree
 exists, since a filed issue or pushed branch has no safe artifact path there.
