@@ -2,7 +2,8 @@
 // "Retry policy" section for why turns-produced-output is checked outside this
 // function rather than folded into it.
 
-import { afterAll, describe, expect, setSystemTime, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, setSystemTime, test } from "bun:test";
+import type { ToolRoute } from "../server/lib/routing.ts";
 import {
   isRetryableSessionError,
   retryBackoffMs,
@@ -15,6 +16,7 @@ import {
   backendFallbacksLastHour,
   recordFallback,
   isIuNeverAnswered,
+  isIuServerError,
   recordRouteOutcome,
   routeFailureStreaks,
   ROUTE_STREAK_LIMIT,
@@ -22,6 +24,12 @@ import {
   __resetRouteStreaksForTests,
   isIdleTimedOut,
   IDLE_TIMEOUT_MS,
+  runSession,
+  __setAttemptRunnerForTests,
+  __resetAttemptRunnerForTests,
+  type ForcedAttempt,
+  type SessionOptions,
+  type SessionResult,
 } from "../server/mcp/session-runner.ts";
 
 describe("isRetryableSessionError", () => {
@@ -633,6 +641,59 @@ describe("classifyExitFailure", () => {
     expect(r.error).toBe("Session exited with code 1 (unknown): boom");
   });
 
+  test("an is_error 503 envelope reports the real cause, never the exit code", () => {
+    const r = classifyExitFailure(
+      1,
+      {
+        subtype: "success",
+        is_error: true,
+        api_error_status: 503,
+        errors: ["upstream overloaded"],
+      },
+      "",
+      "",
+      { turnsObserved: 1, backend: "iu" },
+    );
+    expect(r.error).toBe("IU 503: upstream overloaded");
+    expect(r.error).not.toContain("exited with code");
+    expect(isRetryableSessionError(r.error)).toBe(true);
+  });
+
+  test("the zero-turn carve-out lets `result` through; with a turn on record it stays out", () => {
+    const envelope = {
+      subtype: "success",
+      is_error: true,
+      api_error_status: 503,
+      result: "gateway says: Service Unavailable",
+    };
+    expect(
+      classifyExitFailure(1, envelope, "", "", { turnsObserved: 0, backend: "iu" }).error,
+    ).toBe("IU 503: gateway says: Service Unavailable");
+    // One synthetic/model turn: `result` may be model text — never leaks into `error`.
+    expect(
+      classifyExitFailure(1, envelope, "", "", { turnsObserved: 1, backend: "iu" }).error,
+    ).toBe("IU 503");
+    // A caller that cannot prove the turn count never gets `result` either.
+    expect(classifyExitFailure(1, envelope, "", "").error).toBe("API 503");
+  });
+
+  test("an is_error envelope without a status is not worded as a success envelope", () => {
+    const r = classifyExitFailure(
+      1,
+      { subtype: "success", is_error: true, errors: ["Not logged in"] },
+      "",
+      "",
+    );
+    expect(r.error).toBe(
+      "Session exited with code 1 with an is_error result envelope: Not logged in",
+    );
+  });
+
+  test("a genuine success envelope with a non-zero exit keeps its wording", () => {
+    const r = classifyExitFailure(1, { subtype: "success", is_error: false }, "", "");
+    expect(r.error).toBe("Session exited with code 1 after a success result envelope");
+  });
+
   // Regression for job 32118606: the exit branch used to drop lastAssistantText, so the
   // review salvage branch published the constructed error — ending in the contradictory
   // "Session exited with code 1 (success)" — as the "preserved raw synthesizer output".
@@ -828,5 +889,171 @@ describe("isIdleTimedOut", () => {
   test("flags idle once the gap since the last chunk reaches IDLE_TIMEOUT_MS", () => {
     expect(isIdleTimedOut(IDLE_TIMEOUT_MS - 1, 0)).toBe(false);
     expect(isIdleTimedOut(IDLE_TIMEOUT_MS, 0)).toBe(true);
+  });
+});
+
+// ── Post-output IU 5xx fallback ──────────────────────────────────────────────────────
+
+describe("isIuServerError", () => {
+  test("a structured 5xx status matches; a non-5xx status does not, whatever the text", () => {
+    expect(isIuServerError({ apiErrorStatus: 503 })).toBe(true);
+    expect(isIuServerError({ apiErrorStatus: 529 })).toBe(true);
+    expect(isIuServerError({ apiErrorStatus: 404, classificationText: "IU 404 … 503" })).toBe(
+      false,
+    );
+    expect(isIuServerError({ apiErrorStatus: 429 })).toBe(false);
+  });
+
+  test("without a status, transport text decides: 5xx and connection errors yes, wrapped client errors and timeouts no", () => {
+    expect(isIuServerError({ classificationText: "IU 502: bad gateway" })).toBe(true);
+    expect(isIuServerError({ classificationText: "fetch failed: ECONNRESET" })).toBe(true);
+    expect(
+      isIuServerError({
+        classificationText: "503 [Requesty Global Anthropic API StatusCode: BadRequest]",
+      }),
+    ).toBe(false);
+    expect(
+      isIuServerError({ classificationText: "Session timed out — idle 502ms with no stdout" }),
+    ).toBe(false);
+    expect(isIuServerError({})).toBe(false);
+  });
+});
+
+describe("planNextAttempt — post-output IU 5xx", () => {
+  const input = {
+    attempt: 1,
+    noOutputYet: false,
+    usedFallback: false,
+    routeModel: "DeepSeek-V4-Flash",
+    fallback: { backend: "max" as const, model: "claude-haiku-4-5" },
+    readOnly: true,
+    result: {
+      ok: false,
+      backend: "iu" as const,
+      error: "IU 503: upstream overloaded",
+      classificationText: "IU 503: upstream overloaded api_error_status=503",
+      apiErrorStatus: 503,
+    },
+  };
+
+  test("a read-only worker falls back to max on a 5xx after output", () => {
+    expect(planNextAttempt(input)).toEqual({
+      kind: "fallback",
+      forced: { backend: "max", model: "claude-haiku-4-5", reason: "iu-5xx-after-output" },
+    });
+  });
+
+  test("retryAfterOutput opts a non-readOnly worker in too", () => {
+    expect(planNextAttempt({ ...input, readOnly: false, retryAfterOutput: true }).kind).toBe(
+      "fallback",
+    );
+  });
+
+  test("a write tier never falls back after output", () => {
+    expect(planNextAttempt({ ...input, readOnly: false }).kind).toBe("return");
+  });
+
+  test("a non-5xx failure after output does not fall back", () => {
+    for (const result of [
+      {
+        ...input.result,
+        apiErrorStatus: 429,
+        error: "IU 429: slow down",
+        classificationText: "IU 429: slow down",
+      },
+      {
+        ok: false,
+        backend: "iu" as const,
+        error: "result is not valid JSON",
+        classificationText: undefined,
+      },
+    ]) {
+      expect(planNextAttempt({ ...input, result }).kind).toBe("return");
+    }
+  });
+
+  test("a second failure never hops again, and max-backend 5xx is not this lane", () => {
+    expect(planNextAttempt({ ...input, usedFallback: true }).kind).toBe("return");
+    expect(
+      planNextAttempt({ ...input, result: { ...input.result, backend: "max" as const } }).kind,
+    ).toBe("return");
+  });
+});
+
+describe("runSession — post-output IU 5xx fallback loop", () => {
+  const route: ToolRoute = {
+    model: "DeepSeek-V4-Flash",
+    backend: "iu",
+    fallback: { backend: "max", model: "claude-haiku-4-5" },
+    transport: "session",
+    harness: "claude",
+  };
+  const opts: SessionOptions<unknown> = {
+    cwd: "/tmp",
+    prompt: "irrelevant — attempt runner is faked",
+    route,
+    tool: "check",
+    readOnly: true,
+  };
+  const iuFail = (error: string, apiErrorStatus: number): SessionResult<unknown> => ({
+    ok: false,
+    error,
+    classificationText: error,
+    apiErrorStatus,
+    backend: "iu",
+    model: route.model,
+  });
+
+  afterEach(() => __resetAttemptRunnerForTests());
+
+  function fake(results: (forced: ForcedAttempt | undefined) => SessionResult<unknown>) {
+    const calls: (ForcedAttempt | undefined)[] = [];
+    __setAttemptRunnerForTests(
+      async <T>(_o: SessionOptions<T>, turnsRef: { current: number }, forced?: ForcedAttempt) => {
+        calls.push(forced);
+        turnsRef.current = 3; // output already produced
+        return results(forced) as SessionResult<T>;
+      },
+    );
+    return calls;
+  }
+
+  test("a 5xx after output runs the fallback once and returns its success", async () => {
+    const calls = fake((forced) =>
+      forced
+        ? { ok: true, data: "done", backend: forced.backend, model: forced.model }
+        : iuFail("IU 503: overloaded", 503),
+    );
+    const r = await runSession(opts);
+    expect(r.ok).toBe(true);
+    expect(calls).toEqual([
+      undefined,
+      { backend: "max", model: "claude-haiku-4-5", reason: "iu-5xx-after-output" },
+    ]);
+  });
+
+  test("a failing fallback is returned as-is — never a second hop", async () => {
+    const calls = fake((forced) =>
+      forced
+        ? {
+            ok: false,
+            error: "IU 503: still",
+            classificationText: "IU 503: still",
+            apiErrorStatus: 503,
+            backend: "max",
+            model: forced.model,
+          }
+        : iuFail("IU 503: overloaded", 503),
+    );
+    const r = await runSession(opts);
+    expect(r.ok).toBe(false);
+    expect(calls).toHaveLength(2);
+  });
+
+  test("a non-5xx failure after output returns after a single attempt", async () => {
+    const calls = fake(() => iuFail("IU 429: slow down", 429));
+    const r = await runSession(opts);
+    expect(r.ok).toBe(false);
+    expect(calls).toHaveLength(1);
   });
 });

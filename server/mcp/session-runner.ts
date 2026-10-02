@@ -1051,6 +1051,30 @@ export function isIuNeverAnswered(text: string): boolean {
   return IU_NEVER_ANSWERED_RE.test(text);
 }
 
+/** HTTP statuses the IU gateway/API uses for "the server failed, the request itself was
+ *  fine" — the closed set a post-output fallback may act on. */
+const SERVER_ERROR_STATUSES = new Set([500, 502, 503, 504, 529]);
+const SERVER_ERROR_TEXT_RE = /\b(500|502|503|504|529)\b/;
+
+/** Does this attempt's TRANSPORT-sourced evidence say the gateway/API failed server-side
+ *  (5xx or a connection-level error) rather than refusing or rejecting the request? Pure.
+ *  The structured `apiErrorStatus` wins when present (any non-5xx status is a no), else the
+ *  transport-sourced `classificationText` (never model stdout) is matched. A gateway-wrapped
+ *  client error (`503 [… StatusCode: BadRequest]`) is deterministic and never matches, and
+ *  neither does a watchdog timeout — an idle kill carries no server verdict. Feeds the
+ *  post-output `iu` → `max` fallback in `planNextAttempt`. */
+export function isIuServerError(evidence: {
+  apiErrorStatus?: number | null;
+  classificationText?: string;
+}): boolean {
+  const text = evidence.classificationText ?? "";
+  if (WRAPPED_TERMINAL_RE.test(text) || text.startsWith("Session timed out")) return false;
+  if (typeof evidence.apiErrorStatus === "number") {
+    return SERVER_ERROR_STATUSES.has(evidence.apiErrorStatus);
+  }
+  return SERVER_ERROR_TEXT_RE.test(text) || CONNECTION_ERROR_RE.test(text);
+}
+
 /** Append the result event's own `api_error_status` (see `SessionResult.apiErrorStatus`)
  *  to an already-built classification string, so the text-based classifiers can see it
  *  too — transport/CLI-sourced, same standing as the rest of that text. A no-op when no
@@ -1110,27 +1134,55 @@ export function exitCodeIsFailure(
  *  never quota-classify. */
 export function classifyExitFailure(
   exitCode: number,
-  envelope: { subtype?: string; errors?: string[] } | undefined,
+  envelope:
+    | {
+        subtype?: string;
+        errors?: string[];
+        is_error?: boolean;
+        result?: string;
+        api_error_status?: number | null;
+      }
+    | undefined,
   stderrTrimmed: string,
   lastAssistantText: string,
+  ctx: { turnsObserved?: number; backend?: Backend } = {},
 ): { error: string; noOutput: boolean; rawText: string | undefined } {
   const rawText = lastAssistantText || undefined;
   if (envelope) {
     // `errors[]` is CLI-sourced; `result` is the model's own final text and stays out of
     // `error` — that string feeds the reactive fallback classifier and a needs_human card,
-    // and an episode's brief is attacker-influenceable.
-    const detail = envelope.errors?.join("; ") || undefined;
+    // and an episode's brief is attacker-influenceable. The one exception mirrors
+    // `classifyErrorEnvelope`'s zero-turn carve-out: on an `is_error` envelope the model
+    // provably never spoke when `turnsObserved === 0`, so `result` is gateway/CLI text.
+    // Without `ctx.turnsObserved` (a caller that cannot prove it) `result` is never used.
+    const zeroTurnResult =
+      envelope.is_error === true && ctx.turnsObserved === 0 ? envelope.result?.trim() : undefined;
+    const detail = envelope.errors?.join("; ") || zeroTurnResult || undefined;
     const errorSubtype =
       envelope.subtype === "error_max_turns" ||
       envelope.subtype === "error_max_structured_output_retries";
+    // The gateway/API itself answering with an error (503 …): surface the real cause, led
+    // by the status, instead of the exit code. `IU 503` also keeps `isRetryableSessionError`
+    // able to see the status, which "exited with code 1 …" never carried.
+    if (envelope.is_error === true && typeof envelope.api_error_status === "number") {
+      const source = ctx.backend === "iu" ? "IU" : "API";
+      return {
+        error: `${source} ${envelope.api_error_status}${detail ? `: ${detail}` : ""}`,
+        noOutput: errorSubtype,
+        rawText,
+      };
+    }
     // A present non-error subtype (a `success` envelope followed by a process exit 1)
     // reads self-contradictory in the parenthetical form — "(success)" was published as
     // part of a verdict (job 32118606) — so word those differently. Absent and `error_*`
-    // subtypes keep the original shape.
+    // subtypes keep the original shape. An `is_error` envelope is never described as a
+    // success one, even when its subtype says so ("Not logged in").
     const error =
       !envelope.subtype || errorSubtype
         ? `Session exited with code ${exitCode} (${envelope.subtype ?? "unknown"})${detail ? `: ${detail}` : ""}`
-        : `Session exited with code ${exitCode} after a ${envelope.subtype} result envelope${detail ? `: ${detail}` : ""}`;
+        : envelope.is_error === true
+          ? `Session exited with code ${exitCode} with an is_error result envelope${detail ? `: ${detail}` : ""}`
+          : `Session exited with code ${exitCode} after a ${envelope.subtype} result envelope${detail ? `: ${detail}` : ""}`;
     return { error, noOutput: errorSubtype, rawText };
   }
   const cleanStderr = stripBenignStderr(stderrTrimmed);
@@ -1375,11 +1427,12 @@ export class SessionCancelledError extends Error {
 
 /** A retry that skips `resolveBackend`: the loop already decided where the next
  *  attempt goes. `rate-limited` is the `max`→`iu` quota lane, `iu-unavailable` the
- *  reverse `iu`→`max` lane. */
+ *  reverse `iu`→`max` lane, `iu-5xx-after-output` the same direction for an IU server
+ *  error that arrived AFTER the worker's first output (side-effect-free workers only). */
 export interface ForcedAttempt {
   backend: Backend;
   model: string;
-  reason: "rate-limited" | "iu-unavailable";
+  reason: "rate-limited" | "iu-unavailable" | "iu-5xx-after-output";
 }
 
 /** Pure: which harness THIS attempt actually spawns. A forced attempt (a fallback lane
@@ -1456,7 +1509,9 @@ async function runSessionAttempt<T = unknown>(
       { event: "backend.fallback", ...errCtx, reason: forced.reason },
       forced.reason === "rate-limited"
         ? "falling back to iu after a max-quota-flavored failure"
-        : "falling back to max — IU produced no output (transport failure, no credentials, or a silent timeout)",
+        : forced.reason === "iu-5xx-after-output"
+          ? "falling back to max — IU answered with a server error after first output"
+          : "falling back to max — IU produced no output (transport failure, no credentials, or a silent timeout)",
     );
   } else {
     runnerLogger().info(
@@ -1851,6 +1906,7 @@ async function runSessionAttempt<T = unknown>(
       envelope,
       stderrTrimmed,
       lastAssistantText,
+      { turnsObserved: Math.max(envelope?.num_turns ?? 0, turns), backend },
     );
     const classificationText = appendApiErrorStatus(error, apiErrorStatus);
     return {
@@ -2123,6 +2179,10 @@ export interface NextAttemptInput {
   /** `SessionOptions.retryAfterOutput`: a timeout may switch lanes even after output,
    *  because this worker has no side effects to half-finish. Off for every other lane. */
   retryAfterOutput?: boolean;
+  /** `SessionOptions.readOnly`: Edit/Write are disabled, so a fresh re-run after output cannot
+   *  double-apply edits. Together with `retryAfterOutput`, the only workers a post-output
+   *  IU 5xx may fall back for. */
+  readOnly?: boolean;
   /** A lane switch already happened in this session — never a second one. */
   usedFallback: boolean;
   /** The route's fallback after the global `SIDECLAW_WORKER_FALLBACK=none` gate. */
@@ -2145,8 +2205,12 @@ export type NextAttemptPlan =
  *     (`apiErrorStatus`, e.g. an unrecognized model id or a cost-ceiling denial — see
  *     `gatewayRefused` below); after one same-backend retry for an ordinary transport
  *     error.
- *  3. Transient transport error → retry the same backend (bounded by MAX_SESSION_ATTEMPTS).
- *  4. Otherwise return. A fallback attempt that fails is never switched again. */
+ *  3. `iu` + max fallback + an IU server error (`isIuServerError`) AFTER first output, for a
+ *     `readOnly`/`retryAfterOutput` worker only → fallback to `max`, fresh session, no
+ *     same-backend retry (a re-run after output is not the cheap no-output retry). A write
+ *     tier is excluded: its worktree may already hold half-applied edits.
+ *  4. Transient transport error → retry the same backend (bounded by MAX_SESSION_ATTEMPTS).
+ *  5. Otherwise return. A fallback attempt that fails is never switched again. */
 export function planNextAttempt(input: NextAttemptInput): NextAttemptPlan {
   const { result, attempt, noOutputYet, usedFallback, fallback, routeModel } = input;
   const retryAfterOutput = input.retryAfterOutput === true;
@@ -2223,6 +2287,27 @@ export function planNextAttempt(input: NextAttemptInput): NextAttemptPlan {
     };
   }
 
+  const sideEffectFree = input.readOnly === true || retryAfterOutput;
+  if (
+    !result.ok &&
+    !usedFallback &&
+    !isLastAttempt &&
+    !noOutputYet &&
+    sideEffectFree &&
+    result.backend === "iu" &&
+    fallback?.backend === "max" &&
+    isIuServerError(result)
+  ) {
+    return {
+      kind: "fallback",
+      forced: {
+        backend: "max",
+        model: fallback.model ?? routeModel,
+        reason: "iu-5xx-after-output",
+      },
+    };
+  }
+
   const canRetry =
     !result.ok && !isLastAttempt && noOutputYet && !noCredentials && isRetryableSessionError(error);
   return { kind: canRetry ? "retry" : "return" };
@@ -2295,11 +2380,27 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       attempt,
       noOutputYet: turnsRef.current === 0,
       retryAfterOutput: opts.retryAfterOutput,
+      readOnly: opts.readOnly,
       usedFallback,
       fallback,
       routeModel: route.model,
     });
     if (plan.kind === "fallback") {
+      runnerLogger().warn(
+        {
+          event: "session.fallback",
+          project: opts.cwd,
+          tool: opts.tool,
+          jobId: opts.jobId,
+          attempt,
+          reason: plan.forced.reason,
+          from: { backend: result.backend, model: result.model },
+          to: { backend: plan.forced.backend, model: plan.forced.model },
+          afterOutput: turnsRef.current > 0,
+          error: result.error,
+        },
+        "session switching lanes",
+      );
       usedFallback = true;
       forced = plan.forced;
       continue;
