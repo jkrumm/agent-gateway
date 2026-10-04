@@ -12,16 +12,16 @@ Phase 1 — Data Gathering (parallel shell, ~2s)
 └── package.json (test script detection)
 
 Phase 1b (parallel sidecar, started right after Phase 1, ~3-7 min) — OpenCodeReview
-└── `ocr review` (alibaba/open-code-review CLI) on DeepSeek-V4-Flash over IU —
+└── `ocr review` (alibaba/open-code-review CLI) on the `review_ocr` route's model over IU —
     awaited only just before synthesis, so its wall time overlaps the router +
     angle phases instead of sitting in front of them. `SIDECLAW_REVIEW_OCR=0`
     disables it.
 
-Phase 1.5 — Angle Routing (one glm-5.3-flash triage session on IU, ~10-20s)
+Phase 1.5 — Angle Routing (one triage call on the `review_router` route (IU), ~10-20s)
 └── Reads the diff, adds content-driven angles on top of the deterministic floor
     (skipped when the caller passes an explicit `angles` list)
 
-Phase 2 — Angle Reviews (parallel claude-sonnet-5 sessions, capped at 3 in flight)
+Phase 2 — Angle Reviews (parallel angle sessions on the `review` route's model, capped at 3 in flight)
 ├── Architect           ← always (floor)
 ├── Senior Dev          ← always (floor)
 ├── Frontend Expert     ← if .tsx/.jsx/.css in diff (floor)
@@ -36,10 +36,10 @@ Phase 2 — Angle Reviews (parallel claude-sonnet-5 sessions, capped at 3 in fli
 └── Resilience          ← router, if the diff touches crash/restart/deploy paths
 
 Phase 2b (parallel sidecar) — Adversary Critic
-└── Single non-agentic gpt-5.6-terra call via IU OpenAI transport — the only
+└── Single non-agentic call on the `adversary` route's model via IU OpenAI transport — the only
     cross-family reviewer in the pipeline. Always runs unless disabled.
 
-Phase 3 — Synthesis (single claude-sonnet-5 session, ~15s)
+Phase 3 — Synthesis (single session on the `review` route's model, ~15s)
 └── Deduplicates, resolves conflicts, classifies findings
 ```
 
@@ -48,7 +48,7 @@ Phase 3 — Synthesis (single claude-sonnet-5 session, ~15s)
 Selection has two layers. A **deterministic floor** is picked from changed file
 extensions (instant, free, always covers the basics). A **triage router** then
 adds content-driven angles that file types can't detect — it reads the diff once
-on `routeFor("review_router")` (one tool-less single-shot call, deepseek-v4.1-flash over the IU
+on `routeFor("review_router")` (one tool-less single-shot call, the cheap triage model over the IU
 OpenAI transport, the diff inline in the prompt — no worker session, no Max lane) and returns the extra angles it judges relevant. Total angles are
 capped at `MAX_ANGLES` (8); the floor is kept first, router extras fill the rest.
 
@@ -155,32 +155,32 @@ Each agent loads project context via `--setting-sources user,project`:
 
 ## Cost Profile
 
-Angle + synthesis sessions run on **claude-sonnet-5** over the **Max** backend
+Angle + synthesis sessions run on the `review` route's model over the **Max** backend
 (`routeFor("review")`), falling back to IU per-token only when a Max session dies
 with a quota error. The router runs as one single-shot call
-(`deepseek-v4.1-flash` over the IU OpenAI transport), and the adversary critic uses the **IU OpenAI transport**
-(`gpt-5.6-terra`) directly — IU per-token, zero Max, and a different model family
-so its bias profile is uncorrelated with the claude-sonnet-5 reviewers. The live
+(the cheap triage model over the IU OpenAI transport), and the adversary critic uses the **IU OpenAI transport**
+(the `adversary` route's model) directly — IU per-token, zero Max, and a different model family
+so its bias profile is uncorrelated with the Claude reviewers. The live
 table is always `GET /api/routing`.
 
-| Component                                                                                  | Model               |
-| ------------------------------------------------------------------------------------------ | ------------------- |
-| 1 router call (own `review_router` route — single-shot, no agent, same tier as `triage`)   | deepseek-v4.1-flash |
-| 2–8 angle sessions (3 in flight)                                                           | claude-sonnet-5     |
-| 1 adversary critic (single HTTPS call, no agent)                                           | gpt-5.6-terra       |
-| 1 OpenCodeReview run (own `review_ocr` route, external CLI, parallel with router + angles) | deepseek-v4.1-flash |
-| 1 synthesis session                                                                        | claude-sonnet-5     |
+| Component                                                                                  | Route           |
+| ------------------------------------------------------------------------------------------ | --------------- |
+| 1 router call (own `review_router` route — single-shot, no agent, same tier as `triage`)   | `review_router` |
+| 2–8 angle sessions (3 in flight)                                                           | `review`        |
+| 1 adversary critic (single HTTPS call, no agent)                                           | `adversary`     |
+| 1 OpenCodeReview run (own `review_ocr` route, external CLI, parallel with router + angles) | `review_ocr`    |
+| 1 synthesis session                                                                        | `review`        |
 
 OCR reads the repo itself with its own tool loop rather than working off a single diff
 string, so its own IU-billed token spend (`review_ocr` in the `sideclaw-iu` usage sink) runs
-**~1.5-3M tokens per run** on deepseek-v4.1-flash with `--effort low` (~2.5-3 min on a
+**~1.5-3M tokens per run** on the `review_ocr` model with `--effort low` (~2.5-3 min on a
 1.8k-line diff), mostly cache reads. ocr's wall time is LLM rounds × ~5 s, so the default
 effort's second review pass doubled it — see the `review_ocr` comment in
 `server/lib/routing.ts` for the full bake-off.
 
-`gpt-5.6-terra` is a reasoning model — it thinks before answering, so it is
+The adversary model is a reasoning model — it thinks before answering, so it is
 slower (~50s) and pricier ($2.50/$15 per 1M, ~$0.08 a review) than the
-`gemini-3.5-flash` it replaced, but it is a stronger critic and still a single
+non-reasoning model it replaced, but it is a stronger critic and still a single
 call with no agent loop. Two wiring rules are easy to get wrong:
 
 - **`temperature` must not be sent.** It accepts only the default (1) and 400s
@@ -208,9 +208,9 @@ the router. Set `SIDECLAW_REVIEW_ADVERSARY=false` to disable the adversary.
 
 ### Why the adversary is non-negotiable by default
 
-Every other reviewer in this pipeline is a claude-sonnet-5 session. Same-family
-reviewers share correlated blind spots — a consensus of 6 claude-sonnet-5 angles
-is not the same signal as 5 claude-sonnet-5 angles + 1 cross-family critic. The adversary runs as a
+Every other reviewer in this pipeline is a Claude session. Same-family
+reviewers share correlated blind spots — a consensus of 6 Claude angles
+is not the same signal as 5 Claude angles + 1 cross-family critic. The adversary runs as a
 single HTTPS call (no agent loop, no `claude -p`), so it costs cents and runs
 inside phase 2's existing window while killing the implicit self-attribution
 bias that same-family multi-reviewer pipelines otherwise carry.

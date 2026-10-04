@@ -106,8 +106,9 @@ is already assembled into the prompt by the handler.
   nothing to do — **the default when the model is unsure**). Each entry also
   carries `standing` (≤120 chars, present tense, what the agent is actually
   doing), `blocker` (≤80 chars or null) and `confidence` (`high`/`medium`/`low`).
-- **Model/backend come from `routeFor("overview")`** — glm-5.3-flash on IU,
-  Haiku-on-Max as the reverse lane — this is classification over a prompt,
+- **Model/backend come from `routeFor("overview")`** — the cheap
+  classification model on IU, a cheap Claude model on Max as the reverse lane
+  (ids: `GET /api/routing`) — this is classification over a prompt,
   not code judgment, the same reasoning that put `check` on the cheap tier.
   Override via the job's `model` input param (`withModel`); a gateway id can
   never land on Max.
@@ -276,8 +277,8 @@ narrative"), never inline in an interactive session.
   contains a colon-space, which breaks an unquoted YAML flow scalar. The
   `## Open questions` section is omitted entirely when the model returned
   none — not an empty heading.
-- **Model/backend come from `routeFor("narrative")`** — `claude-sonnet-5[1m]`
-  on Max (a flat subscription, free at the margin), same model on IU as the
+- **Model/backend come from `routeFor("narrative")`** — a Claude model
+  on Max (a flat subscription, free at the margin; id: `GET /api/routing`), same model on IU as the
   reverse fallback lane — this is editorial judgment over a prompt, not
   classification, the opposite reasoning from `overview`'s cheap tier. A daily
   cron pass across several projects spends real tokens, so callers should not

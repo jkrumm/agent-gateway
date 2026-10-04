@@ -121,9 +121,9 @@ export const DISPATCH_INPUT = z.object({
     .string()
     .optional()
     .describe(
-      "Optional model override, e.g. 'claude-opus-5[1m]'. Defaults to DeepSeek-V4-Flash on " +
-        "the metered IU lane (claude-sonnet-5[1m] on Max is only the reactive fallback); " +
-        "only override on explicit request, a Claude override spends Max quota.",
+      "Optional model override (a verified registry id — see GET /api/routing). Defaults to " +
+        "the route's own model on the metered IU lane (a Claude model on Max is only the " +
+        "reactive fallback); only override on explicit request, a Claude override spends Max quota.",
     ),
   sensitive: z
     .boolean()
