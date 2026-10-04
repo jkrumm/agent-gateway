@@ -3,7 +3,7 @@ import { join } from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
 import { runSession, zodValidator } from "../../mcp/session-runner.ts";
-import { routeFor } from "../../lib/routing.ts";
+import { routeFor, routeForReviewAngle } from "../../lib/routing.ts";
 import { textComplete } from "../../lib/iu-openai.ts";
 import { dataBlock, newFenceNonce } from "../../lib/prompt-fence.ts";
 import { parseJsonLoose, singleShotJson } from "../../lib/single-shot.ts";
@@ -1098,7 +1098,7 @@ export async function runReview(
           tool: "review:angle",
           jobId,
           isCancelled,
-          route: routeFor("review"),
+          route: routeForReviewAngle(agent.angle),
           model,
           jsonSchema: ANGLE_JSON_SCHEMA,
           readOnly: true,

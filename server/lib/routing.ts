@@ -96,6 +96,13 @@ export const ROUTED_TOOLS = [
   "review_router",
   "narrative",
   "review",
+  // Per-angle keys for the worker angle sessions that may be re-pointed independently of
+  // `review` (synthesis, architect, security and the rest stay on `review`). Suffix = the angle
+  // id with `-` → `_` (see `reviewAngleRouteKey`), so env names stay SIDECLAW_MODEL_REVIEW_ANGLE_<SUFFIX>.
+  "review_angle_senior_dev",
+  "review_angle_typescript",
+  "review_angle_frontend",
+  "review_angle_qa",
   "review_ocr",
   "adversary",
   "dispatch",
@@ -157,91 +164,14 @@ export const DEEPSEEK_FLASH = "DeepSeek-V4-Flash";
 export const DEEPSEEK_V41_FLASH = "deepseek-v4.1-flash";
 
 // ── Tiers — named once, referenced by every tool that shares the shape, so a re-tiering
-// touches one line instead of hunting down every duplicate. ──────────────────────────
+// touches one line instead of hunting down every duplicate. One-line "why" per tier; the
+// dated evidence behind each lives in docs/routing-and-quota.md § Route history. ──────────
 //
-// CLASSIFY: cheap mechanical work (check, overview) —
-//   DeepSeek-V4-Flash over IU with Haiku-on-Max as the reverse lane, thinking capped at 2048
-//   tokens (`thinkingTokens` — see the module-header comment on `MAX_THINKING_TOKENS`; unset
-//   would run the gateway model's `max` reasoning default, its worst setting, on work that is
-//   meant to be cheap).
-//   2026-09-23: moved off glm-5.3-flash on the owner's instruction, which retires GLM from
-//   this server entirely — the same in-loop-speed complaint the AGENT note below measured
-//   (13.3 tok/s, 38m24s on ccbench's 10-task suite vs DeepSeek-V4-Flash's ~190 tok/s, 6m20s)
-//   applies here too, and it is the model that stalled an 84-minute dispatch episode on
-//   2026-09-15. No separate CLASSIFY-tier measurement was run: this is the same id AGENT
-//   already carries, at a lower thinking budget, on strictly easier work. `GLM_FLASH` stays
-//   exported as a named id, but it is unverified in the registry, so a
-//   `SIDECLAW_MODEL_<TOOL>=glm-5.3-flash` override is now refused.
-// AGENT: dispatch ONLY. 2026-09-11: owner decision moved dispatch off a
-//   `SIDECLAW_MODEL_DISPATCH` `.env` override onto glm-5.3-flash over IU (same model
-//   CLASSIFY already trusted), on ccbench scoring it 10/10 on the agentic coding suite.
-//   2026-09-21: moved again, to DeepSeek-V4-Flash, on evidence measured 2026-09-20 by
-//   modelpick ccbench plus a warden POC (Anthropic leg, corrected context env). The
-//   owner's standing complaint with glm in this seat was in-loop speed, in both
-//   interactive and dispatched use, and the numbers back it: ccbench's 10-task suite put
-//   DeepSeek-V4-Flash at composite 1.00, 6m20s wall, ~190 effective in-loop tok/s, $0.09,
-//   4% tool-error, zero compactions, against glm-5.3-flash's 0.81, 38m24s, 13.3 tok/s,
-//   $0.035. DeepSeek-V4-Pro (the owner's first instinct) was rejected on evidence, not
-//   preference: it ties Flash on every refreshed external index (AA coding index 68.8 vs
-//   69.1, terminal-bench 0.787 both), runs ~3x slower and ~7x the cost in ccbench, and
-//   produced one 5-minute idle stall in that run (the CLI auto-backgrounded a long Bash
-//   call, then the model waited silently) — exactly the shape this lane's idle watchdog
-//   turns into a verdict-less kill. The POC ran the same six read-only "decide this open
-//   PR" briefs through warden→sideclaw on both: 12/12 done, no stalls, Flash 0.7–2.9 min
-//   per episode vs Pro's 1.0–6.0, and Flash's verdicts matched an independent Sonnet
-//   review more often — Pro waved through two PRs that review had flagged. Honest
-//   caveat: on the external indices glm-5.3-flash still leads both DeepSeek V4 ids (AA
-//   coding index 71.5) — this is a speed-for-a-little-capability trade, and the models
-//   that beat glm on both (kimi-k3, deepseek-v4.1-flash) are OpenAI-route only,
-//   unreachable from `claude -p`. claude-sonnet-5[1m] on Max stays the reactive fallback
-//   — this is what moves dispatch off the Max subscription onto metered IU. Thinking
-//   stays capped at 8192 tokens (`thinkingTokens`) — the budget DeepSeek-V4-Flash's
-//   benchmark rows above were measured under, and still more room than a classify-shaped
-//   call needs while not defaulting to a gateway model's unbounded `max`. Deliberately
-//   NOT extended to review or otel — see JUDGE below.
-// AGENT_IMPLEMENT / AGENT — RETIRED 2026-09-24, replaced by AGENT_OC / AGENT_OC_IMPLEMENT
-//   below. History kept as comment text since the constants themselves are now dead code
-//   (nothing references them — deleted rather than left unused):
-//
-//   AGENT_IMPLEMENT: dispatch's implement tier only — investigate/author stayed on AGENT.
-//   2026-09-22: split off on the owner's explicit instruction, mirroring warden's own
-//   `AUTO_IMPLEMENT_MODEL` (default DeepSeek-V4-Pro, warden/scripts/triage.py), which
-//   already ran implement-tier episodes on Pro via a per-job model override — this made
-//   it sideclaw's own default too instead of relying on every caller to remember the
-//   override. Tension noted honestly, not papered over: the 2026-09-21 measurement in the
-//   AGENT comment above rejected Pro for this exact seat on evidence (ties Flash on the
-//   external indices, ~3x slower and ~7x the cost in ccbench, one 5-minute idle stall, and
-//   Pro waved through two PRs an independent review had flagged). That split was a policy
-//   call for the higher-stakes write tier, not a new measurement overturning the AGENT one.
-//   { model: "DeepSeek-V4-Pro", backend: "iu", fallback: { backend: "max", model: SONNET },
-//     transport: "session", thinkingTokens: 8192 } — the model id string is kept only as
-//   history text here; the `DEEPSEEK_PRO` constant itself was removed 2026-09-24 (unused
-//   once this tier retired — nothing else in the codebase referenced it).
-//
-// AGENT_OC / AGENT_OC_IMPLEMENT — dispatch (investigate/author) and dispatch_implement,
-//   2026-09-24. Owner decision, moving dispatch off `claude -p` entirely onto the OpenCode
-//   harness (`opencode run`, opencode-runner.ts) running `deepseek-v4.1-flash` over the IU
-//   endpoint's OpenAI-compatible route (`iu-chat/deepseek-v4.1-flash`) — a DIFFERENT id and a
-//   DIFFERENT transport from AGENT's `DeepSeek-V4-Flash` over the IU native Anthropic
-//   transport above; `claude -p` cannot reach this id at all, hence the new harness rather
-//   than a model-only swap. Evidence: the same three implement briefs re-run from Pro's
-//   (AGENT_IMPLEMENT's) base commits, OpenCode+deepseek-v4.1-flash vs DeepSeek-V4-Pro on
-//   `claude -p` — vps $2.46/10min vs $0.06/5min; research-gateway #21 $11.01/28min vs
-//   $0.10/5min (max effort $0.11); weatherorb $5.39/21min vs $0.06/5min. A blind diff
-//   review preferred OpenCode's output on 2 of 3 (research-gateway: max effort variant
-//   closed a gap Pro's diff left open, 479/0 tests; weatherorb: tied/won, did an AGENTS.md
-//   update Pro skipped, 1872 tests passed) and lost one (vps: inverted volume-floor logic
-//   in a HyperDX config — not a clean sweep, recorded honestly). Cache hit 95–98% on this
-//   route vs V4-Pro's 8% on the Anthropic route. Gateway-measured rates for
-//   deepseek-v4.1-flash: $0.15/MTok input, $0.60 output, ~$0.003 cache read (now the
-//   registry's rate, server/lib/models.ts, used by opencode-runner.ts's cost computation, since opencode has no --json-schema envelope to
-//   read a CLI-computed cost from). `variant` is opencode's reasoning-effort knob:
-//   investigate/author at "high" (AGENT_OC), implement at "max" (AGENT_OC_IMPLEMENT) —
-//   mirroring AGENT_IMPLEMENT's own higher-stakes-write-tier split above. Fallback stays
-//   claude-sonnet-5[1m] on Max — a fallback attempt always runs the `claude` harness (see
-//   the module header's Harness paragraph), so a lane switch here is model AND harness AND
-//   transport all changing at once, same as it already was reaching Max from AGENT/
-//   AGENT_IMPLEMENT's IU-native-Anthropic primary.
+// CLASSIFY: cheap mechanical work (check, overview) — a gateway model, thinking capped so
+//   cheap work stays cheap, Haiku on Max as the reverse lane.
+// AGENT_OC / AGENT_OC_IMPLEMENT: dispatch (investigate/author) and dispatch_implement on the
+//   OpenCode harness — cheaper and faster than the retired `claude -p` agent tiers; `variant`
+//   is the reasoning-effort split (higher for the write tier).
 const AGENT_OC: ToolRoute = {
   model: DEEPSEEK_V41_FLASH,
   backend: "iu",
@@ -258,42 +188,15 @@ const AGENT_OC_IMPLEMENT: ToolRoute = {
   harness: "opencode",
   variant: "max",
 };
-// JUDGE: judgment-heavy work that stays on Max — review (angles/synthesis/router) and
-//   otel. Both excluded from AGENT, for different reasons, both dated 2026-09-11:
-//     - review: measured the same day with `SIDECLAW_MODEL_REVIEW=glm-5.3-flash`, a
-//       ~1000-line diff's senior-dev angle looped a single grep/sed for 17 minutes at
-//       80,000+ turns and never produced a synthesis — cancelled, route reverted. Multi-
-//       angle review over a large diff is a different workload shape from the 10-task
-//       coding suite AGENT's evidence came from, and it is the one tool where the cheap
-//       tier has actually been measured failing. A non-Claude model here would also drop
-//       the Max fallback entirely (Max only serves Claude ids), leaving a failing review
-//       with nowhere to go.
-//     - otel: sideclaw's one synchronous exception — it runs inline and returns to the
-//       caller instead of going through the job queue, so a worker that loops there
-//       blocks a human's interactive session, not a background ledger item. Never
-//       measured on a cheap model; the owner's rule is that attended/interactive work
-//       stays on Max (a flat subscription, free at the margin). No reason to gamble it.
-//   Do not "fix" this inconsistency with AGENT without new measured evidence.
-// PROSE: editorial/generative work (narrative, excalidraw) — re-tiered 2026-09-11 the
-//   other way: same model (claude-sonnet-5[1m]), but anchored on Max (a flat fee) instead
-//   of paying IU per-token for it — the one metered-premium lane worth eliminating, since
-//   Sonnet isn't the ccbench-winning model AGENT moved to. IU is the reverse fallback.
-//   gpt-5.6-luna was considered and rejected: the IU Anthropic route (`/anthropic/v1/
-//   messages`) that runSession requires 404s on it (checked 2026-09-11) — runSession
-//   spawns Claude Code, which speaks only the Anthropic protocol, so a model absent from
-//   that route can never be reached through it regardless of what the gateway serves
-//   elsewhere.
-// VISION: the IU OpenAI vision transport (read_image, read_drawing) — no runSession, no
-//   fallback.
-// SINGLE_SHOT: `triage` and review's angle router — one tool-less, JSON-out completion
-//   (`singleShotJson`, single-shot.ts) instead of a `claude -p` session, 2026-10-02. Neither
-//   needs tools (the router now gets the diff inline), so the session was pure overhead:
-//   20-100x the cost of one call (dotfiles docs/agent-platform.md §Sideclaw). Same
-//   deepseek-v4.1-flash id review_ocr runs, registry-verified, over the iu-openai transport —
-//   no Max lane (Max never serves it), no thinking budget (an iu-openai route has none; the
-//   registry's `minOutput` floor on `max_completion_tokens` is what keeps reasoning from
-//   starving the answer). `harness` is inert, as on every non-session transport.
-// adversary sits alone: its own model (gpt-5.6-terra), same iu-openai transport as VISION.
+// JUDGE: judgment-heavy work that stays on Max (review angles/synthesis, otel) — a cheap model
+//   was measured failing on review, and a non-Claude model would drop the Max fallback. Do not
+//   "fix" this inconsistency with the agent tiers without new measured evidence.
+// PROSE: editorial/generative work (narrative, excalidraw) — Claude on Max (flat fee), IU as the
+//   reverse fallback.
+// VISION: the IU OpenAI vision transport (read_image, read_drawing) — no runSession, no fallback.
+// SINGLE_SHOT: `triage` and review's angle router — one tool-less JSON completion over the
+//   iu-openai transport, no session overhead, no Max lane, `harness` inert.
+// adversary sits alone: its own model, same iu-openai transport as VISION.
 const CLASSIFY: ToolRoute = {
   model: DEEPSEEK_FLASH,
   backend: "iu",
@@ -339,18 +242,12 @@ const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
   review_router: SINGLE_SHOT,
   narrative: PROSE,
   review: JUDGE,
-  // review_ocr: the `ocr` CLI (server/lib/ocr.ts) only ever consumes `.model` — it is not a
-  // `runSession` worker, so there is no Max lane for it to fall back to (Max serves the
-  // Claude Code CLI's own auth path, not an arbitrary external binary's), same reasoning as
-  // adversary/VISION below. deepseek-v4.1-flash with ocr's `--effort low` (ocr.ts) since
-  // 2026-09-25, from a same-range bake-off (sideclaw 819bcc7..4898afb, 1.8k lines, every
-  // finding checked by hand). Wall time in ocr is LLM rounds × ~5s per round (the same for
-  // every model), not tok/s: at the default effort (2 review passes) v4.1-flash explored for
-  // 117 rounds / 6m30s. With `--effort low` it ran 3× at 2m31s-3m09s with 4-7 findings,
-  // nearly all real, and the most cross-file/config catches of any model — the class the
-  // angle reviewers miss. Also measured: `reasoning_effort: none` 2m04s but noisier;
-  // gpt-5.6-luna 3× 1m39s-1m53s, 4-6 real (overlaps the angles more); gpt-6-luna 3× ~1m30s,
-  // 2-3 real (terser); gemini-3.8-flash 2× ~7m, 1-3 real (84 rounds at a 3.3s IU TTFT).
+  review_angle_senior_dev: JUDGE,
+  review_angle_typescript: JUDGE,
+  review_angle_frontend: JUDGE,
+  review_angle_qa: JUDGE,
+  // review_ocr: an external CLI that only consumes `.model` — not a `runSession` worker, so no
+  // Max lane. `--effort low` (ocr.ts) picked by a bake-off, see docs/routing-and-quota.md.
   review_ocr: {
     model: DEEPSEEK_V41_FLASH,
     backend: "iu",
@@ -570,6 +467,16 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
         model = base.model;
         harness = base.harness;
         variant = base.variant;
+        // The max→iu backend switch above was implied by the model that was just reverted —
+        // undo it too, or a Max-default route (review, otel, narrative) is left running its
+        // default model on metered iu with no fallback.
+        const impliedIdx = overrides.findIndex(
+          (o) => o.tool === tool && o.field === "backend" && o.implied,
+        );
+        if (impliedIdx !== -1) {
+          overrides.splice(impliedIdx, 1);
+          backend = base.backend;
+        }
       }
     }
     // A model that does not expose the route's `variant` (a different model's effort ladder)
@@ -726,6 +633,18 @@ export function routeFor(tool: RoutedTool): ToolRoute {
     harness: r.harness,
     variant: r.variant,
   };
+}
+
+/** The route key for a review angle id (`senior-dev` → `review_angle_senior_dev`), or
+ *  `review` for an angle with no key of its own (architect, security, backend, …). */
+export function reviewAngleRouteKey(angle: string): RoutedTool {
+  const key = `review_angle_${angle.replaceAll("-", "_")}`;
+  return (ROUTED_TOOLS as readonly string[]).includes(key) ? (key as RoutedTool) : "review";
+}
+
+/** The effective route for one review angle session — its own key when it has one, else `review`. */
+export function routeForReviewAngle(angle: string): ToolRoute {
+  return routeFor(reviewAngleRouteKey(angle));
 }
 
 /** A route with a per-call model override (a job's `model` param). The override must pass

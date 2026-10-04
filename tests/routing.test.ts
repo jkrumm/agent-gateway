@@ -14,6 +14,8 @@ import {
   logStaleQuotaEnvVars,
   ROUTED_TOOLS,
   routeFor,
+  routeForReviewAngle,
+  reviewAngleRouteKey,
   SONNET,
   withModel,
 } from "../server/lib/routing.ts";
@@ -539,6 +541,93 @@ describe("buildRoutingTable env overrides", () => {
         ),
       },
     ]);
+  });
+});
+
+describe("per-angle review routes", () => {
+  const ANGLE_KEYS = {
+    "senior-dev": "review_angle_senior_dev",
+    typescript: "review_angle_typescript",
+    frontend: "review_angle_frontend",
+    qa: "review_angle_qa",
+  } as const;
+
+  test("every angle key defaults to exactly the review route (behavior unchanged)", () => {
+    const { routes, overrides } = buildRoutingTable({});
+    expect(overrides).toEqual([]);
+    for (const key of Object.values(ANGLE_KEYS)) {
+      expect(routes[key], key).toEqual(routes.review);
+    }
+  });
+
+  test("angle ids map to their key; angles without a key (and unknown ids) fall back to review", () => {
+    for (const [angle, key] of Object.entries(ANGLE_KEYS)) {
+      expect(reviewAngleRouteKey(angle)).toBe(key);
+    }
+    for (const angle of ["architect", "security", "backend", "performance", "synthesis", "nope"]) {
+      expect(reviewAngleRouteKey(angle)).toBe("review");
+      expect(routeForReviewAngle(angle)).toEqual(routeFor("review"));
+    }
+  });
+
+  test("a model override on one angle key applies to that angle only", () => {
+    const { routes, overrides } = buildRoutingTable({
+      SIDECLAW_MODEL_REVIEW_ANGLE_QA: DEEPSEEK_FLASH,
+    });
+    expect(routes.review_angle_qa.model).toBe(DEEPSEEK_FLASH);
+    expect(routes.review_angle_qa.backend).toBe("iu"); // Max cannot serve a gateway id
+    expect(overrides.every((o) => o.tool === "review_angle_qa")).toBe(true);
+    for (const tool of [
+      "review",
+      "review_angle_senior_dev",
+      "review_angle_typescript",
+      "review_angle_frontend",
+    ] as const) {
+      expect(routes[tool], tool).toEqual(buildRoutingTable({}).routes.review);
+    }
+  });
+
+  test("an opencode-harness override on one angle (model + harness paired) validates and applies to that angle only", () => {
+    const { routes, overrides } = buildRoutingTable({
+      SIDECLAW_MODEL_REVIEW_ANGLE_TYPESCRIPT: DEEPSEEK_V41_FLASH,
+      SIDECLAW_HARNESS_REVIEW_ANGLE_TYPESCRIPT: "opencode",
+    });
+    expect(routes.review_angle_typescript).toMatchObject({
+      model: DEEPSEEK_V41_FLASH,
+      backend: "iu",
+      transport: "session",
+      harness: "opencode",
+    });
+    expect(overrides.some((o) => o.refused)).toBe(false);
+    expect(routes.review).toEqual(buildRoutingTable({}).routes.review);
+    expect(routes.review_angle_frontend).toEqual(routes.review);
+  });
+
+  test("the opencode-only model without its harness override is refused back to the review default", () => {
+    const { routes, overrides } = buildRoutingTable({
+      SIDECLAW_MODEL_REVIEW_ANGLE_TYPESCRIPT: DEEPSEEK_V41_FLASH,
+    });
+    expect(routes.review_angle_typescript).toEqual(buildRoutingTable({}).routes.review);
+    expect(overrides).toEqual([
+      {
+        tool: "review_angle_typescript",
+        field: "model",
+        value: DEEPSEEK_V41_FLASH,
+        refused: expect.stringContaining("SIDECLAW_HARNESS_REVIEW_ANGLE_TYPESCRIPT=claude"),
+      },
+    ]);
+  });
+
+  test("a variant override on an opencode angle applies; on a claude-harness angle it is refused", () => {
+    const ok = buildRoutingTable({
+      SIDECLAW_MODEL_REVIEW_ANGLE_FRONTEND: DEEPSEEK_V41_FLASH,
+      SIDECLAW_HARNESS_REVIEW_ANGLE_FRONTEND: "opencode",
+      SIDECLAW_VARIANT_REVIEW_ANGLE_FRONTEND: "high",
+    });
+    expect(ok.routes.review_angle_frontend.variant).toBe("high");
+    const refused = buildRoutingTable({ SIDECLAW_VARIANT_REVIEW_ANGLE_QA: "high" });
+    expect(refused.routes.review_angle_qa.variant).toBeUndefined();
+    expect(refused.overrides[0]?.refused).toContain("opencode-only");
   });
 });
 
