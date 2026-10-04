@@ -45,7 +45,8 @@ export interface WardenCounts {
 export interface WardenItem {
   eventId: string | number;
   origin: string;
-  repo: string;
+  /** `null` for an item not tied to a repo — warden's ledger allows it. */
+  repo: string | null;
   state: string;
   title: string;
   note: string | null;
@@ -96,7 +97,7 @@ const WARDEN_COUNTS_RAW = z
 const WARDEN_ITEM_RAW = z.object({
   event_id: z.union([z.string(), z.number()]),
   origin: z.string(),
-  repo: z.string(),
+  repo: z.string().nullable(),
   state: z.string(),
   title: z.string(),
   note: z.string().nullable().optional(),
@@ -211,6 +212,7 @@ const WARDEN_IN_FLIGHT_STATES = new Set([
   "liveness_pending",
 ]);
 const WARDEN_MAX_ITEM_LINES = 8;
+const NO_REPO_PLACEHOLDER = "—";
 
 /** `needs_human` and `merge_blocked` share bucket 0 — a human is needed to resolve either one,
  *  so neither is more urgent than the other — then any in-flight state, then everything else.
@@ -276,7 +278,7 @@ export function renderWardenBlock(warden: WardenBoard, opts: RenderWardenBlockOp
     .map((entry) => entry.item);
   const shown = ordered.slice(0, WARDEN_MAX_ITEM_LINES).map((raw) => ({
     state: stripControlBytes(raw.state),
-    repo: stripControlBytes(raw.repo),
+    repo: raw.repo === null ? NO_REPO_PLACEHOLDER : stripControlBytes(raw.repo),
     title: stripControlBytes(raw.title),
     rawState: raw.state,
     updatedAt: raw.updatedAt,

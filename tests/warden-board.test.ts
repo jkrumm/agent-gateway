@@ -7,7 +7,7 @@
 // rest of the repo stubbing an impure boundary rather than mocking global fetch.
 
 import { afterAll, describe, expect, setSystemTime, test } from "bun:test";
-import { fetchWardenBoard } from "../server/lib/warden-board.ts";
+import { fetchWardenBoard, renderWardenBlock } from "../server/lib/warden-board.ts";
 import {
   __resetWardenBoardCacheForTests,
   cachedFetchWardenBoard,
@@ -87,6 +87,24 @@ describe("fetchWardenBoard — ok", () => {
       updatedAt: "2026-09-11T00:00:00+00:00",
       inFlightJob: "j-abc", // dispatch_job — validation_job and implement_job are both null
     });
+  });
+
+  test("an item with repo: null parses ok:true, carries null through and renders a placeholder", async () => {
+    const board = await fetchWardenBoard({
+      fetchImpl: (async () =>
+        jsonResponse(rawBoard({ items: [rawItem({ repo: null })] }))) as typeof fetch,
+    });
+    expect(board.ok).toBe(true);
+    if (!board.ok) throw new Error("unreachable");
+    expect(board.items[0]?.repo).toBeNull();
+    const lines = renderWardenBlock(board, {
+      color: false,
+      lineMax: 110,
+      generatedAt: Date.parse("2026-09-11T00:00:00+00:00"),
+    });
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain("needs_human —");
+    expect(lines[1]).toContain("watchdog: sideclaw dispatch stuck");
   });
 
   test("inFlightJob prefers validation_job, then implement_job, then dispatch_job", async () => {
