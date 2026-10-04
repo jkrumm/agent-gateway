@@ -55,3 +55,10 @@ angles off Max where measured equal, and no model id outside `GET /api/routing`.
 - `warden-board`: `repo` nullable (item + render `—`); test added. Not live until reload.
 - **Review not obtained:** sideclaw `review` ran 8 angles but synthesis died with "OAuth session expired" (Max auth) → `needs-human`, no findings; the earlier `check` job failed with the known `is_error` envelope. Gate was run directly: `make check` green. Re-run `/review` on 71377b5..4a2dfc1 after reload / Max re-auth. Unreviewed risk is highest in the `buildRoutingTable` refusal-branch fix and `scripts/deploy.sh`.
 - Docs not touched: `docs/deployment.md` doesn't mention `make deploy`.
+
+## Wave 4 — review angles off Max, measured            <!-- status: pending -->
+Needs Max auth working on the mini (synthesis + the Sonnet baseline).
+- [ ] Close the OpenCode-angle gaps from W3's Left behind: Max fallback on an overridden angle, strip `opencode.json`/`.opencode/` in review's cwd, a true read-only OpenCode profile (deny edit + bash-writes), `settingSources` parity.
+- [ ] A/B `review_angle_{senior_dev,typescript,frontend,qa}` on OpenCode vs Sonnet over ≥5 recent real diffs (warden/sideclaw/weatherorb PRs); record the table in `docs/routing-and-quota.md`; adopt per angle only where equal or better.
+- [ ] Fix the `tsc` errors so `make check` can include typecheck.
+**Left behind:**
