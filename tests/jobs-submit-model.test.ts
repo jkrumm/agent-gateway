@@ -72,9 +72,7 @@ describe("dispatch `model` refusal", () => {
   });
 
   test("other tools are untouched, and triage is a known tool", async () => {
-    expect(
-      (await post({ tool: "check", params: { cwd: repo } })).status,
-    ).toBe(200);
+    expect((await post({ tool: "check", params: { cwd: repo } })).status).toBe(200);
     const triage = await post({
       tool: "triage",
       params: { prompt: "p", schema: { type: "object" } },

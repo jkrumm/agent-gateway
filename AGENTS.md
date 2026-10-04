@@ -20,7 +20,24 @@ file — existing environment always wins over the file.
 
 Frontend UI (kiosk fullscreen, validating UI changes): `docs/ui-and-caching.md`.
 
-## Running sideclaw
+## Validate
+
+`make check` — format (`oxfmt --check`), lint (`oxlint`), `bun test`; non-zero on
+failure, no side effects. Not in it, deliberately: **tsc**. `bun run typecheck`
+checks nothing (`tsconfig.json` has `files: []`); the real server check is
+`bunx tsc -p tsconfig.server.json --noEmit --allowImportingTsExtensions` (~66
+pre-existing errors) and `-p tsconfig.src.json` (frontend) also fails today. Run
+them by hand and compare error counts, don't gate on them.
+
+## Deploy
+
+`make deploy` — ships the checked-out HEAD: `make reload`, then `make verify`
+(retried for ~15 s while the boot settles). On a failed verify it rolls back:
+only with a clean working tree, `git switch --detach HEAD~1` + `make reload` +
+verify, and prints loudly that the checkout is detached (return with `git switch
+master`); with a dirty tree it refuses and says how to recover. `FORCE=1` /
+`RESTART_MCP=1` pass through to `reload`, whose refusals (running jobs, plist
+drift) stay intact — `scripts/deploy.sh`. Detail below.
 
 **sideclaw runs exclusively via LaunchAgent. Never start it standalone.**
 
@@ -60,6 +77,34 @@ log show --last 2m --info | grep -A3 sideclaw-server.plist | grep effectiveItemD
 
 Full forensic story (why BTM denies this specific label/executable):
 `docs/deployment.md`.
+
+## Verify & Monitor
+
+- `make verify` — `scripts/verify.sh`: `GET /health` → `ok`, `GET /api/jobs/health`
+  → `ok == true` and `degradedRoutes` empty. Exit 0 = live and healthy.
+- Health URL: `http://127.0.0.1:7705/health` (queue health:
+  `http://127.0.0.1:7705/api/jobs/health`; loopback only, no tailnet door).
+- Kuma monitor: none for sideclaw itself — the mini heartbeat (dotfiles
+  devhost-health) reads `/api/jobs/health`.
+- OTel `service.name`: none — sideclaw emits no OTel; structured logs are NDJSON
+  in `~/Library/Logs/sideclaw.jsonl` (`.claude/rules/logs.md`, `docs/logging.md`).
+- `make logs` — last 100 lines of `sideclaw.err` and `sideclaw.log`, last 50 of
+  `sideclaw.jsonl`, then exits.
+
+## Gotchas
+
+- **Never start the server standalone** — LaunchAgent only; `make dev`/`make start`
+  are broken on purpose (§Deploy).
+- **MCP schema changes need a client reconnect** — `make reload` does not restart the
+  MCP process; Zod strips the unknown field until `/mcp` reconnects
+  (§MCP Server).
+- **`tsc` checks nothing by default** — `tsconfig.json` has `files: []` (§Validate).
+- **Logs live in `~/Library/Logs`, never `/tmp`** (§Deploy).
+- **No tailnet door, deliberately** — the job API has no auth; keep the
+  `exclude sideclaw` in `~/.config/caddy-tailnet.ports` (§Architecture).
+- **Label `com.jkrumm.sideclaw-server` + the `scripts/sideclaw-start.sh` wrapper are
+  macOS BTM workarounds** — don't "simplify" them (§Deploy).
+- **Edit the tracked plist, never the live one** — `make install-agent` overwrites it.
 
 ## MCP Server
 
@@ -227,7 +272,7 @@ The `overview` job enriches that snapshot with **one LLM recommendation per
 agent** (`answer`/`continue`/`ship`/`review`/`merge`/`close`/`stale`/`watch`,
 each with `standing`/`blocker`/`confidence`) — one batched, prompt-only call
 (`readOnly: true`, no repo tools), model/backend from `routeFor("overview")`
-(DeepSeek-V4-Flash on IU / Haiku on Max). `GET /api/overview[.txt]` never runs the
+(the cheap IU model, a small Claude model on Max — see `GET /api/routing`). `GET /api/overview[.txt]` never runs the
 LLM inline — it merges the latest **completed** job result onto a fresh
 snapshot, and marks a recommendation `recommendationStale: true` if the agent
 has been active since. Full reconciliation/fencing detail:
@@ -236,7 +281,7 @@ has been active since. Full reconciliation/fencing detail:
 The `narrative` job writes/revises one project's Obsidian vault page from
 git log + session transcripts + `voice.md` — business terms, never a
 changelog; `changed: false` with no page is a correct default answer, not a
-failure. Model/backend from `routeFor("narrative")` (`claude-sonnet-5[1m]` on
+failure. Model/backend from `routeFor("narrative")` (a Claude model on
 Max first, IU as the reverse fallback — editorial judgment, not
 classification, so no cheap tier). Caps
 enforced in code (`clampSections`), never trusted from the model. Full input/
@@ -257,6 +302,12 @@ MCP tool descriptions print the same route under `MODEL:`, and **`GET
 /api/routing`** shows the effective table plus every applied or refused
 override.
 
+Per-angle review routes `review_angle_{senior_dev,typescript,frontend,qa}`
+default to the `review` route; override via
+`SIDECLAW_MODEL_`/`SIDECLAW_HARNESS_`/`SIDECLAW_VARIANT_REVIEW_ANGLE_<NAME>` (an
+opencode angle needs both the MODEL and HARNESS overrides) — see
+`docs/routing-and-quota.md` §Per-angle review routes.
+
 Live table: **`GET /api/routing`**. Overrides: `SIDECLAW_MODEL_<TOOL>=<id>`,
 `SIDECLAW_BACKEND_<TOOL>=iu|max`, `SIDECLAW_THINKING_TOKENS_<TOOL>=<n>` (read
 once at module load → `make reload`). Full rationale — the tiers, the
@@ -267,14 +318,12 @@ reactive fallback, why the proactive quota-ceiling pre-check was removed
 — `--effort`, `reasoning_effort` and `thinking:{type:disabled}` are all
 ignored by the Requesty hop, so `MAX_THINKING_TOKENS` (mapped by the CLI onto
 Anthropic's `thinking.budget_tokens`) is the only control that reaches
-DeepSeek-V4-Flash or DeepSeek-V4-Pro there. Unset means the model's own `max`
+the gateway models there. Unset means the model's own `max`
 default, its worst setting. The CLASSIFY tier (check, overview)
 runs at 2048 (`triage` and review's router are single-shot, no budget — below); AGENT (dispatch's investigate/author) and
-AGENT_IMPLEMENT (implement, DeepSeek-V4-Pro) at 8192 —
+AGENT_IMPLEMENT (implement) at 8192 —
 `server/lib/routing.ts`'s dated comments carry the ccbench/POC evidence.
-**No route runs on GLM any more** (retired 2026-09-23, owner decision; the
-`GLM_FLASH` id survives only as an unverified registry entry, which routing refuses), so
-every non-Claude lane here is DeepSeek. `session-runner.ts`'s `buildWorkerEnv` exports `MAX_THINKING_TOKENS`
+No route runs on GLM (retired 2026-09-23). `session-runner.ts`'s `buildWorkerEnv` exports `MAX_THINKING_TOKENS`
 only for non-Claude models — a Claude route's `thinkingTokens` (currently none
 set) would be a no-op there anyway, since thinking on Claude is controlled a
 different way. JUDGE/PROSE (review, otel, narrative, excalidraw) carry no
@@ -283,14 +332,15 @@ different way. JUDGE/PROSE (review, otel, narrative, excalidraw) carry no
 **`dispatch`/`dispatch_implement` run on a second harness, OpenCode, not
 `claude -p`** (2026-09-24, `harness: "opencode"` on `ToolRoute` — AGENT_OC/
 AGENT_OC_IMPLEMENT — every other tool stays `"claude"`). `opencode run` talks
-to `deepseek-v4.1-flash` over the IU endpoint's **OpenAI-compatible** route
-(`iu-chat/deepseek-v4.1-flash` — a different id and transport from the IU-native-
-Anthropic `DeepSeek-V4-Flash`/`DeepSeek-V4-Pro` every other gateway route
-uses; `claude -p` cannot reach it at all). Measured against DeepSeek-V4-Pro on
+to the cheap IU model over the IU endpoint's **OpenAI-compatible** route
+(the `iu-chat` provider — a different id and transport from the IU-native-
+Anthropic models every other gateway route
+uses; `claude -p` cannot reach it at all). Measured against the previous
+implement model on
 `claude -p` (three re-run implement briefs): ~40x cheaper, ~2-4x faster, a
 blind diff review preferred it on 2 of 3, lost the third on inverted
 volume-floor logic in a HyperDX config — not a clean sweep, and 95-98% cache
-hit vs V4-Pro's 8%. `variant` (opencode's `--variant`, a reasoning-effort
+hit vs the previous model's 8%. `variant` (opencode's `--variant`, a reasoning-effort
 knob) is `"high"` for investigate/author, `"max"` for implement — the same
 higher-stakes-write-tier split AGENT_IMPLEMENT used to encode; opencode's
 model/harness combination is validated against the model registry
@@ -298,8 +348,7 @@ model/harness combination is validated against the model registry
 served as `models` by `GET /api/routing`) AFTER every override
 (`buildRoutingTable`'s cross-field pass, routing.ts): an unregistered or
 unverified id is refused, a claude-capable id (every Claude id) normalizes
-harness back to `claude`, and an opencode-only id (`deepseek-v4.1-flash`, GPT
-ids) with harness `claude` is refused rather than applied. The opencode config
+harness back to `claude`, and an opencode-only id (the OpenAI-route models) with harness `claude` is refused rather than applied. The opencode config
 carries two providers over the same IU OpenAI base — `iu-chat`
 (`@ai-sdk/openai-compatible`) and `iu-responses` (`@ai-sdk/openai`, GPT ids
 only) — generated from the registry.
@@ -343,7 +392,7 @@ Two constraints carried over regardless of backend:
 `triage` (`server/jobs/handlers/triage.ts`, MCP tool + `sideclaw triage
 --prompt-file F --schema-file F`) is one tool-less completion, not a session:
 `singleShotJson` (`server/lib/single-shot.ts`) calls `textComplete` over the IU
-OpenAI transport on route `triage` (`transport: "iu-openai"`, deepseek-v4.1-flash,
+OpenAI transport on route `triage` (`transport: "iu-openai"`, the cheap IU model,
 no fallback — like `adversary`), with `response_format: json_object` when the
 registry says the model supports it and `max_completion_tokens` ≥
 max(16000, registry `minOutput`). The caller supplies `{ prompt, schema }` where
@@ -479,12 +528,12 @@ The `review` job (`server/jobs/handlers/review.ts`) runs a 3-phase parallel
 pipeline: data gathering (git diff, `fallow review --brief` with a scope-derived
 `--base` — `fallowBaseFor`, never `audit`'s auto-detected merge-base, which
 is wrong on this direct-to-master repo for an already-pushed scope, CodeRabbit
-CLI) → angle reviews (parallel claude-sonnet-5 sessions, capped at
+CLI) → angle reviews (parallel Claude sessions, capped at
 `ANGLE_CONCURRENCY=3`: architect, senior-dev, + conditional
 frontend/backend/typescript/QA, plus router-picked content angles
 security/performance/concurrency/data-migration/api-contract/resilience
-against an ISO 25010 checklist, plus a non-agentic `gpt-5.6-terra` adversary
-critic) → synthesis (claude-sonnet-5, classifies into
+against an ISO 25010 checklist, plus a non-agentic adversary
+critic) → synthesis (a Claude model, classifies into
 `blocking`/`improvements`/`discussions`/`testGaps`). `outcome`: `"clean"` /
 `"actionable"` / `"needs-human"`. Full pipeline docs, angle tables and cost
 profile: `server/skills/review/README.md`.
@@ -493,7 +542,7 @@ profile: `server/skills/review/README.md`.
 confirms real changes and awaited only just before the synthesis prompt is
 built, so its ~2.5 minute wall time runs parallel with the router + angle
 phases instead of adding in front of them (`server/lib/ocr.ts`, route
-`review_ocr` — deepseek-v4.1-flash over IU's OpenAI route with `--effort low`,
+`review_ocr` — the cheap IU model over IU's OpenAI route with `--effort low`,
 picked by a same-range bake-off, rationale in `routing.ts`; per-token, off Max; no Max fallback,
 since it's an external CLI, not a `runSession` worker). Fails soft to a
 one-line skip/fail block the synthesizer reads like an unavailable
@@ -525,7 +574,7 @@ the 60s SDK timeout. Billed IU per-token, zero Max.
 - Credentials (`server/lib/iu-openai.ts`): Keychain (`claude-sdk-api-key`,
   `claude-sdk-base-url`) or `IU_API_KEY`/`IU_BASE_URL` env; OpenAI base
   derived from the Anthropic base (`/anthropic` → `/openai/v1`).
-- Model defaults to `gemini-3.5-flash` — a non-EU vendor, fine for
+- Model defaults to a fast vision model (see `GET /api/routing`) — a non-EU vendor, fine for
   git-committed/non-sensitive content, not PII — overridable via
   `SIDECLAW_MODEL_READ_IMAGE`/`SIDECLAW_MODEL_READ_DRAWING` like every other
   routed tool (`server/lib/routing.ts`); a `SIDECLAW_BACKEND_*` override is
@@ -533,10 +582,10 @@ the 60s SDK timeout. Billed IU per-token, zero Max.
 - `read_image` — vision read of any image (SVGs rasterized first via headless
   Chrome, `server/lib/chrome.ts`). Sampled at the provider's default
   temperature — no `temperature` on the wire, since the gateway 503s on a
-  non-default value for the gpt-5.x family and VISION may be re-pointed there.
+  non-default value for the OpenAI GPT family and VISION may be re-pointed there.
 - `read_drawing` — composite: rasterize+read the `.svg` AND deterministically
   parse the paired `.excalidraw` JSON, merged into one synthesis. Retires the
-  dotfiles `/read-drawing` skill's `claude_iu` Haiku path.
+  dotfiles `/read-drawing` skill's `claude_iu` path.
 - `generate_image` was retired 2026-07 in favor of the `image-gen` gateway.
 - These bypass `session-runner`, so usage is logged separately:
   `~/.local/share/usage-tracker/sideclaw-iu.jsonl` (`recordIuUsage`), ingested

@@ -1,3 +1,29 @@
+# Repo contract (dotfiles/docs/agent-platform.md §Repo contract): check · deploy · verify · logs.
+
+# All local validation, no side effects. Gating: format, lint, tests. NOT gating and left out
+# on purpose: server tsc (`tsc -p tsconfig.server.json --allowImportingTsExtensions`, ~66
+# pre-existing errors) and frontend tsc (`-p tsconfig.src.json`, fails today on a
+# cross-project include + hast types). `package.json`'s `typecheck` checks nothing
+# (tsconfig.json has `files: []`).
+check:
+	bun run format:check
+	bun run lint
+	bun test
+
+# Ships the checked-out HEAD: reload + verify; on a failed verify rolls back to HEAD~1
+# (detached, clean tree only). FORCE=1 / RESTART_MCP=1 pass through to `reload`.
+deploy:
+	@./scripts/deploy.sh
+
+# Probes the live server: /health and /api/jobs/health (ok, no degradedRoutes). Exit 0 = healthy.
+verify:
+	@./scripts/verify.sh
+
+# Bounded tail of production logs, then exits.
+logs:
+	@for f in err log; do echo "== ~/Library/Logs/sideclaw.$$f (last 100) =="; tail -n 100 "$$HOME/Library/Logs/sideclaw.$$f"; done
+	@echo "== ~/Library/Logs/sideclaw.jsonl (last 50) =="; tail -n 50 "$$HOME/Library/Logs/sideclaw.jsonl"
+
 dev:
 	@echo "ERROR: sideclaw runs via LaunchAgent only. Use 'make reload' to apply changes." && exit 1
 
@@ -190,4 +216,4 @@ uninstall-agent:
 	rm ~/Library/LaunchAgents/com.jkrumm.sideclaw-server.plist
 	@echo "sideclaw LaunchAgent removed"
 
-.PHONY: dev start build reload install-agent install-cli uninstall-agent
+.PHONY: check deploy verify logs dev start build reload install-agent install-cli uninstall-agent
