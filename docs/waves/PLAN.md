@@ -61,4 +61,5 @@ Needs Max auth working on the mini (synthesis + the Sonnet baseline).
 - [ ] Close the OpenCode-angle gaps from W3's Left behind: Max fallback on an overridden angle, strip `opencode.json`/`.opencode/` in review's cwd, a true read-only OpenCode profile (deny edit + bash-writes), `settingSources` parity.
 - [ ] A/B `review_angle_{senior_dev,typescript,frontend,qa}` on OpenCode vs Sonnet over ≥5 recent real diffs (warden/sideclaw/weatherorb PRs); record the table in `docs/routing-and-quota.md`; adopt per angle only where equal or better.
 - [ ] Fix the `tsc` errors so `make check` can include typecheck.
+- [ ] Add route `dispatch_implement_escalation` (warden reads `routes.dispatch_implement_escalation.model` from `GET /api/routing` for attempt 3+): probe DeepSeek-V4-Pro and gpt-6.1-sol as OpenCode implement workers on one real brief each, mark the winner verified, route it.
 **Left behind:**
