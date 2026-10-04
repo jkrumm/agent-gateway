@@ -284,7 +284,7 @@ const VERDICT = {
   recommendation: "next step",
   nextAction: "none",
   outcome: "verdict_only",
-  schemaVersion: 3,
+  schemaVersion: 4,
 };
 
 const DONE_JOB = {
@@ -633,7 +633,7 @@ describe("human-readable rendering", () => {
       confidence: "high" as const,
       nextAction: "none" as const,
       outcome: "verdict_only" as const,
-      schemaVersion: 3 as const,
+      schemaVersion: 4 as const,
     };
     const text = renderVerdictResult(verdict);
     expect(text).toContain("one line");
@@ -650,7 +650,7 @@ describe("human-readable rendering", () => {
       confidence: "high" as const,
       nextAction: "human" as const,
       outcome: "verdict_only" as const,
-      schemaVersion: 3 as const,
+      schemaVersion: 4 as const,
       rootCause: "stale-lockfile-after-rename",
       decisionQuestion: "Drop the column or keep it? A: drop. B: keep.",
     });

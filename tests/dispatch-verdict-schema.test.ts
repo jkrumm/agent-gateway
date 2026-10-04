@@ -1,7 +1,7 @@
 /**
  * Dispatch verdict schema — `rootCause`, `decisionQuestion` and the terse caps.
  *
- * The new fields are additive and optional (warden pins schemaVersion 3 and consumes results
+ * The new fields are additive and optional (warden pins the schemaVersion and consumes results
  * persisted before they existed), and overlong worker text is truncated by
  * `normalizeWorkerOutput` before validation rather than failing the episode.
  */
@@ -67,7 +67,7 @@ describe("worker schema — old shape and new fields", () => {
   });
 
   test("the schema version stays at the value warden pins", () => {
-    expect(DISPATCH_SCHEMA_VERSION).toBe(3);
+    expect(DISPATCH_SCHEMA_VERSION).toBe(4);
   });
 
   test("rootCause must be kebab-case and at most 80 chars", () => {

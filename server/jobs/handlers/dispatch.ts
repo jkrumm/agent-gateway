@@ -245,7 +245,7 @@ const VERDICT_FIELDS = {
     .max(SUMMARY_MAX)
     .describe("One line for Slack. Hard-capped — this is a notification, not a report."),
   // Additive and OPTIONAL at the schema level: results persisted before these fields existed,
-  // the handler's own salvage/withheld wrappers and any consumer pinned to schemaVersion 3
+  // the handler's own salvage/withheld wrappers and any consumer pinned to an older schemaVersion
   // must keep validating. Optional-ness is the compat decision; the prompt demands them.
   rootCause: ROOT_CAUSE_FIELD,
   decisionQuestion: DECISION_QUESTION_FIELD,
@@ -308,7 +308,10 @@ const PR_FIELDS = {
 // fallow-only check failure on the implement tier's push path no longer yields
 // "checks_failed" — fallow audits whole touched files and its findings are advisory, so they
 // ride along in the opened PR instead of withholding it (see `checksBlockPush`, below).
-export const DISPATCH_SCHEMA_VERSION = 3;
+// Bumped 3 → 4: added the "pr_updated" (a `revisionOf` episode updated its existing PR) and
+// "conflict" (rebase onto the latest base failed; nothing pushed) outcomes. Shipped together
+// with warden's pin, which handles both.
+export const DISPATCH_SCHEMA_VERSION = 4;
 
 /** Machine-readable classification of how this episode ended — the fifteen ways `runDispatch`
  *  can return, so a consumer never has to substring-match `artifactNote`'s prose to tell them
