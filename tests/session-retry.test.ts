@@ -2,7 +2,7 @@
 // "Retry policy" section for why turns-produced-output is checked outside this
 // function rather than folded into it.
 
-import { afterAll, afterEach, describe, expect, setSystemTime, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import type { ToolRoute } from "../server/lib/routing.ts";
 import {
   isRetryableSessionError,
@@ -22,6 +22,7 @@ import {
   ROUTE_STREAK_LIMIT,
   ROUTE_STREAK_MAX_KEYS,
   __resetRouteStreaksForTests,
+  __resetFallbackLogForTests,
   isIdleTimedOut,
   IDLE_TIMEOUT_MS,
   runSession,
@@ -784,12 +785,15 @@ describe("unclassifiedOutputFailure", () => {
 
 // ── backendFallbacksLastHour / recordFallback — the 1-hour window and reason tally ──
 //
-// Each test picks a base time far from the others (>1h apart) so the window itself
-// isolates tests from each other's recorded entries without needing to reset the
-// module-private log.
+// The log is process-global, and test files do not run in a pinned order: `jobs-health`
+// records a fallback at the real clock, so a later test that fakes `Date.now()` backwards
+// would see that future entry inside its own window. Reset per test rather than relying on
+// far-apart base times to prune it.
 
 describe("backendFallbacksLastHour / recordFallback", () => {
   afterAll(() => setSystemTime());
+
+  beforeEach(() => __resetFallbackLogForTests());
 
   test("aggregates fallbacks recorded within the window by reason", () => {
     setSystemTime(new Date("2026-01-01T00:00:00Z"));

@@ -923,6 +923,18 @@ export function backendFallbacksLastHour(): { count: number; reasons: Record<str
   return { count: recent.length, reasons };
 }
 
+/** Test-only: wipe the recorded fallbacks, same rationale as `__resetRouteStreaksForTests`
+ *  below — `fallbackLog` is process-global module state, so a test that asserts an exact
+ *  count (e.g. the window aggregation) needs a known-empty starting point rather than
+ *  whatever earlier test files recorded. `recordFallback` prunes only from the FRONT of the
+ *  append-ordered array, so an entry recorded at the real clock under a later-faked-backwards
+ *  `Date.now()` sits behind nothing and is never pruned by an earlier cutoff. Never called
+ *  from production code — a real process has exactly one of these logs for its own lifetime
+ *  and never wants it wiped mid-run. */
+export function __resetFallbackLogForTests(): void {
+  fallbackLog.length = 0;
+}
+
 /** Consecutive failures for one `${tool}@${backend}/${model}` route, since the last
  *  success on that same route. Process-local and unpersisted, same rationale as
  *  `fallbackLog` above — a restart resets a streak along with everything else this
