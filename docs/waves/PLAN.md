@@ -68,3 +68,16 @@ Needs Max auth working on the mini (synthesis + the Sonnet baseline).
 - **tsc:** server + frontend typecheck with 0 errors; `bun run typecheck` is now real and part of `make check` (1083 tests green). Review's claimed TS6304/TS6306 composite breakage is false (`make check` passes).
 - **Escalation route:** `routes.dispatch_implement_escalation` = DeepSeek-V4-Pro, OpenCode `max`, no fallback — read by warden for attempt 3+. Probe (2 replayed implement briefs, one run each): V4-Pro 2/2 pass, 5-8 turns, 51-70 s, ~$0.06; gpt-6.1-sol 2/2 pass but 594-1330 s (one idle-watchdog hit), ~$0.32-0.39; flash 2/2 pass, 31-97 s, ~$0.01. Honest read: the briefs were easy, flash passed them too — the evidence picks V4-Pro as the best *escalation* candidate (cheap, fast, no stall), not that escalation beats flash. Thin sample (n=2) on a no-fallback route; re-probe on a brief flash fails. `scripts/probe-implement.ts` / `scripts/ab-review-angles.ts` need `IU_API_KEY`/`IU_BASE_URL` in env (Keychain unreadable headless: `secrets-run read op://common/anthropic/API_KEY|BASE_URL`).
 - **Not done (review improvements, 15 + 4 test gaps):** left in the review result, not applied — notably tests for `opencodeRepoConfigPresent` refusal and ref-mode strip wiring in review.ts, `.catchall` behavior in warden-board, kiosk status refactor. `fallow` still reports unused files/exports (scripts, `server/mcp/tools/dispatch.ts` false positive) — not gating. dotfiles `docs/agent-platform.md` status row still says "review angles off Max still pending (W4)" — update it (outside this repo).
+## Wave 5 — review fixes            <!-- status: active -->
+From the `/review` of `062b646~1..9205e38` (2026-10-05). Fix, `make check`, `/review` the fix diff.
+- [ ] `scripts/deploy.sh`: roll back only when reload succeeded and verify failed; a reload refusal (running jobs, plist drift) aborts with exit 1 and no rollback.
+- [ ] `dispatch.ts` `DispatchTier` TS2304 (fold into W4's tsc step if not done there).
+- [ ] `triage` jobs honour cancel: thread a cancel predicate through `singleShotJson` (checked before the retry) and pass `isCancelRequested` in executor.ts.
+- [ ] GitLab `findOpenPullRequest`: require `sameRepo` (fork MR with the same branch name must not be "the existing PR").
+- [ ] `repo-lease.ts`: guard `realpathSync` like the release path. `single-shot.ts`: skip the dead retry-prompt work on the last attempt.
+- [ ] `session-runner.ts`: derive the 5xx regex from `SERVER_ERROR_STATUSES`, drop the unreachable alternative; replace the nested ternary at ~1185.
+- [ ] Move `runRepoCheck`/`checksBlockPush`/`renderFailedChecks` out of dispatch.ts into a shared module next to check.ts (update-pr.ts stops importing dispatch.ts). Extract the verdict-schema cluster into `dispatch-verdict.ts`.
+- [ ] `routing.ts`: `requireModel()` helper instead of `getModel(...) as ModelEntry` casts.
+- [ ] Test gaps: executor routes `update_pr`; MCP `update_pr` registration; HTTP refusal of a disallowed cwd for `update_pr`; CLI `update-pr` render + exit codes for `conflict`/`up_to_date`.
+- Deferred, owner call: typed `DispatchRefusal` instead of string-matched refusal messages; `buildRoutingTable` resolve-then-validate restructure.
+**Left behind:**
