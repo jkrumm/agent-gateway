@@ -23,4 +23,15 @@
 # only other direct-bun agent here and had the identical defect.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Max-lane workers (`claude -p`) authenticate with the long-lived OAuth token, not the
+# login keychain's refreshable credential: a launchd process and interactive sessions
+# refreshing the same credential rotate its refresh token under each other, and the
+# daemon loses ("OAuth session expired and could not be refreshed", 2026-10-03..05).
+# session-runner keeps CLAUDE_CODE_OAUTH_TOKEN in the worker env (ALWAYS_KEEP_ENV).
+# Fail-soft: no token → workers fall back to the keychain as before.
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && command -v "$HOME/.local/bin/secrets-run" >/dev/null; then
+  token="$("$HOME/.local/bin/secrets-run" read op://mini/claude/oauth-token 2>/dev/null || true)"
+  [ -n "$token" ] && export CLAUDE_CODE_OAUTH_TOKEN="$token"
+  unset token
+fi
 exec /opt/homebrew/bin/bun server/index.ts
