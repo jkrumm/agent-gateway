@@ -56,9 +56,9 @@ describe("resolveDispatchTarget — accepts within ceiling", () => {
     expect(r).toEqual({ ok: true, repo: "vps", root: ROOT, sensitive: false });
   });
 
-  test("hermes-agent at investigate (its own ceiling)", () => {
+  test("hermes-agent at implement — no rule, the permissive default applies", () => {
     const r = resolveDispatchTarget(
-      { cwd: join(ROOT, "hermes-agent"), tier: "investigate" },
+      { cwd: join(ROOT, "hermes-agent"), tier: "implement" },
       DEFAULT_POLICY,
     );
     expect(r).toEqual({ ok: true, repo: "hermes-agent", root: ROOT, sensitive: false });
@@ -81,15 +81,6 @@ describe("resolveDispatchTarget — accepts within ceiling", () => {
 });
 
 describe("resolveDispatchTarget — refuses on ceiling", () => {
-  test("hermes-agent at implement", () => {
-    const r = resolveDispatchTarget(
-      { cwd: join(ROOT, "hermes-agent"), tier: "implement" },
-      DEFAULT_POLICY,
-    );
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toContain("exceeds the ceiling 'investigate'");
-  });
-
   test("brain at implement", () => {
     const r = resolveDispatchTarget(
       { cwd: join(ROOT, "brain"), tier: "implement" },
@@ -232,9 +223,9 @@ describe("buildDispatchPolicy env overrides — ceilings", () => {
 
   test("raising a ceiling is refused with a reason, default stays", () => {
     const { rules, overrides } = buildDispatchPolicy({
-      SIDECLAW_DISPATCH_CEILINGS: "hermes-agent:implement",
+      SIDECLAW_DISPATCH_CEILINGS: "brain:implement",
     });
-    expect(rules["hermes-agent"]).toEqual({ ceiling: "investigate", sensitive: false });
+    expect(rules.brain).toEqual({ ceiling: "investigate", sensitive: false });
     expect(overrides).toHaveLength(1);
     expect(overrides[0]?.applied).toBe(false);
     expect(overrides[0]?.reason).toContain("does not lower");
@@ -535,7 +526,7 @@ describe("POST /api/jobs refuses at submit, before a job row exists", () => {
     // would refuse for being outside every root and never reach the ceiling check at all.
     const testRoot = (process.env.SIDECLAW_DISPATCH_ROOTS ?? "").split(",")[0]?.trim() ?? "";
     expect(testRoot).not.toBe("");
-    const ruled = join(testRoot, "hermes-agent");
+    const ruled = join(testRoot, "brain");
     mkdirSync(ruled, { recursive: true });
     const before = listJobs().length;
     const res = await jobsRoutes.handle(

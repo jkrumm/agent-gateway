@@ -81,14 +81,13 @@ function tierRank(tier: string): number {
  *  Named so a caller can see the fallback without re-deriving it. */
 export const DEFAULT_RULE: RepoRule = { ceiling: "implement", sensitive: false };
 
-// Overridable, but only in the stricter direction. Mirrors
-// ~/SourceRoot/hermes-agent/config/dispatch-repos.json, which is the policy this re-asserts
-// at the sideclaw boundary rather than trusting Hermes to be the only caller that ever exists.
+// Overridable, but only in the stricter direction. sideclaw is the only dispatch policy —
+// the gates are quality, not trust (own repos). Only secret-bearing repos are sensitive and
+// brain stays read-only.
 const DEFAULT_RULES: Record<string, RepoRule> = Object.freeze({
   "dotfiles-private": { ceiling: "investigate", sensitive: true },
   "homelab-private": { ceiling: "investigate", sensitive: true },
   brain: { ceiling: "investigate", sensitive: false },
-  "hermes-agent": { ceiling: "investigate", sensitive: false },
 });
 
 export interface PolicyOverride {
