@@ -329,9 +329,9 @@ draft PR is the review gate.
   failure from a genuine `needs-human` verdict; both otherwise carry
   `confidence: "low"` + `nextAction: "human"`.
 
-Consumed by Hermes via `hermes-agent`'s bounded `scripts/hermes-cc.sh` client,
-but it is a general capability: any Claude Code session can hand a scoped
-episode to another repo.
+Consumed by warden (Hermes' `scripts/hermes-cc.sh` only hands off to the warden
+CLI; Hermes is not the direct consumer), but it is a general capability: any
+Claude Code session can hand a scoped episode to another repo.
 
 ## Worktree salvage (the crash-recovery kind — not the verdict-serialization one above)
 

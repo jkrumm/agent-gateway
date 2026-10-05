@@ -328,9 +328,10 @@ below. History kept as comment text since the constants themselves are now dead 
 (nothing references them — deleted rather than left unused):
 
 AGENT_IMPLEMENT: dispatch's implement tier only — investigate/author stayed on AGENT.
-2026-09-22: split off on the owner's explicit instruction, mirroring warden's own
-`AUTO_IMPLEMENT_MODEL` (default DeepSeek-V4-Pro, warden/scripts/triage.py), which
-already ran implement-tier episodes on Pro via a per-job model override — this made
+2026-09-22: split off on the owner's explicit instruction, mirroring what was then
+warden's own `AUTO_IMPLEMENT_MODEL` (default DeepSeek-V4-Pro, warden/scripts/triage.py;
+since removed — warden now sends no model key and sideclaw routes each tier), which
+at the time ran implement-tier episodes on Pro via a per-job model override — this made
 it sideclaw's own default too instead of relying on every caller to remember the
 override. Tension noted honestly, not papered over: the 2026-09-21 measurement in the
 AGENT comment above rejected Pro for this exact seat on evidence (ties Flash on the

@@ -24,21 +24,18 @@ import {
 const WARDEN_BOARD_TIMEOUT_MS = 2_000;
 const WARDEN_ITEMS_CAP = 20;
 
-// warden's own `counts` always carries the ten non-terminal chain states with a guaranteed
-// zero, but any *other* non-terminal state present in the ledger (e.g. a future `snoozed`)
-// still appears without one — an index signature keeps an unrecognized key readable instead
+// warden's own `counts` (scripts/api.py `CHAIN_STATES`) always carries the seven non-terminal
+// chain states with a guaranteed zero, but any *other* non-terminal state present in the
+// ledger (e.g. a future `snoozed`) still appears without one — an index signature keeps an unrecognized key readable instead
 // of dropped.
 export interface WardenCounts {
   new: number;
-  investigating: number;
-  verdict: number;
-  implementing: number;
-  validating: number;
-  merged: number;
-  liveness_pending: number;
-  needs_human: number;
-  merge_blocked: number;
-  split: number;
+  triaged: number;
+  working: number;
+  merging: number;
+  verifying: number;
+  needs_decision: number;
+  failed: number;
   [state: string]: number;
 }
 
@@ -62,8 +59,9 @@ export type WardenBoard =
       ok: true;
       generatedAt: string;
       counts: WardenCounts;
-      /** Sum of every `counts` value — every entry there is a non-terminal (open) chain
-       *  state, so this is the total item count without re-deriving terminality here. */
+      /** Sum of every `counts` value — warden counts only non-terminal states (terminal =
+       *  fixed/quiet/closed), and `failed` is non-terminal (it waits on the owner), so this is
+       *  the total open item count without re-deriving terminality here. */
       open: number;
       items: WardenItem[];
       /** True only when warden's own `items` exceeded our 20-item cap — omitted-vs-false is
@@ -74,7 +72,7 @@ export type WardenBoard =
     }
   | { ok: false; error: string; fetchedAt: number };
 
-// The ten chain states warden's own `counts` always carries with a guaranteed zero (see
+// The seven chain states warden's own `counts` always carries with a guaranteed zero (see
 // `WardenCounts`'s doc comment) — required as numbers so a missing/renamed key fails schema
 // validation loudly instead of silently degrading every consumer to a `?? 0` guess.
 // `.catchall(z.number())` keeps any *other* non-terminal state (e.g. a future `snoozed`)
@@ -83,15 +81,12 @@ export type WardenBoard =
 const WARDEN_COUNTS_RAW = z
   .object({
     new: z.number(),
-    investigating: z.number(),
-    verdict: z.number(),
-    implementing: z.number(),
-    validating: z.number(),
-    merged: z.number(),
-    liveness_pending: z.number(),
-    needs_human: z.number(),
-    merge_blocked: z.number(),
-    split: z.number(),
+    triaged: z.number(),
+    working: z.number(),
+    merging: z.number(),
+    verifying: z.number(),
+    needs_decision: z.number(),
+    failed: z.number(),
   })
   .catchall(z.number());
 
@@ -211,21 +206,17 @@ export async function fetchWardenBoard(opts?: FetchWardenBoardOptions): Promise<
 // warden's ledger states are strings, not agents.ts's own AgentState/Recommendation enums —
 // its "needs attention" bucket is a fixed pair named directly rather than routed through
 // agents.ts's categoryColor/effectiveCategory, which only know about agent states.
-const WARDEN_IN_FLIGHT_STATES = new Set([
-  "investigating",
-  "implementing",
-  "validating",
-  "liveness_pending",
-]);
+const WARDEN_IN_FLIGHT_STATES = new Set(["working", "merging", "verifying"]);
 const WARDEN_MAX_ITEM_LINES = 8;
 const NO_REPO_PLACEHOLDER = "—";
 
-/** `needs_human` and `merge_blocked` share bucket 0 — a human is needed to resolve either one,
- *  so neither is more urgent than the other — then any in-flight state, then everything else.
+/** `needs_decision` and `failed` share bucket 0 — both wait on the owner (warden's
+ *  `AWAITING_OWNER_STATES`), so neither is more urgent than the other — then any in-flight
+ *  state, then everything else.
  *  Items arrive `updated_at DESC` from warden, and a stable sort by (priority, original index)
  *  keeps that order within each bucket. */
 function wardenItemPriority(state: string): number {
-  if (state === "needs_human" || state === "merge_blocked") return 0;
+  if (state === "needs_decision" || state === "failed") return 0;
   if (WARDEN_IN_FLIGHT_STATES.has(state)) return 1;
   return 2;
 }
@@ -260,16 +251,10 @@ export function renderWardenBlock(warden: WardenBoard, opts: RenderWardenBlockOp
   }
 
   const lines: string[] = [];
-  const needsHuman = warden.counts.needs_human;
-  const mergeBlocked = warden.counts.merge_blocked;
-  const inFlightCount =
-    warden.counts.investigating +
-    warden.counts.implementing +
-    warden.counts.validating +
-    warden.counts.liveness_pending;
+  const inFlightCount = warden.counts.working + warden.counts.merging + warden.counts.verifying;
   const header =
-    `warden · ${warden.open} open · needs_human ${needsHuman} · ` +
-    `merge_blocked ${mergeBlocked} · in flight ${inFlightCount}`;
+    `warden · ${warden.open} open · needs_decision ${warden.counts.needs_decision} · ` +
+    `failed ${warden.counts.failed} · in flight ${inFlightCount}`;
   lines.push(
     color ? clampVisible(`${BOLD}${header}${RESET}`, lineMax) : clampLine(header, lineMax),
   );
@@ -290,7 +275,7 @@ export function renderWardenBlock(warden: WardenBoard, opts: RenderWardenBlockOp
     updatedAt: raw.updatedAt,
   }));
   // Column widths fit the longest value actually shown (bounded), so a
-  // `merge_blocked` or `liveness_pending` is never clipped to a stub the way a
+  // `needs_decision` is never clipped to a stub the way a
   // fixed 12-char column clipped it — measured on the live pane.
   const stateWidth = columnWidth(
     shown.map((s) => s.state),
@@ -315,7 +300,7 @@ export function renderWardenBlock(warden: WardenBoard, opts: RenderWardenBlockOp
     const base = `  ${statePadded} ${repoPadded} ${truncatedTitle}${suffix}`;
 
     if (color) {
-      const needsAttention = raw.rawState === "needs_human" || raw.rawState === "merge_blocked";
+      const needsAttention = raw.rawState === "needs_decision" || raw.rawState === "failed";
       const spanColor = needsAttention
         ? BOLD_RED
         : WARDEN_IN_FLIGHT_STATES.has(raw.rawState)

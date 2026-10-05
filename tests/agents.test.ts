@@ -1150,7 +1150,7 @@ function wardenItem(overrides: Partial<WardenItem> = {}): WardenItem {
     eventId: 1,
     origin: "alert",
     repo: "warden",
-    state: "needs_human",
+    state: "needs_decision",
     title: "watchdog: sideclaw dispatch stuck",
     note: null,
     prUrl: null,
@@ -1180,15 +1180,12 @@ describe("renderText — warden block", () => {
       generatedAt: "2026-09-11T00:00:00.000Z",
       counts: {
         new: 0,
-        investigating: 1,
-        verdict: 0,
-        implementing: 0,
-        validating: 0,
-        merged: 0,
-        liveness_pending: 0,
-        needs_human: 2,
-        merge_blocked: 1,
-        split: 0,
+        triaged: 0,
+        working: 1,
+        merging: 0,
+        verifying: 0,
+        needs_decision: 2,
+        failed: 1,
       },
       open: 4,
       items,
@@ -1211,55 +1208,55 @@ describe("renderText — warden block", () => {
     expect(text).toContain("warden · unreachable (fetch failed: ECONNREFUSED)");
   });
 
-  test("header carries open/needs_human/merge_blocked/in-flight counts", () => {
+  test("header carries open/needs_decision/failed/in-flight counts", () => {
     const text = renderText(baseSnapshot(), { warden: board([wardenItem()]) });
-    expect(text).toContain("warden · 4 open · needs_human 2 · merge_blocked 1 · in flight 1");
+    expect(text).toContain("warden · 4 open · needs_decision 2 · failed 1 · in flight 1");
   });
 
-  test("items are ordered needs_human/merge_blocked first (by original index), then in-flight, then the rest", () => {
+  test("items are ordered needs_decision/failed first (by original index), then in-flight, then the rest", () => {
     const items = [
-      wardenItem({ eventId: 1, state: "merge_blocked", repo: "repo-a", title: "a" }),
-      wardenItem({ eventId: 2, state: "investigating", repo: "repo-b", title: "b" }),
-      wardenItem({ eventId: 3, state: "needs_human", repo: "repo-c", title: "c" }),
-      wardenItem({ eventId: 4, state: "verdict", repo: "repo-d", title: "d" }),
+      wardenItem({ eventId: 1, state: "failed", repo: "repo-a", title: "a" }),
+      wardenItem({ eventId: 2, state: "working", repo: "repo-b", title: "b" }),
+      wardenItem({ eventId: 3, state: "needs_decision", repo: "repo-c", title: "c" }),
+      wardenItem({ eventId: 4, state: "triaged", repo: "repo-d", title: "d" }),
     ];
     const text = renderText(baseSnapshot(), { warden: board(items) });
     const lines = text.split("\n").filter((l) => l.includes("repo-"));
-    // needs_human and merge_blocked share bucket 0 — original order (a before c) wins.
+    // needs_decision and failed share bucket 0 — original order (a before c) wins.
     expect(lines[0]).toContain("repo-a");
     expect(lines[1]).toContain("repo-c");
-    expect(lines[2]).toContain("repo-b"); // investigating (in-flight) bucket 1
-    expect(lines[3]).toContain("repo-d"); // verdict (rest) bucket 2
+    expect(lines[2]).toContain("repo-b"); // working (in-flight) bucket 1
+    expect(lines[3]).toContain("repo-d"); // triaged (rest) bucket 2
   });
 
   test("caps rendered item lines at 8", () => {
     const items = Array.from({ length: 12 }, (_, i) =>
-      wardenItem({ eventId: i, state: "verdict", repo: `repo-${i}`, title: `item ${i}` }),
+      wardenItem({ eventId: i, state: "triaged", repo: `repo-${i}`, title: `item ${i}` }),
     );
     const text = renderText(baseSnapshot(), { warden: board(items) });
     const itemLines = text.split("\n").filter((l) => l.includes("repo-"));
     expect(itemLines).toHaveLength(8);
   });
 
-  test("colour: needs_human and merge_blocked carry the bold-red SGR, in-flight carries green", () => {
+  test("colour: needs_decision and failed carry the bold-red SGR, in-flight carries green", () => {
     const items = [
-      wardenItem({ eventId: 1, state: "needs_human", repo: "repo-a" }),
-      wardenItem({ eventId: 2, state: "merge_blocked", repo: "repo-b" }),
-      wardenItem({ eventId: 3, state: "investigating", repo: "repo-c" }),
+      wardenItem({ eventId: 1, state: "needs_decision", repo: "repo-a" }),
+      wardenItem({ eventId: 2, state: "failed", repo: "repo-b" }),
+      wardenItem({ eventId: 3, state: "working", repo: "repo-c" }),
     ];
     const text = renderText(baseSnapshot(), { warden: board(items), color: true });
     const lines = text.split("\n");
-    const needsHumanLine = lines.find((l) => l.includes("repo-a"));
-    const mergeBlockedLine = lines.find((l) => l.includes("repo-b"));
+    const needsDecisionLine = lines.find((l) => l.includes("repo-a"));
+    const failedLine = lines.find((l) => l.includes("repo-b"));
     const inFlightLine = lines.find((l) => l.includes("repo-c"));
-    expect(needsHumanLine).toContain("\x1b[1m\x1b[31m");
-    expect(mergeBlockedLine).toContain("\x1b[1m\x1b[31m");
+    expect(needsDecisionLine).toContain("\x1b[1m\x1b[31m");
+    expect(failedLine).toContain("\x1b[1m\x1b[31m");
     expect(inFlightLine).toContain("\x1b[32m");
   });
 
   test("plain mode carries no SGR codes for the warden block", () => {
     const text = renderText(baseSnapshot(), {
-      warden: board([wardenItem({ state: "needs_human" })]),
+      warden: board([wardenItem({ state: "needs_decision" })]),
       color: false,
     });
     expect(stripAnsi(text)).toBe(text);
@@ -1302,7 +1299,7 @@ describe("renderText — warden block", () => {
 
   test("appends `… N more` once items exceed the 8-line cap", () => {
     const items = Array.from({ length: 11 }, (_, i) =>
-      wardenItem({ eventId: i, state: "verdict", repo: `repo-${i}`, title: `item ${i}` }),
+      wardenItem({ eventId: i, state: "triaged", repo: `repo-${i}`, title: `item ${i}` }),
     );
     const text = renderText(baseSnapshot(), { warden: board(items) });
     const wardenLines = text.split("\n").filter((l) => l.includes("repo-") || l.includes("more"));
@@ -1312,7 +1309,7 @@ describe("renderText — warden block", () => {
 
   test("no `… more` line when items fit within the 8-line cap", () => {
     const items = Array.from({ length: 8 }, (_, i) =>
-      wardenItem({ eventId: i, state: "verdict", repo: `repo-${i}`, title: `item ${i}` }),
+      wardenItem({ eventId: i, state: "triaged", repo: `repo-${i}`, title: `item ${i}` }),
     );
     const text = renderText(baseSnapshot(), { warden: board(items) });
     expect(text).not.toContain("more");

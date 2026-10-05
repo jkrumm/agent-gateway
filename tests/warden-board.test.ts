@@ -25,7 +25,7 @@ function rawItem(overrides: Record<string, unknown> = {}): Record<string, unknow
     event_id: 42,
     origin: "alert",
     repo: "warden",
-    state: "needs_human",
+    state: "needs_decision",
     state_deadline: "2026-09-18T00:00:00+00:00",
     max_tier: "implement",
     title: "watchdog: sideclaw dispatch stuck",
@@ -41,21 +41,48 @@ function rawItem(overrides: Record<string, unknown> = {}): Record<string, unknow
   };
 }
 
+// Trimmed live /board item shape (schema 15); titles and notes redacted.
+function liveItem(overrides: Record<string, unknown>): Record<string, unknown> {
+  return {
+    event_id: 1,
+    origin: "alert",
+    repo: "warden",
+    state: "failed",
+    close_reason: null,
+    strikes: 0,
+    retry_at: null,
+    max_tier: "implement",
+    title: "redacted title",
+    note: "redacted note",
+    pr_url: null,
+    dispatch_job: "00000000-0000-0000-0000-000000000001",
+    implement_job: null,
+    validation_job: null,
+    occurrences: 1,
+    revision_count: 0,
+    train_stage: null,
+    created_at: "2026-10-04T12:00:00.000000+00:00",
+    updated_at: "2026-10-05T19:47:51.440353+00:00",
+    origin_channel: null,
+    origin_thread_ts: null,
+    availableActions: ["implement", "dismiss", "reinvestigate", "note"],
+    issue: null,
+    ...overrides,
+  };
+}
+
 function rawBoard(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     generated_at: "2026-09-11T00:00:00+00:00",
-    schema_version: 8,
+    schema_version: 15,
     counts: {
       new: 0,
-      investigating: 1,
-      verdict: 0,
-      implementing: 0,
-      validating: 0,
-      merged: 0,
-      liveness_pending: 0,
-      needs_human: 2,
-      merge_blocked: 0,
-      split: 0,
+      triaged: 0,
+      working: 1,
+      merging: 0,
+      verifying: 0,
+      needs_decision: 2,
+      failed: 0,
     },
     items: [rawItem()],
     terminal_24h: 4,
@@ -71,8 +98,8 @@ describe("fetchWardenBoard — ok", () => {
     expect(board.ok).toBe(true);
     if (!board.ok) throw new Error("unreachable");
     expect(board.generatedAt).toBe("2026-09-11T00:00:00+00:00");
-    expect(board.counts.needs_human).toBe(2);
-    expect(board.open).toBe(3); // 1 investigating + 2 needs_human
+    expect(board.counts.needs_decision).toBe(2);
+    expect(board.open).toBe(3); // 1 working + 2 needs_decision
     expect(board.terminal24h).toBe(4);
     expect(board.itemsTruncated).toBe(false);
     expect(board.items).toHaveLength(1);
@@ -80,13 +107,52 @@ describe("fetchWardenBoard — ok", () => {
       eventId: 42,
       origin: "alert",
       repo: "warden",
-      state: "needs_human",
+      state: "needs_decision",
       title: "watchdog: sideclaw dispatch stuck",
       note: null,
       prUrl: null,
       updatedAt: "2026-09-11T00:00:00+00:00",
       inFlightJob: "j-abc", // dispatch_job — validation_job and implement_job are both null
     });
+  });
+
+  test("parses a trimmed real-shaped schema-15 board (live /board shape, titles and notes redacted)", async () => {
+    const board = await fetchWardenBoard({
+      fetchImpl: async () =>
+        jsonResponse({
+          generated_at: "2026-10-05T19:56:26.329357+00:00",
+          schema_version: 15,
+          counts: {
+            new: 0,
+            triaged: 0,
+            working: 0,
+            merging: 0,
+            verifying: 0,
+            needs_decision: 1,
+            failed: 2,
+          },
+          items: [
+            liveItem({ event_id: 3, state: "needs_decision", repo: "research-gateway" }),
+            liveItem({ event_id: 2, state: "failed", repo: null, origin: "manual" }),
+            liveItem({ event_id: 1, state: "failed", pr_url: "https://example.com/pr/1" }),
+          ],
+          terminal_24h: 16,
+          awaiting_owner: [{ kind: "item", event_id: 3, state: "needs_decision" }],
+        }),
+    });
+    expect(board.ok).toBe(true);
+    if (!board.ok) throw new Error("unreachable");
+    expect(board.open).toBe(3); // failed is non-terminal in warden, so it counts as open
+    expect(board.counts.failed).toBe(2);
+    expect(board.items.map((i) => i.state)).toEqual(["needs_decision", "failed", "failed"]);
+    expect(board.items[1]?.repo).toBeNull();
+    expect(board.items[2]?.prUrl).toBe("https://example.com/pr/1");
+    const lines = renderWardenBlock(board, {
+      color: false,
+      lineMax: 110,
+      generatedAt: Date.parse("2026-10-05T19:56:26.329357+00:00"),
+    });
+    expect(lines[0]).toBe("warden · 3 open · needs_decision 1 · failed 2 · in flight 0");
   });
 
   test("an item with repo: null parses ok:true, carries null through and renders a placeholder", async () => {
@@ -102,7 +168,7 @@ describe("fetchWardenBoard — ok", () => {
       generatedAt: Date.parse("2026-09-11T00:00:00+00:00"),
     });
     expect(lines).toHaveLength(2);
-    expect(lines[1]).toContain("needs_human —");
+    expect(lines[1]).toContain("needs_decision —");
     expect(lines[1]).toContain("watchdog: sideclaw dispatch stuck");
   });
 

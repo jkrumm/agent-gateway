@@ -188,13 +188,14 @@ shape. `GET /api/agents`/`/api/agents.txt` never fetch it; only the
 
 `renderText` (`server/lib/agents.ts`) takes it as `opts.warden` and just
 calls `renderWardenBlock` (`server/lib/warden-board.ts`) for the block after
-the agent roster — a header (`warden · <open> open · needs_human <n> ·
-merge_blocked <n> · in flight <n>`, in-flight =
-investigating+implementing+validating+liveness_pending) then up to 8 item
-lines, `needs_human` and `merge_blocked` sharing bucket 0 (a human is needed
-for either), then in-flight states, then the rest, plus a trailing `… N
+the agent roster — a header (`warden · <open> open · needs_decision <n> ·
+failed <n> · in flight <n>`, in-flight = working+merging+verifying; `open` is
+the sum of warden's `counts`, which only holds non-terminal states — terminal
+is fixed/quiet/closed — so `failed` counts as open) then up to 8 item
+lines, `needs_decision` and `failed` sharing bucket 0 (both wait on the owner),
+then in-flight states, then the rest, plus a trailing `… N
 more` line once more items exist than the 8-line cap — colour puts
-`needs_human`/`merge_blocked` in the "needs you" red and in-flight in
+`needs_decision`/`failed` in the "needs you" red and in-flight in
 "working" green. Every warden-sourced string (`state`/`repo`/`title`, and
 the unreachable-board `error`) passes through `stripControlBytes` before
 rendering — warden's ledger carries attacker-influenced text (an alert or a
