@@ -98,6 +98,9 @@ interface VariantStats {
   recall: number | null;
   fpRate: number;
   failures: number;
+  /** Runs excluded from this arm because the fallback lane answered them instead — their cost,
+   *  duration and findings belong to a different model. Gates the adopt decision too. */
+  fallbacks: number;
   medianDurationMs: number | null;
   totalCostUsd: number;
 }
@@ -450,6 +453,7 @@ function emptyStats(): VariantStats {
     recall: null,
     fpRate: 0,
     failures: 0,
+    fallbacks: 0,
     medianDurationMs: null,
     totalCostUsd: 0,
   };
@@ -461,12 +465,16 @@ function aggregateAngle(angle: string, runs: RunRecord[], judges: JudgeRecord[])
 
   for (const variant of ["sonnet", "cheap"] as const) {
     const vr = angleRuns.filter((r) => r.variant === variant);
+    // A fallback run was answered by the other lane's model: it is not a data point for this
+    // arm (findings, cost, duration all belong to that other model) and is surfaced separately.
+    const arm = vr.filter((r) => !r.fellBackTo);
     const s = stats[variant];
-    s.runs = vr.length;
-    s.findings = vr.reduce((sum, r) => sum + r.findings.length, 0);
-    s.failures = vr.filter((r) => !r.ok).length;
-    s.medianDurationMs = median(vr.map((r) => r.durationMs));
-    s.totalCostUsd = vr.reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
+    s.runs = arm.length;
+    s.findings = arm.reduce((sum, r) => sum + r.findings.length, 0);
+    s.failures = arm.filter((r) => !r.ok).length;
+    s.fallbacks = vr.length - arm.length;
+    s.medianDurationMs = median(arm.map((r) => r.durationMs));
+    s.totalCostUsd = arm.reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
   }
 
   const clustersPresent: Record<Variant, number> = { sonnet: 0, cheap: 0 };
@@ -501,7 +509,8 @@ function aggregateAngle(angle: string, runs: RunRecord[], judges: JudgeRecord[])
       ? null
       : cheap.recall >= sonnet.recall - 0.05 &&
         cheap.fpRate <= sonnet.fpRate + 0.1 &&
-        cheap.failures === 0;
+        cheap.failures === 0 &&
+        cheap.fallbacks === 0;
 
   return { sonnet, cheap, adopt };
 }
@@ -512,9 +521,10 @@ function pct(v: number | null): string {
 
 const ADOPT_RULE =
   "adopt cheap iff cheap recall >= sonnet recall - 0.05 AND cheap false-positive rate <= " +
-  "sonnet's + 0.1 AND cheap failures == 0 (recall = real clusters found by the variant / " +
-  "real clusters in the union; fp-rate = false-positive clusters containing the variant / " +
-  "all clusters containing it)";
+  "sonnet's + 0.1 AND cheap failures == 0 AND cheap fallbacks == 0 (recall = real clusters " +
+  "found by the variant / real clusters in the union; fp-rate = false-positive clusters " +
+  "containing the variant / all clusters containing it; a run the fallback lane answered is " +
+  "excluded from its arm and counted as a fallback)";
 
 function renderTable(angles: string[], stats: Record<string, AngleStats>): string {
   const lines: string[] = [
@@ -528,16 +538,16 @@ function renderTable(angles: string[], stats: Record<string, AngleStats>): strin
     if (!a) continue;
     lines.push(`## ${angle}`, "");
     lines.push(
-      "| variant | findings | real | false_positive | unique_real | recall | fp_rate | failures | median_ms | total_cost_usd | adopt? |",
+      "| variant | findings | real | false_positive | unique_real | recall | fp_rate | failures | fallbacks | median_ms | total_cost_usd | adopt? |",
     );
-    lines.push("|-|-|-|-|-|-|-|-|-|-|-|");
+    lines.push("|-|-|-|-|-|-|-|-|-|-|-|-|");
     for (const variant of ["sonnet", "cheap"] as const) {
       const s = a[variant];
       const adoptCell =
         variant === "cheap" ? (a.adopt === null ? "n/a" : a.adopt ? "yes" : "no") : "—";
       lines.push(
         `| ${variant} | ${s.findings} | ${s.real} | ${s.falsePositive} | ${s.uniqueReal} | ` +
-          `${pct(s.recall)} | ${pct(s.fpRate)} | ${s.failures} | ` +
+          `${pct(s.recall)} | ${pct(s.fpRate)} | ${s.failures} | ${s.fallbacks} | ` +
           `${s.medianDurationMs ?? "n/a"} | $${s.totalCostUsd.toFixed(4)} | ${adoptCell} |`,
       );
     }
@@ -629,13 +639,15 @@ async function main(): Promise<number> {
         process.stderr.write(`  [judge] ${angle}\n`);
         const sonnet = JSON.parse(readFileSync(rawPath(angle, "sonnet"), "utf8")) as RunRecord;
         const cheap = JSON.parse(readFileSync(rawPath(angle, "cheap"), "utf8")) as RunRecord;
+        // A fallback run's findings came from the other lane's model — never hand them to the
+        // judge as if they were this arm's output.
         const record = await runJudge(
           wtPath,
           caseName,
           angle,
           diffCmd,
-          sonnet.findings,
-          cheap.findings,
+          sonnet.fellBackTo ? [] : sonnet.findings,
+          cheap.fellBackTo ? [] : cheap.findings,
         );
         mkdirSync(dirname(judgePath(angle)), { recursive: true });
         writeFileSync(judgePath(angle), `${JSON.stringify(record, null, 2)}\n`);

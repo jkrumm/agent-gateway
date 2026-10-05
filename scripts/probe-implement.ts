@@ -265,7 +265,9 @@ interface ProbeResult {
   costUsd: number | null;
   changedFiles: string[];
   diffLines: number;
-  testsPass: boolean;
+  /** `reference test unavailable` = the fix commit's test file(s) could not be read, so
+   *  acceptance was NOT run (never fall back to the worker's own tests) and the run fails. */
+  acceptance: "pass" | "fail" | "reference test unavailable";
   testsOutputTail: string;
   oxfmtClean: boolean | null;
   permissionFailures: string[];
@@ -302,16 +304,32 @@ async function runProbe(model: string, brief: Brief, outRoot: string): Promise<P
 
   // Acceptance: overwrite the worker's tests with the fix commit's reference tests, then run
   // them. The fix is read from the LIVE sideclaw repo (`git show <fix>:<path>`) — the worker's
-  // tree has no history that could reach it.
+  // tree has no history that could reach it. If a reference test cannot be read, acceptance is
+  // NOT run against the worker's own tests (that would be a false pass) — the run is marked
+  // `reference test unavailable` and fails.
   const files = await changedFiles(treePath);
+  let referenceTestUnavailable = false;
   for (const testFile of brief.testFiles) {
     const show = await git(REPO_ROOT, ["show", `${brief.fix}:${testFile}`]);
-    if (show.ok) {
-      writeFileSync(join(treePath, testFile), show.stdout);
+    if (!show.ok) {
+      referenceTestUnavailable = true;
+      continue;
     }
+    writeFileSync(join(treePath, testFile), show.stdout);
   }
-  const tests = await capture([BUN_BIN, "test", ...brief.testFiles], treePath);
-  const testsOutputTail = [tests.stdout, tests.stderr].join("\n").trim().slice(-4000);
+
+  let acceptance: ProbeResult["acceptance"];
+  let testsOutputTail: string;
+  if (referenceTestUnavailable) {
+    acceptance = "reference test unavailable";
+    testsOutputTail =
+      `reference test(s) unavailable: ${brief.testFiles.join(", ")} not readable at ` +
+      `${brief.fix} — acceptance not run against the worker's own tests`;
+  } else {
+    const tests = await capture([BUN_BIN, "test", ...brief.testFiles], treePath);
+    acceptance = tests.ok ? "pass" : "fail";
+    testsOutputTail = [tests.stdout, tests.stderr].join("\n").trim().slice(-4000);
+  }
 
   const oxfmtBin = join(REPO_ROOT, "node_modules", ".bin", "oxfmt");
   let oxfmtClean: boolean | null = null;
@@ -332,7 +350,7 @@ async function runProbe(model: string, brief: Brief, outRoot: string): Promise<P
     costUsd: typeof usage.costUsd === "number" ? usage.costUsd : null,
     changedFiles: files,
     diffLines: await diffLineCount(treePath),
-    testsPass: tests.ok,
+    acceptance,
     testsOutputTail,
     oxfmtClean,
     permissionFailures,
@@ -346,14 +364,16 @@ function renderSummary(results: ProbeResult[]): string {
     "# Probe implement workers — replayed briefs",
     "",
     "Acceptance: the brief's reference test file(s) are copied over the worker's tree and " +
-      "`bun test` runs; `oxfmt --check` runs on the changed files.",
+      "`bun test` runs; `oxfmt --check` runs on the changed files. If a reference test cannot " +
+      "be read from the fix commit, acceptance is skipped and the run is marked " +
+      "`reference test unavailable` (= FAIL).",
     "",
-    "| model | brief | tests | files_changed | turns | seconds | cost_usd |",
+    "| model | brief | acceptance | files_changed | turns | seconds | cost_usd |",
     "|-|-|-|-|-|-|-|",
   ];
   for (const r of results) {
     lines.push(
-      `| ${r.model} | ${r.brief} | ${r.testsPass ? "pass" : "FAIL"} | ${r.changedFiles.length} | ` +
+      `| ${r.model} | ${r.brief} | ${r.acceptance} | ${r.changedFiles.length} | ` +
         `${r.turns} | ${(r.durationMs / 1000).toFixed(1)} | ` +
         `${r.costUsd === null ? "n/a" : `$${r.costUsd.toFixed(4)}`} |`,
     );
@@ -362,6 +382,7 @@ function renderSummary(results: ProbeResult[]): string {
   for (const r of results) {
     lines.push(`### ${r.model} — ${r.brief}`, "");
     lines.push(`- session: ${r.sessionOk ? "ok" : `FAIL (${r.sessionError ?? "unknown"})`}`);
+    lines.push(`- acceptance: ${r.acceptance}`);
     lines.push(`- oxfmt: ${r.oxfmtClean === null ? "n/a" : r.oxfmtClean ? "clean" : "dirty"}`);
     lines.push(`- changed files: ${r.changedFiles.join(", ") || "(none)"}`);
     lines.push(`- tree: ${r.treePath}`);
@@ -406,7 +427,7 @@ async function main(): Promise<number> {
         const r = await runProbe(model, brief, outRoot);
         results.push(r);
         process.stderr.write(
-          `  session=${r.sessionOk ? "ok" : "FAIL"} tests=${r.testsPass ? "pass" : "FAIL"} ` +
+          `  session=${r.sessionOk ? "ok" : "FAIL"} acceptance=${r.acceptance} ` +
             `files=${r.changedFiles.length} turns=${r.turns} ${(r.durationMs / 1000).toFixed(1)}s\n`,
         );
       } catch (err) {
@@ -423,7 +444,7 @@ async function main(): Promise<number> {
           costUsd: null,
           changedFiles: [],
           diffLines: 0,
-          testsPass: false,
+          acceptance: "fail",
           testsOutputTail: "",
           oxfmtClean: null,
           permissionFailures: [],

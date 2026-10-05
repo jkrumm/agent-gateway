@@ -171,15 +171,26 @@ export const OPENCODE_PERMISSION_KEYS = [
  *  to `allow`/`deny`. The leading `"*"` catch-all denies everything; the read commands below
  *  are allowed by name. Patterns use opencode's own wildcard syntax (verified against v1.18.30,
  *  `packages/core/src/util/wildcard.ts`): anchored, `*` = any run of chars, and a trailing
- *  `" .*"` is treated as optional — so `"git log *"` matches both `git log` and
+ *  `" *"` is treated as optional — so `"git log *"` matches both `git log` and
  *  `git log --oneline`. `evaluate` in `packages/opencode/src/permission/index.ts` takes the
  *  LAST matching rule, and `shell.ts` builds the matched pattern from the full parsed command
- *  text with a redirect folded in — which is why `"*>*"` re-denies output redirection AFTER
- *  the allows (a `cat *` allow would otherwise permit `cat x > file`). Writes named in the
- *  gap — `rm`/`mv`/`cp`/`tee`/`sed -i`/`git commit`/`push`/`checkout`/`reset`/`apply` — need no
- *  explicit rule: none matches an allow pattern, so the leading `"*"` denies them. `curl` is
- *  allowed whole (the research-gateway recipe POSTs to submit a job) — the residual is that a
- *  read-only worker can still make outbound network writes with it. */
+ *  text with a redirect folded in — which is why every re-deny rule below sits AFTER the
+ *  allows (a `cat *` allow would otherwise permit `cat x > file`).
+ *
+ *  Several allowed readers take write/exec flags that would otherwise bypass the profile, so
+ *  their dangerous flag forms are re-denied after the allows: `curl`'s `-o`/`-O`/`--output`/
+ *  `--remote-name`/`-T`/`--upload-file`/`-K`/`--config`, `rg`'s `--pre`/`--pre=`, and any
+ *  `git ... --output`. The deny globs are deliberately flag-position forms (attached or
+ *  space-delimited) rather than a bare `curl *-o*` — the latter would match an `-o` anywhere,
+ *  including in a URL, header or JSON body. `find` is not allowed at all: workers have
+ *  `rg`/`git ls-files`/the glob tool, and `find -exec`/`-delete` are another exec/write
+ *  surface. Writes named in the gap — `rm`/`mv`/`cp`/`tee`/`sed -i`/`git commit`/`push`/
+ *  `checkout`/`reset`/`apply` — need no explicit rule: none matches an allow pattern, so the
+ *  leading `"*"` denies them.
+ *
+ *  Residual: `curl` POSTing a body is still allowed on purpose (the research-gateway recipe
+ *  submits a job that way), so a read-only worker can still make outbound network writes with
+ *  it — only the file-writing/uploading/config-reading flags are removed. */
 const READ_ONLY_BASH_RULES: Record<string, "allow" | "deny"> = {
   "*": "deny",
   "git log *": "allow",
@@ -192,12 +203,37 @@ const READ_ONLY_BASH_RULES: Record<string, "allow" | "deny"> = {
   "rg *": "allow",
   "cat *": "allow",
   "ls *": "allow",
-  "find *": "allow",
   "head *": "allow",
   "tail *": "allow",
   "wc *": "allow",
   "jq *": "allow",
   "curl *": "allow",
+  // curl: output / upload / config flags — attached, space-delimited and trailing forms.
+  "curl -o*": "deny",
+  "curl * -o *": "deny",
+  "curl * -o": "deny",
+  "curl -O*": "deny",
+  "curl * -O *": "deny",
+  "curl * -O": "deny",
+  "curl --output*": "deny",
+  "curl * --output*": "deny",
+  "curl --remote-name*": "deny",
+  "curl * --remote-name*": "deny",
+  "curl -T*": "deny",
+  "curl * -T *": "deny",
+  "curl * -T": "deny",
+  "curl --upload-file*": "deny",
+  "curl * --upload-file*": "deny",
+  "curl -K*": "deny",
+  "curl * -K *": "deny",
+  "curl * -K": "deny",
+  "curl --config*": "deny",
+  "curl * --config*": "deny",
+  // rg --pre runs an arbitrary command per file.
+  "rg *--pre *": "deny",
+  "rg *--pre=*": "deny",
+  // git diff/log/show --output=<file> writes to a file.
+  "git * --output*": "deny",
   "*>*": "deny",
 };
 
