@@ -21,7 +21,7 @@ Phase 1.5 — Angle Routing (one triage call on the `review_router` route (IU), 
 └── Reads the diff, adds content-driven angles on top of the deterministic floor
     (skipped when the caller passes an explicit `angles` list)
 
-Phase 2 — Angle Reviews (parallel angle sessions on the `review` route's model, capped at 3 in flight)
+Phase 2 — Angle Reviews (parallel angle sessions, each on its angle's own route, capped at 3 in flight)
 ├── Architect           ← always (floor)
 ├── Senior Dev          ← always (floor)
 ├── Frontend Expert     ← if .tsx/.jsx/.css in diff (floor)
@@ -155,9 +155,10 @@ Each agent loads project context via `--setting-sources user,project`:
 
 ## Cost Profile
 
-Angle + synthesis sessions run on the `review` route's model over the **Max** backend
-(`routeFor("review")`), falling back to IU per-token only when a Max session dies
-with a quota error. The router runs as one single-shot call
+Angle sessions resolve their route per angle (`routeForReviewAngle`): `senior-dev`,
+`typescript` and `qa` default to the cheap OpenCode route, `frontend` and the synthesis to the
+`review` route over the **Max** backend, falling back to IU per-token only when a Max session
+dies with a quota error. The router runs as one single-shot call
 (the cheap triage model over the IU OpenAI transport), and the adversary critic uses the **IU OpenAI transport**
 (the `adversary` route's model) directly — IU per-token, zero Max, and a different model family
 so its bias profile is uncorrelated with the Claude reviewers. The live
@@ -166,7 +167,7 @@ table is always `GET /api/routing`.
 | Component                                                                                  | Route           |
 | ------------------------------------------------------------------------------------------ | --------------- |
 | 1 router call (own `review_router` route — single-shot, no agent, same tier as `triage`)   | `review_router` |
-| 2–8 angle sessions (3 in flight)                                                           | `review`        |
+| 2–8 angle sessions (per-angle `review_angle_*` route where one exists; 3 in flight)        | per angle       |
 | 1 adversary critic (single HTTPS call, no agent)                                           | `adversary`     |
 | 1 OpenCodeReview run (own `review_ocr` route, external CLI, parallel with router + angles) | `review_ocr`    |
 | 1 synthesis session                                                                        | `review`        |

@@ -12,9 +12,9 @@
 //
 // Harness: `claude` (default — spawns `claude -p`, `session-runner.ts`) or `opencode`
 // (spawns `opencode run`, `server/mcp/opencode-runner.ts`) — ONLY `dispatch`,
-// `dispatch_implement` and `dispatch_implement_escalation` run on `opencode` (see the
-// AGENT_OC/AGENT_OC_IMPLEMENT/AGENT_OC_ESCALATION tiers below); every other tool stays on
-// `claude`. A route's
+// `dispatch_implement` and `dispatch_implement_escalation` (the AGENT_OC/
+// AGENT_OC_IMPLEMENT/AGENT_OC_ESCALATION tiers below) plus the measured review angles
+// (ANGLE_OC) run on `opencode` — every other tool stays on `claude`. A route's
 // `variant` (opencode's `--variant`, a reasoning-effort knob) is only meaningful when
 // `harness: "opencode"`. A fallback attempt (the `iu`→`max` reverse lane) ALWAYS runs the
 // `claude` harness, regardless of the primary route's harness — Max only ever serves a
@@ -203,9 +203,23 @@ const AGENT_OC_ESCALATION: ToolRoute = {
   harness: "opencode",
   variant: "max",
 };
-// JUDGE: judgment-heavy work that stays on Max (review angles/synthesis, otel) — a cheap model
-//   was measured failing on review, and a non-Claude model would drop the Max fallback. Do not
-//   "fix" this inconsistency with the agent tiers without new measured evidence.
+// ANGLE_OC: the review angles whose 2026-10-05 A/B cleared the adoption rule (senior-dev,
+//   typescript, qa) — the same cheap OpenCode shape as AGENT_OC, with the review route's
+//   Sonnet on Max as the reverse lane. `frontend` stays on JUDGE (recall tied but its false
+//   positive rate did not clear the rule). Evidence: docs/routing-and-quota.md
+//   § Review-angle A/B (Wave 4).
+const ANGLE_OC: ToolRoute = {
+  model: DEEPSEEK_V41_FLASH,
+  backend: "iu",
+  fallback: { backend: "max", model: SONNET },
+  transport: "session",
+  harness: "opencode",
+  variant: "high",
+};
+// JUDGE: judgment-heavy work that stays on Max (review's synthesis/router, the frontend angle,
+//   otel) — a cheap model was measured failing on review's synthesis, and a non-Claude model
+//   would drop the Max fallback. The three ANGLE_OC angles moved off it 2026-10-05 on measured
+//   A/B recall; do not move the rest without new measured evidence.
 // PROSE: editorial/generative work (narrative, excalidraw) — Claude on Max (flat fee), IU as the
 //   reverse fallback.
 // VISION: the IU OpenAI vision transport (read_image, read_drawing) — no runSession, no fallback.
@@ -257,10 +271,10 @@ const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
   review_router: SINGLE_SHOT,
   narrative: PROSE,
   review: JUDGE,
-  review_angle_senior_dev: JUDGE,
-  review_angle_typescript: JUDGE,
+  review_angle_senior_dev: ANGLE_OC,
+  review_angle_typescript: ANGLE_OC,
   review_angle_frontend: JUDGE,
-  review_angle_qa: JUDGE,
+  review_angle_qa: ANGLE_OC,
   // review_ocr: an external CLI that only consumes `.model` — not a `runSession` worker, so no
   // Max lane. `--effort low` (ocr.ts) picked by a bake-off, see docs/routing-and-quota.md.
   review_ocr: {
@@ -495,9 +509,15 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
         }
       }
     }
-    // A model that does not expose the route's `variant` (a different model's effort ladder)
-    // drops it, reported — opencode would otherwise silently fall back to the base options.
-    if (harness === "opencode" && variant !== undefined) {
+    // `variant` is an opencode-only knob: a route whose harness resolved to `claude` (a
+    // default that never had one, or an explicit SIDECLAW_HARNESS_<TOOL>=claude override
+    // paired with a Claude model) must not carry a stale one. Cleared silently, matching
+    // the harness-normalization branch above, which drops it as a side effect too.
+    if (harness !== "opencode") {
+      variant = undefined;
+    } else if (variant !== undefined) {
+      // A model that does not expose the route's `variant` (a different model's effort ladder)
+      // drops it, reported — opencode would otherwise silently fall back to the base options.
       const effective = getModel(model) as ModelEntry;
       if (!effective.effort.includes(variant)) {
         overrides.push({
@@ -589,21 +609,23 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
   return { routes, overrides };
 }
 
-/** Is this a per-angle review key (`review_angle_*`)? Only these routes default to a
- *  Sonnet-on-max primary whose override can strand them on `iu` with no reverse lane — see
+/** Is this a per-angle review key (`review_angle_*`)? The one route shape whose base
+ *  default is a `max` primary (Sonnet) with an `iu` fallback (the frontend angle, JUDGE)
+ *  and whose override can therefore strand it on `iu` with no reverse lane — see
  *  `effectiveFallback`. */
 function isPerAngleReviewRoute(tool: RoutedTool): boolean {
   return tool.startsWith("review_angle_");
 }
 
 /** The fallback for a route after overrides. Normally the route's own declared fallback,
- *  kept only when it still moves (`usableFallback`). A per-angle review route is the one
- *  shape that needs more: its default is a `max` primary (Sonnet) with an `iu` fallback
- *  (JUDGE), and an override onto a non-Claude id forces it onto `iu` — at which point the
- *  declared fallback would point at the primary's own backend and is dropped, leaving the
- *  OpenCode angle with NO reverse lane. Mirror the default there: fall back to `max` on the
- *  angle's own default model (the Claude id it was declared with), which a fallback attempt
- *  always runs through `claude -p` (`resolveHarness`). */
+ *  kept only when it still moves (`usableFallback`). A still-`JUDGE` per-angle review route
+ *  (frontend) is the one shape that needs more: its default is a `max` primary (Sonnet) with
+ *  an `iu` fallback, and an override onto a non-Claude id forces it onto `iu` — at which
+ *  point the declared fallback would point at the primary's own backend and is dropped,
+ *  leaving the OpenCode angle with NO reverse lane. Mirror the default there: fall back to
+ *  `max` on the angle's own default model (the Claude id it was declared with), which a
+ *  fallback attempt always runs through `claude -p` (`resolveHarness`). An ANGLE_OC angle
+ *  already declares that same `max`/Sonnet fallback, so it needs no special case. */
 function effectiveFallback(
   tool: RoutedTool,
   base: ToolRoute,

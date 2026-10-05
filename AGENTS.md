@@ -303,11 +303,14 @@ MCP tool descriptions print the same route under `MODEL:`, and **`GET
 /api/routing`** shows the effective table plus every applied or refused
 override.
 
-Per-angle review routes `review_angle_{senior_dev,typescript,frontend,qa}`
-default to the `review` route; override via
+Per-angle review routes `review_angle_{senior_dev,typescript,frontend,qa}`:
+`senior-dev`, `typescript` and `qa` default to the cheap OpenCode route (the
+Wave-4 measured A/B), `frontend` and every angle without its own key keep the
+`review` route. Override via
 `SIDECLAW_MODEL_`/`SIDECLAW_HARNESS_`/`SIDECLAW_VARIANT_REVIEW_ANGLE_<NAME>` (an
-opencode angle needs both the MODEL and HARNESS overrides) — see
-`docs/routing-and-quota.md` §Per-angle review routes.
+opencode angle needs both the MODEL and HARNESS overrides; pinning one back to
+`review` needs the model override plus `SIDECLAW_BACKEND_=max`) — see
+`docs/routing-and-quota.md` §Review-angle A/B (Wave 4).
 
 A third OpenCode route, `dispatch_implement_escalation`, serves attempt-3+ retries of an
 implement episode (model in `GET /api/routing`); it carries no Max fallback, so the caller

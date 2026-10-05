@@ -160,26 +160,32 @@ The worker angle sessions in `review` resolve their route through
 `typescript`, `frontend` and `qa` each have their own route key
 (`review_angle_senior_dev`, `review_angle_typescript`, `review_angle_frontend`,
 `review_angle_qa`); every other angle (architect, backend, security, …) and the
-synthesis keep using `review`. All four default to exactly the `review` route,
-so behavior is unchanged until an env override is set. The env names follow the
-usual rule (route key upper-cased): `SIDECLAW_MODEL_REVIEW_ANGLE_TYPESCRIPT`,
+synthesis keep using `review`. `senior-dev`, `typescript` and `qa` default to the
+cheap OpenCode route (`ANGLE_OC` in `routing.ts`: deepseek-v4.1-flash on `iu` via
+the opencode harness, `variant: "high"`, with the `review` route's Sonnet on Max
+as the reverse lane). `frontend` and every angle without a key of its own stay
+on the `review` route. The env names follow the usual rule (route key
+upper-cased): `SIDECLAW_MODEL_REVIEW_ANGLE_TYPESCRIPT`,
 `SIDECLAW_HARNESS_REVIEW_ANGLE_TYPESCRIPT`, `SIDECLAW_VARIANT_...`, etc. A model
 that only the opencode harness can run needs its `SIDECLAW_HARNESS_...=opencode`
 override alongside, otherwise the model override is refused and the angle stays
-on the `review` default. A job's `model` param still applies to every angle
-session via `withModel`, on top of whatever the angle's own route resolved to.
+on its default. Pinning an `ANGLE_OC` angle back onto the review route takes a
+Claude model override plus `SIDECLAW_BACKEND_...=max` (the harness normalizes
+back to `claude` on its own; a bare `SIDECLAW_HARNESS_...=claude` with the
+default opencode-only model is refused). A job's `model` param still applies to
+every angle session via `withModel`, on top of whatever the angle's own route
+resolved to.
 
-### A/B status (Wave 3): gaps closed, comparison not yet run
+### Review-angle A/B (Wave 4, 2026-10-05)
 
-The four open gaps that blocked an OpenCode review angle are closed (2026-10-05). No angle
-has been moved off Max: the A/B (≥5 real PR diffs, cheap OpenCode route vs the default, per
-angle) still needs the keys live — a `make reload`, which waves don't run — and the
-comparison recorded here. What was fixed:
+**Gaps closed (kept for the record).** The four gaps that blocked an OpenCode
+review angle were closed 2026-10-05:
 
-1. **Max fallback on an overridden angle.** `buildRoutingTable` now gives a `review_angle_*`
+1. **Max fallback on an overridden angle.** `buildRoutingTable` gives a `review_angle_*`
    whose model override strands it on `iu` a reverse lane to `max` on the angle's default
-   Claude model (Sonnet), run via `claude -p`. `GET /api/routing` shows
-   `fallback: {backend: "max", model: "claude-sonnet-5[1m]"}` for such an angle.
+   Claude model (Sonnet), run via `claude -p`. The adopted `ANGLE_OC` angles declare that
+   fallback directly; the still-`JUDGE` `frontend` angle has it synthesized by
+   `effectiveFallback`.
 2. **Repo agent config in review's cwd.** Ref mode strips `opencode.json`/`opencode.jsonc`/
    `.opencode/` from the throwaway worktree — the same `stripProjectSettings`/
    `restoreStrippedSettings` pairing dispatch uses. Scope mode never deletes the caller's
@@ -187,7 +193,7 @@ comparison recorded here. What was fixed:
    claude route instead, logged `review.opencode_angle_refused_config`.
 3. **True read-only profile.** OpenCode `readOnly` now uses the granular `bash` permission
    object: a leading `"*": "deny"`, an allowlist of read commands (`git log/diff/show/status/
-grep/ls-files/rev-parse`, `rg`, `cat`, `ls`, `find`, `head`, `tail`, `wc`, `jq`, `curl`),
+   grep/ls-files/rev-parse`, `rg`, `cat`, `ls`, `find`, `head`, `tail`, `wc`, `jq`, `curl`),
    and `"*>*": "deny"` re-denied AFTER the allows so a reader cannot become a writer via
    output redirection. `webfetch`/`websearch` are `deny` under `readOnly` (workers shell out
    via `curl`); the writable implement profile is unchanged.
@@ -196,7 +202,71 @@ grep/ls-files/rev-parse`, `rg`, `cat`, `ls`, `find`, `head`, `tail`, `wc`, `jq`,
    depend on skills — verified, `server/skills/review/*` references no skill — so the logged
    ignore is acceptable as-is (no code needed).
 
-Adopt an angle only after the ≥5-diff comparison is recorded here.
+**Method.** Seven real diffs (sideclaw `39b4cf9`, `71377b5`; warden `afd348d`,
+`fdb5886`; weatherorb `5de4e2d`, `4ea52bf`, `9bcf51b`; 2026-10-05) were replayed
+one angle session at a time by `scripts/ab-review-angles.ts`. The baseline is the
+`review` route (Sonnet on Max); the cheap arm is deepseek-v4.1-flash on the
+opencode harness at `variant: "high"`, read-only with the Wave-4 bash allowlist.
+One blinded Sonnet judge per (case, angle) clusters the two finding lists
+(randomized X/Y) and labels each cluster real/false_positive/unverifiable. Zero
+failed runs, zero fallbacks. Severity mix over all findings: cheap 4 blocking /
+24 discussion / 82 improvement vs Sonnet 4 / 10 / 38 — blocking counts are equal;
+the cheap model's recall advantage is mostly extra improvement-level findings.
+Cost per angle over the whole set: Sonnet $3.49 / $2.31 / $0.61 / $2.79
+(senior-dev / typescript / frontend / qa) vs cheap $0.14 / $0.11 / $0.02 / $0.13.
+
+**Adoption rule.** Adopt the cheap arm iff cheap recall >= Sonnet recall - 0.05
+AND cheap false-positive rate <= Sonnet's + 0.1 AND cheap failures == 0 (recall =
+real clusters found by the variant / real clusters in the union; fp-rate =
+false-positive clusters containing the variant / all clusters containing it).
+
+**Result per angle.**
+
+**senior-dev**
+
+| variant | findings | real | false_positive | unique_real | recall | fp_rate | failures | median_ms | total_cost_usd | adopt? |
+|-|-|-|-|-|-|-|-|-|-|-|-|
+| sonnet | 13 | 13 | 0 | 6 | 28.3% | 0.0% | 0 | 108585 | $3.4901 | — |
+| cheap | 40 | 40 | 0 | 33 | 87.0% | 0.0% | 0 | 76535 | $0.1429 | yes |
+
+**typescript**
+
+| variant | findings | real | false_positive | unique_real | recall | fp_rate | failures | median_ms | total_cost_usd | adopt? |
+|-|-|-|-|-|-|-|-|-|-|-|-|
+| sonnet | 5 | 5 | 0 | 2 | 25.0% | 0.0% | 0 | 80487 | $2.3101 | — |
+| cheap | 19 | 18 | 1 | 15 | 90.0% | 5.3% | 0 | 88007 | $0.1054 | yes |
+
+**frontend**
+
+| variant | findings | real | false_positive | unique_real | recall | fp_rate | failures | median_ms | total_cost_usd | adopt? |
+|-|-|-|-|-|-|-|-|-|-|-|-|
+| sonnet | 7 | 7 | 0 | 5 | 58.3% | 0.0% | 0 | 80503.5 | $0.6148 | — |
+| cheap | 9 | 7 | 1 | 5 | 58.3% | 12.5% | 0 | 58151.5 | $0.0245 | no |
+
+**qa**
+
+| variant | findings | real | false_positive | unique_real | recall | fp_rate | failures | median_ms | total_cost_usd | adopt? |
+|-|-|-|-|-|-|-|-|-|-|-|-|
+| sonnet | 27 | 27 | 0 | 9 | 55.1% | 0.0% | 0 | 89670 | $2.7853 | — |
+| cheap | 42 | 40 | 0 | 22 | 81.6% | 0.0% | 0 | 90469 | $0.1292 | yes |
+
+Adopted:
+`senior-dev`, `typescript`, `qa` — each clears the rule by a wide margin at
+~1/25th the cost. NOT adopted: `frontend` — recall tied at 58.3% but its
+false-positive rate was 12.5% vs Sonnet's 0%, so the fp clause fails; `frontend`
+stays on `review`. This matches `DEFAULT_ROUTES`: `ANGLE_OC` for the three,
+`JUDGE` for `frontend`.
+
+**Caveats.** Single judge (Sonnet, blind to variant); one run per cell; no ground
+truth beyond the judge. `frontend` ran only the three weatherorb diffs and does
+not meet the >=5-case bar, so its "not adopted" is weaker evidence than the three
+adoptions.
+
+**Re-run.** `bun scripts/ab-review-angles.ts --cases <json> --out <dir>` (cases =
+`[{ repo, name, base, head }]`; the harness creates and removes a throwaway
+worktree per case — no server, jobs or `make reload`). Needs `IU_API_KEY` and
+`IU_BASE_URL` in the environment; the Keychain is not readable from a headless
+shell, so supply both from 1Password via the `secrets` helper (`secrets-run read`).
 
 ## Route history (moved from routing.ts)
 
@@ -313,8 +383,11 @@ gpt-6.1-sol stays verified for chat/Responses only (2026-10-02) — rates/limits
 
 ### JUDGE
 
-JUDGE: judgment-heavy work that stays on Max — review (angles/synthesis/router) and
-otel. Both excluded from AGENT, for different reasons, both dated 2026-09-11:
+JUDGE: judgment-heavy work that stays on Max — review's synthesis/router, the `frontend`
+angle, and otel. The `senior-dev`, `typescript` and `qa` angles moved off JUDGE onto
+`ANGLE_OC` 2026-10-05 after the Wave-4 A/B (above); `frontend` did not clear the adoption
+rule and the synthesis/router were never in its scope. Excluded from AGENT, for different
+reasons, both dated 2026-09-11:
 
 - review: measured the same day with `SIDECLAW_MODEL_REVIEW=glm-5.3-flash`, a
   ~1000-line diff's senior-dev angle looped a single grep/sed for 17 minutes at
