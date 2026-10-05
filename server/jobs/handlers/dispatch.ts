@@ -37,6 +37,7 @@ import {
   inPlaceChangedFiles,
   inPlaceRefusalReason,
   openIssue,
+  opencodeRepoConfigPresent,
   openPullRequest,
   pushBranch,
   rebaseOntoDefault,
@@ -790,20 +791,6 @@ export function assertInPlaceAllowed(tier: DispatchTier, sensitive: boolean): vo
   }
 }
 
-/** Repo-local opencode config a live checkout could carry — same set `stripProjectSettings`
- *  (dispatch-git.ts) removes from a WORKTREE before an episode starts. In-place has no
- *  worktree to strip it from (see `runDispatch`'s in-place branch). `OPENCODE_CONFIG_CONTENT`
- *  (opencode-runner.ts's `buildOpencodeEnv`) already wins over a repo-local
- *  `opencode.json`/`opencode.jsonc` for the PERMISSION profile specifically — measured
- *  2026-09-24, see opencode-runner.ts's `buildOpencodeEnv` doc comment — so those two files
- *  are refused here mainly for defense in depth (a future opencode release, or a config key
- *  this repo's permission block doesn't cover, could reintroduce the gap). `.opencode/` is
- *  the one that matters unconditionally: it can carry a PLUGIN, which executes arbitrary code
- *  the moment opencode loads it, regardless of any permission setting. There is no equivalent
- *  of "strip it, restore it after" for a live checkout other sessions are using, so the only
- *  safe move is refusing the episode outright, before it ever spawns. */
-const IN_PLACE_OPENCODE_CONFIG_PATHS = ["opencode.json", "opencode.jsonc", ".opencode"];
-
 /** `revisionOf` continues an earlier episode's branch, so it only means something for an
  *  implement episode in a worktree, and only for a branch this tool owns — refused up front,
  *  before a worktree exists, rather than silently ignored (the caller would then read a fresh
@@ -836,7 +823,7 @@ function assertRevisionAllowed(
  *  `assertInPlaceAllowed`. */
 export function assertInPlaceOpencodeConfigAllowed(cwd: string, harness: Harness): void {
   if (harness !== "opencode") return;
-  const found = IN_PLACE_OPENCODE_CONFIG_PATHS.filter((p) => existsSync(join(cwd, p)));
+  const found = opencodeRepoConfigPresent(cwd);
   if (found.length > 0) {
     throw new Error(
       `dispatch refused: workspace 'in-place' on the opencode harness is not allowed in a ` +

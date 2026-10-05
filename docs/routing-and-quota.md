@@ -169,24 +169,34 @@ override alongside, otherwise the model override is refused and the angle stays
 on the `review` default. A job's `model` param still applies to every angle
 session via `withModel`, on top of whatever the angle's own route resolved to.
 
-### A/B status (Wave 3): not run, angles stay on `review`
+### A/B status (Wave 3): gaps closed, comparison not yet run
 
-No angle was moved off Max: the A/B (≥5 real PR diffs, cheap OpenCode route vs the
-default, per angle) needs the new keys live — a `make reload`, which waves don't run —
-and an OpenCode angle has open gaps that must be closed before it reviews untrusted
-diffs:
+The four open gaps that blocked an OpenCode review angle are closed (2026-10-05). No angle
+has been moved off Max: the A/B (≥5 real PR diffs, cheap OpenCode route vs the default, per
+angle) still needs the keys live — a `make reload`, which waves don't run — and the
+comparison recorded here. What was fixed:
 
-1. No `iu`→`max` fallback on an overridden angle (the default `{backend: "iu"}` is
-   dropped once the primary is already `iu`). Give overridden angles an explicit Max
-   fallback.
-2. The angle runs in `effectiveCwd` with no strip of `opencode.json`/`.opencode/` —
-   a plugin in the reviewed branch would execute. Dispatch strips these from its
-   worktree; review has no worktree.
-3. OpenCode `readOnly` denies `edit` only — Bash/webfetch/websearch stay allowed, unlike
-   the claude harness's no-web rule for workers.
-4. `settingSources: "user,project"` is ignored on OpenCode (no user/repo skills).
+1. **Max fallback on an overridden angle.** `buildRoutingTable` now gives a `review_angle_*`
+   whose model override strands it on `iu` a reverse lane to `max` on the angle's default
+   Claude model (Sonnet), run via `claude -p`. `GET /api/routing` shows
+   `fallback: {backend: "max", model: "claude-sonnet-5[1m]"}` for such an angle.
+2. **Repo agent config in review's cwd.** Ref mode strips `opencode.json`/`opencode.jsonc`/
+   `.opencode/` from the throwaway worktree — the same `stripProjectSettings`/
+   `restoreStrippedSettings` pairing dispatch uses. Scope mode never deletes the caller's
+   files: an opencode-harness angle in a live checkout carrying any of those runs on the
+   claude route instead, logged `review.opencode_angle_refused_config`.
+3. **True read-only profile.** OpenCode `readOnly` now uses the granular `bash` permission
+   object: a leading `"*": "deny"`, an allowlist of read commands (`git log/diff/show/status/
+grep/ls-files/rev-parse`, `rg`, `cat`, `ls`, `find`, `head`, `tail`, `wc`, `jq`, `curl`),
+   and `"*>*": "deny"` re-denied AFTER the allows so a reader cannot become a writer via
+   output redirection. `webfetch`/`websearch` are `deny` under `readOnly` (workers shell out
+   via `curl`); the writable implement profile is unchanged.
+4. **`settingSources` parity.** OpenCode has no `settingSources` flag; it loads
+   `AGENTS.md`/`CLAUDE.md` natively but NOT user/repo skills. The review angle prompts do not
+   depend on skills — verified, `server/skills/review/*` references no skill — so the logged
+   ignore is acceptable as-is (no code needed).
 
-Adopt an angle only after 1–3 are fixed and the comparison is recorded here.
+Adopt an angle only after the ≥5-diff comparison is recorded here.
 
 ## Route history (moved from routing.ts)
 

@@ -603,6 +603,17 @@ describe("per-angle review routes", () => {
     expect(routes.review_angle_frontend).toEqual(routes.review);
   });
 
+  test("an opencode-harness angle override keeps an iu->max fallback to the angle's default Claude model", () => {
+    const { routes } = buildRoutingTable({
+      SIDECLAW_MODEL_REVIEW_ANGLE_TYPESCRIPT: DEEPSEEK_V41_FLASH,
+      SIDECLAW_HARNESS_REVIEW_ANGLE_TYPESCRIPT: "opencode",
+    });
+    expect(routes.review_angle_typescript.fallback).toEqual({ backend: "max", model: SONNET });
+    // The override is scoped: the shared review route and other angles keep the JUDGE shape.
+    expect(routes.review.fallback).toEqual({ backend: "iu" });
+    expect(routes.review_angle_frontend.fallback).toEqual({ backend: "iu" });
+  });
+
   test("the opencode-only model without its harness override is refused back to the review default", () => {
     const { routes, overrides } = buildRoutingTable({
       SIDECLAW_MODEL_REVIEW_ANGLE_TYPESCRIPT: DEEPSEEK_V41_FLASH,

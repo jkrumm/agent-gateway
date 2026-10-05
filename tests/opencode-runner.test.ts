@@ -128,23 +128,64 @@ describe("buildOpencodeConfig", () => {
       const permission = cfg.permission as Record<string, unknown>;
       for (const key of OPENCODE_PERMISSION_KEYS) {
         expect(permission[key], `${key} (readOnly=${readOnly})`).toBeDefined();
-        expect(["allow", "deny"]).toContain(permission[key] as string);
+        if (key === "bash" && readOnly) {
+          const rules = permission[key] as Record<string, string>;
+          expect(Object.keys(rules).length).toBeGreaterThan(0);
+          for (const action of Object.values(rules)) expect(["allow", "deny"]).toContain(action);
+        } else {
+          expect(["allow", "deny"]).toContain(permission[key] as string);
+        }
       }
       // No stray keys beyond the declared set either.
       expect(Object.keys(permission).toSorted()).toEqual([...OPENCODE_PERMISSION_KEYS].toSorted());
     }
   });
 
-  test("readOnly denies edit only — bash and everything else stays allowed, same parity as claude's disallowedTools", () => {
+  test("readOnly denies edit and pins a default-deny bash allowlist of read commands", () => {
     const cfg = buildOpencodeConfig({ model: "deepseek-v4.1-flash", readOnly: true });
-    const permission = cfg.permission as Record<string, string>;
+    const permission = cfg.permission as Record<string, unknown>;
     expect(permission.edit).toBe("deny");
-    expect(permission.bash).toBe("allow");
+    const bash = permission.bash as Record<string, string>;
+    // Catch-all first → anything not explicitly allowed is denied.
+    expect(bash["*"]).toBe("deny");
+    for (const allowed of [
+      "git log *",
+      "git diff *",
+      "git show *",
+      "git status *",
+      "git grep *",
+      "rg *",
+      "cat *",
+      "ls *",
+      "find *",
+      "head *",
+      "tail *",
+      "wc *",
+      "jq *",
+      "curl *",
+    ]) {
+      expect(bash[allowed], allowed).toBe("allow");
+    }
+    // Redirection is re-denied AFTER the allows, so a reader's `*` allow cannot become a writer.
+    expect(bash["*>*"]).toBe("deny");
   });
 
-  test("writable session allows edit", () => {
+  test("readOnly denies webfetch/websearch (workers shell out via curl); writable allows them", () => {
+    const ro = buildOpencodeConfig({ model: "deepseek-v4.1-flash", readOnly: true })
+      .permission as Record<string, string>;
+    expect(ro.webfetch).toBe("deny");
+    expect(ro.websearch).toBe("deny");
+    const rw = buildOpencodeConfig({ model: "deepseek-v4.1-flash", readOnly: false })
+      .permission as Record<string, string>;
+    expect(rw.webfetch).toBe("allow");
+    expect(rw.websearch).toBe("allow");
+  });
+
+  test("writable session allows edit and an unrestricted bash", () => {
     const cfg = buildOpencodeConfig({ model: "deepseek-v4.1-flash", readOnly: false });
-    expect((cfg.permission as Record<string, string>).edit).toBe("allow");
+    const permission = cfg.permission as Record<string, string>;
+    expect(permission.edit).toBe("allow");
+    expect(permission.bash).toBe("allow");
   });
 
   test("external_directory and question are always deny, doom_loop always allow", () => {

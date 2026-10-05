@@ -137,6 +137,11 @@ export interface OpencodeConfigInput {
   readOnly: boolean;
 }
 
+/** A permission value: the simple action string, or — for `bash` in the read-only profile —
+ *  opencode's granular object form (command pattern → action). Mirrors the schema's
+ *  `PermissionRuleConfig` (`PermissionActionConfig | PermissionObjectConfig`). */
+type OpencodePermissionValue = "allow" | "deny" | Record<string, "allow" | "deny">;
+
 /** Every opencode permission key this config sets, verified against the live schema
  *  (`curl https://opencode.ai/config.json`, 2026-09-24 — `$defs.PermissionConfig`). Notably:
  *  there is no `write` key (file mutation is governed by `edit` alone — no tool is ever named
@@ -162,22 +167,53 @@ export const OPENCODE_PERMISSION_KEYS = [
   "external_directory",
 ] as const;
 
+/** The read-only bash allowlist: opencode's OBJECT permission form, mapping a command pattern
+ *  to `allow`/`deny`. The leading `"*"` catch-all denies everything; the read commands below
+ *  are allowed by name. Patterns use opencode's own wildcard syntax (verified against v1.18.30,
+ *  `packages/core/src/util/wildcard.ts`): anchored, `*` = any run of chars, and a trailing
+ *  `" .*"` is treated as optional — so `"git log *"` matches both `git log` and
+ *  `git log --oneline`. `evaluate` in `packages/opencode/src/permission/index.ts` takes the
+ *  LAST matching rule, and `shell.ts` builds the matched pattern from the full parsed command
+ *  text with a redirect folded in — which is why `"*>*"` re-denies output redirection AFTER
+ *  the allows (a `cat *` allow would otherwise permit `cat x > file`). Writes named in the
+ *  gap — `rm`/`mv`/`cp`/`tee`/`sed -i`/`git commit`/`push`/`checkout`/`reset`/`apply` — need no
+ *  explicit rule: none matches an allow pattern, so the leading `"*"` denies them. `curl` is
+ *  allowed whole (the research-gateway recipe POSTs to submit a job) — the residual is that a
+ *  read-only worker can still make outbound network writes with it. */
+const READ_ONLY_BASH_RULES: Record<string, "allow" | "deny"> = {
+  "*": "deny",
+  "git log *": "allow",
+  "git diff *": "allow",
+  "git show *": "allow",
+  "git status *": "allow",
+  "git grep *": "allow",
+  "git ls-files *": "allow",
+  "git rev-parse *": "allow",
+  "rg *": "allow",
+  "cat *": "allow",
+  "ls *": "allow",
+  "find *": "allow",
+  "head *": "allow",
+  "tail *": "allow",
+  "wc *": "allow",
+  "jq *": "allow",
+  "curl *": "allow",
+  "*>*": "deny",
+};
+
 /** Per-run opencode config, passed via `OPENCODE_CONFIG_CONTENT` (see `buildOpencodeEnv`) —
  *  NEVER a file. `permission` is the opencode analogue of claude's `--disallowedTools`:
  *  measured 2026-09-24, the default `ask` permission is auto-REJECTED in `run`
  *  (non-interactive) mode and silently ends the session, so EVERY key in
  *  `OPENCODE_PERMISSION_KEYS` must be explicitly `allow` or `deny` — there is no "ask and it
  *  just works" in this mode, and an omitted key is exactly as broken as one it defaults to
- *  ask on. `readOnly` denies `edit` only (Bash — the `bash` key — stays allowed either way,
- *  same parity as claude's `readOnly`: Write/Edit/NotebookEdit disallowed, Bash available —
- *  see `SessionOptions.readOnly`'s doc comment).
+ *  ask on.
  *
- *  `webfetch`/`websearch` are set `"allow"` here on explicit instruction (2026-09-24 review
- *  fix) despite AGENTS.md's Worker routing section stating "No WebSearch/WebFetch — workers
- *  shell out via Bash instead" for the claude harness — that rule was written before this
- *  harness existed and opencode has no Bash-only equivalent path to fetch a URL. Flagged
- *  rather than silently resolved either way: revisit if this widens the episode's exposure
- *  more than intended. */
+ *  `readOnly` is a true read-only profile, not just `edit: deny`: `bash` becomes the
+ *  `READ_ONLY_BASH_RULES` object (read commands allowed, everything else default-denied),
+ *  `webfetch`/`websearch` are `deny` (workers shell out via `curl` — AGENTS.md's Worker
+ *  routing rule), and `edit` is `deny`. A writable session (dispatch implement) keeps the
+ *  permissive profile: `bash: "allow"`, `webfetch`/`websearch: "allow"`, `edit: "allow"`. */
 export function buildOpencodeConfig(input: OpencodeConfigInput): Record<string, unknown> {
   const { model, readOnly } = input;
   const entry = opencodeModel(model);
@@ -217,7 +253,7 @@ export function buildOpencodeConfig(input: OpencodeConfigInput): Record<string, 
       },
     },
     permission: {
-      bash: "allow",
+      bash: readOnly ? { ...READ_ONLY_BASH_RULES } : "allow",
       read: "allow",
       edit: readOnly ? "deny" : "allow",
       glob: "allow",
@@ -227,12 +263,12 @@ export function buildOpencodeConfig(input: OpencodeConfigInput): Record<string, 
       skill: "allow",
       lsp: "allow",
       todowrite: "allow",
-      webfetch: "allow",
-      websearch: "allow",
+      webfetch: readOnly ? "deny" : "allow",
+      websearch: readOnly ? "deny" : "allow",
       question: "deny",
       doom_loop: "allow",
       external_directory: "deny",
-    } satisfies Record<(typeof OPENCODE_PERMISSION_KEYS)[number], "allow" | "deny">,
+    } satisfies Record<(typeof OPENCODE_PERMISSION_KEYS)[number], OpencodePermissionValue>,
   };
 }
 

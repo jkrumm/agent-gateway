@@ -1579,6 +1579,22 @@ const PROJECT_SETTINGS_FILES = [
   ".opencode",
 ];
 
+/** The subset of `PROJECT_SETTINGS_FILES` the opencode harness itself loads as config or
+ *  plugin code from a repo root. `stripProjectSettings` removes the whole set from a WORKTREE;
+ *  a caller that CANNOT strip — a live checkout another session may be using — must instead
+ *  detect and refuse when any of these is present. Two callers read this one list: dispatch's
+ *  in-place guard (`assertInPlaceOpencodeConfigAllowed`) and review's scope-mode per-angle
+ *  fallback (`runReview`). Kept here, next to the strip list, so the security-relevant set
+ *  stays in one place. */
+export const OPENCODE_REPO_CONFIG_PATHS = ["opencode.json", "opencode.jsonc", ".opencode"] as const;
+
+/** Which of `OPENCODE_REPO_CONFIG_PATHS` exist directly under `root`, in declaration order.
+ *  Read-only; the caller decides whether that is a refusal (dispatch in-place) or a per-angle
+ *  fallback (review scope mode). */
+export function opencodeRepoConfigPresent(root: string): string[] {
+  return OPENCODE_REPO_CONFIG_PATHS.filter((p) => existsSync(join(root, p)));
+}
+
 /**
  * Delete the repo's own session settings from the worktree, before the episode starts.
  *

@@ -563,7 +563,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
     routes[tool] = {
       model,
       backend,
-      fallback: usableFallback(base.fallback, model, backend),
+      fallback: effectiveFallback(tool, base, model, backend),
       transport: base.transport,
       thinkingTokens,
       harness,
@@ -571,6 +571,40 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
     };
   }
   return { routes, overrides };
+}
+
+/** Is this a per-angle review key (`review_angle_*`)? Only these routes default to a
+ *  Sonnet-on-max primary whose override can strand them on `iu` with no reverse lane — see
+ *  `effectiveFallback`. */
+function isPerAngleReviewRoute(tool: RoutedTool): boolean {
+  return tool.startsWith("review_angle_");
+}
+
+/** The fallback for a route after overrides. Normally the route's own declared fallback,
+ *  kept only when it still moves (`usableFallback`). A per-angle review route is the one
+ *  shape that needs more: its default is a `max` primary (Sonnet) with an `iu` fallback
+ *  (JUDGE), and an override onto a non-Claude id forces it onto `iu` — at which point the
+ *  declared fallback would point at the primary's own backend and is dropped, leaving the
+ *  OpenCode angle with NO reverse lane. Mirror the default there: fall back to `max` on the
+ *  angle's own default model (the Claude id it was declared with), which a fallback attempt
+ *  always runs through `claude -p` (`resolveHarness`). */
+function effectiveFallback(
+  tool: RoutedTool,
+  base: ToolRoute,
+  model: string,
+  backend: Backend,
+): RouteFallback | null {
+  const declared = usableFallback(base.fallback, model, backend);
+  if (declared) return declared;
+  if (
+    isPerAngleReviewRoute(tool) &&
+    backend === "iu" &&
+    base.fallback?.backend === "iu" &&
+    servesOnMax(base.model)
+  ) {
+    return { backend: "max", model: base.model };
+  }
+  return null;
 }
 
 /** A fallback is only kept when it actually moves somewhere Max can serve: not the

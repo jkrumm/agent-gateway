@@ -14,8 +14,11 @@ import { appLogger as logger } from "../../logger.ts";
 import { parseParams } from "./util.ts";
 import {
   createReadWorktree,
+  opencodeRepoConfigPresent,
   removeWorktree,
   resolveRepoIdentity,
+  restoreStrippedSettings,
+  stripProjectSettings,
   type DispatchWorktree,
   type RepoIdentity,
 } from "./dispatch-git.ts";
@@ -889,6 +892,10 @@ export async function runReview(
   // exactly that path. Set the instant the fetch actually lands the ref, by
   // `fetchReviewHead`'s own callback.
   let fetchRefCreated = false;
+  // Paths `stripProjectSettings` removed from the ref-mode worktree, restored in the `finally`
+  // (see dispatch.ts's strip/restore pairing). Always empty in scope mode: a live checkout is
+  // never stripped — an opencode-harness angle is instead refused there (below).
+  let strippedSettings: string[] = [];
   // OCR runs in parallel with the angle phase; the `finally` aborts and awaits it so an early
   // exit (throw, all-angles-failed) never leaves `ocr` reading a worktree being torn down.
   let ocrAbort: AbortController | undefined;
@@ -917,6 +924,14 @@ export async function runReview(
       bump("checking out worktree");
       worktree = await createReadWorktree(cwd, jobKey, headOid);
       effectiveCwd = worktree.path;
+      // A repo-local opencode config/plugin would execute the moment an opencode-harness
+      // angle session loads this worktree (a `.opencode/` plugin runs regardless of the
+      // permission profile). The worktree is a throwaway, so strip the repo's session settings
+      // here and restore from the pinned base in the `finally` — exactly the pairing dispatch's
+      // worktree tiers use (`stripProjectSettings`/`restoreStrippedSettings`), not a second
+      // implementation. Safe for the diff: ref mode compares commits (baseOid...HEAD), not the
+      // working tree.
+      strippedSettings = stripProjectSettings(worktree);
       diffCmd = refDiffCommand(baseOid);
       filesCmd = refDiffFilesCommand(baseOid);
       coderabbitCmd = `which coderabbit >/dev/null 2>&1 && coderabbit review --prompt-only --base ${baseOid} 2>/dev/null || true`;
@@ -935,6 +950,14 @@ export async function runReview(
       // already-pushed commits. See `fallowBaseFor` for the `auto`/`skip` cases.
       fallowCmd = fallowCommand(fallowBaseFor(resolvedScope));
     }
+
+    // Scope mode runs in the caller's LIVE checkout, which must never be stripped — another
+    // session may own those files. Instead, each opencode-harness angle is refused below and
+    // falls back to the claude route when the repo carries a repo-local opencode config/plugin
+    // (`.opencode/` executes on load regardless of the permission profile; `opencode.json[c]`
+    // is the same vector for hooks/env). Ref mode stripped its throwaway worktree above, so
+    // this is scope-mode only.
+    const liveOpencodeConfig = refMode ? [] : opencodeRepoConfigPresent(cwd);
 
     // ── Phase 1: Data gathering (parallel) ──────────────────────────────
     bump("gathering diff, fallow, coderabbit, ocr");
@@ -1092,13 +1115,32 @@ export async function runReview(
         prompt += contextBlock;
         prompt += researchBlock;
 
+        // Scope mode + a repo-local opencode config: refuse this angle's opencode route and
+        // run it on the claude review route instead — never delete the caller's own files.
+        // Mirrors dispatch's `assertInPlaceOpencodeConfigAllowed`, but per-angle (a fallback,
+        // not a refusal of the whole review).
+        let angleRoute = routeForReviewAngle(agent.angle);
+        if (liveOpencodeConfig.length > 0 && angleRoute.harness === "opencode") {
+          logger.warn(
+            {
+              event: "review.opencode_angle_refused_config",
+              tool: "review",
+              project: cwd,
+              angle: agent.angle,
+              files: liveOpencodeConfig,
+            },
+            "refusing an opencode-harness angle in a live checkout carrying its own opencode config — using the claude route",
+          );
+          angleRoute = routeFor("review");
+        }
+
         const result = await runSession<AngleOutput>({
           cwd: effectiveCwd,
           prompt,
           tool: "review:angle",
           jobId,
           isCancelled,
-          route: routeForReviewAngle(agent.angle),
+          route: angleRoute,
           model,
           jsonSchema: ANGLE_JSON_SCHEMA,
           readOnly: true,
@@ -1323,6 +1365,10 @@ export async function runReview(
     // even when the fetch ref does (a throw from `resolveReviewBase`/`createReadWorktree`
     // lands exactly there), so cleanup must not be gated on `worktree` alone.
     if (worktree) {
+      // Put the stripped settings back before teardown — the worktree is discarded either
+      // way, but this keeps the strip/restore contract symmetric with dispatch's (and leaves
+      // a whole tree if `removeWorktree` itself fails).
+      await restoreStrippedSettings(worktree, strippedSettings);
       await removeWorktree(cwd, worktree);
     }
     if (fetchRefCreated) {
