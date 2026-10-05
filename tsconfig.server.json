@@ -10,5 +10,5 @@
     "outDir": ".out/server",
     "composite": true
   },
-  "include": ["server/**/*", "tests/**/*", "bin/**/*"]
+  "include": ["server/**/*", "tests/**/*", "bin/**/*", "scripts/**/*.ts"]
 }

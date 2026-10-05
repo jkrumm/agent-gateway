@@ -225,11 +225,14 @@ const ANGLE_FINDING = z.object({
   message: z.string(),
 });
 
-const ANGLE_OUTPUT = z.object({
+// Exported (with `ANGLE_JSON_SCHEMA` and `loadAnglePrompt` below) so standalone measurement
+// scripts under scripts/ can run one angle session with the exact same prompt and schema the
+// pipeline builds, instead of copying either and drifting from it.
+export const ANGLE_OUTPUT = z.object({
   findings: z.array(ANGLE_FINDING),
 });
 
-const ANGLE_JSON_SCHEMA = z.toJSONSchema(ANGLE_OUTPUT);
+export const ANGLE_JSON_SCHEMA = z.toJSONSchema(ANGLE_OUTPUT);
 
 type AngleOutput = z.infer<typeof ANGLE_OUTPUT>;
 
@@ -237,7 +240,7 @@ type AngleOutput = z.infer<typeof ANGLE_OUTPUT>;
 
 const SKILL_DIR = join(import.meta.dir, "../../skills/review");
 
-async function loadAnglePrompt(angle: string): Promise<string> {
+export async function loadAnglePrompt(angle: string): Promise<string> {
   const path = join(SKILL_DIR, `${angle}.md`);
   if (!existsSync(path)) {
     throw new Error(`review angle prompt not found: ${path}`);
