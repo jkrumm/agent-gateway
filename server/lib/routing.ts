@@ -11,9 +11,10 @@
 // Claude Code OAuth profile — the Max subscription, Claude ids only).
 //
 // Harness: `claude` (default — spawns `claude -p`, `session-runner.ts`) or `opencode`
-// (spawns `opencode run`, `server/mcp/opencode-runner.ts`) — ONLY `dispatch`/
-// `dispatch_implement` run on `opencode` as of 2026-09-24 (see the AGENT_OC/
-// AGENT_OC_IMPLEMENT tiers below); every other tool stays on `claude`. A route's
+// (spawns `opencode run`, `server/mcp/opencode-runner.ts`) — ONLY `dispatch`,
+// `dispatch_implement` and `dispatch_implement_escalation` run on `opencode` (see the
+// AGENT_OC/AGENT_OC_IMPLEMENT/AGENT_OC_ESCALATION tiers below); every other tool stays on
+// `claude`. A route's
 // `variant` (opencode's `--variant`, a reasoning-effort knob) is only meaningful when
 // `harness: "opencode"`. A fallback attempt (the `iu`→`max` reverse lane) ALWAYS runs the
 // `claude` harness, regardless of the primary route's harness — Max only ever serves a
@@ -107,6 +108,7 @@ export const ROUTED_TOOLS = [
   "adversary",
   "dispatch",
   "dispatch_implement",
+  "dispatch_implement_escalation",
   "otel",
   "excalidraw",
   "read_image",
@@ -162,6 +164,9 @@ export const DEEPSEEK_FLASH = "DeepSeek-V4-Flash";
  *  NOT the IU native Anthropic transport `DEEPSEEK_FLASH` above runs over — `claude -p`
  *  cannot reach this id at all. See AGENT_OC below. */
 export const DEEPSEEK_V41_FLASH = "deepseek-v4.1-flash";
+/** The escalation implement seat (attempt 3+), opencode-harness only — reached over IU's
+ *  OpenAI-compatible route as `iu-chat/DeepSeek-V4-Pro`, `claude -p` cannot reach it. */
+export const DEEPSEEK_PRO = "DeepSeek-V4-Pro";
 
 // ── Tiers — named once, referenced by every tool that shares the shape, so a re-tiering
 // touches one line instead of hunting down every duplicate. One-line "why" per tier; the
@@ -169,9 +174,11 @@ export const DEEPSEEK_V41_FLASH = "deepseek-v4.1-flash";
 //
 // CLASSIFY: cheap mechanical work (check, overview) — a gateway model, thinking capped so
 //   cheap work stays cheap, Haiku on Max as the reverse lane.
-// AGENT_OC / AGENT_OC_IMPLEMENT: dispatch (investigate/author) and dispatch_implement on the
-//   OpenCode harness — cheaper and faster than the retired `claude -p` agent tiers; `variant`
-//   is the reasoning-effort split (higher for the write tier).
+// AGENT_OC / AGENT_OC_IMPLEMENT / AGENT_OC_ESCALATION: dispatch (investigate/author),
+//   dispatch_implement and its attempt-3+ escalation on the OpenCode harness — cheaper and
+//   faster than the retired `claude -p` agent tiers; `variant` is the reasoning-effort split
+//   (higher for the write tiers). The escalation route carries no Max fallback — a gateway
+//   model cannot run there, so the caller retries instead.
 const AGENT_OC: ToolRoute = {
   model: DEEPSEEK_V41_FLASH,
   backend: "iu",
@@ -184,6 +191,14 @@ const AGENT_OC_IMPLEMENT: ToolRoute = {
   model: DEEPSEEK_V41_FLASH,
   backend: "iu",
   fallback: { backend: "max", model: SONNET },
+  transport: "session",
+  harness: "opencode",
+  variant: "max",
+};
+const AGENT_OC_ESCALATION: ToolRoute = {
+  model: DEEPSEEK_PRO,
+  backend: "iu",
+  fallback: null,
   transport: "session",
   harness: "opencode",
   variant: "max",
@@ -264,6 +279,7 @@ const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
   },
   dispatch: AGENT_OC,
   dispatch_implement: AGENT_OC_IMPLEMENT,
+  dispatch_implement_escalation: AGENT_OC_ESCALATION,
   otel: JUDGE,
   excalidraw: PROSE,
   read_image: VISION,

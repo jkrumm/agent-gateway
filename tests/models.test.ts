@@ -64,6 +64,7 @@ describe("verified", () => {
         "claude-sonnet-5",
         "claude-sonnet-5[1m]",
         "DeepSeek-V4-Flash",
+        "DeepSeek-V4-Pro", // probed 2026-10-05 as the OpenCode escalation implement seat
         "deepseek-v4.1-flash",
         "gemini-3.5-flash",
         "gpt-5.6-terra",
@@ -79,11 +80,12 @@ describe("verified", () => {
 
   test("validateModel refuses unknown and unverified ids, accepts verified ones", () => {
     expect(validateModel("not-a-model")).toMatchObject({ ok: false });
-    expect(validateModel("DeepSeek-V4-Pro")).toMatchObject({
+    expect(validateModel("gpt-6-sol")).toMatchObject({
       ok: false,
       reason: expect.stringContaining("unverified"),
     });
     expect(validateModel("gpt-6.1-sol")).toMatchObject({ ok: true });
+    expect(validateModel("DeepSeek-V4-Pro")).toMatchObject({ ok: true });
   });
 });
 

@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 import {
   buildRoutingTable,
   DEEPSEEK_FLASH,
+  DEEPSEEK_PRO,
   DEEPSEEK_V41_FLASH,
   describeRoute,
   GLM_FLASH,
@@ -17,6 +18,7 @@ import {
   routeForReviewAngle,
   reviewAngleRouteKey,
   SONNET,
+  validateModel,
   withModel,
 } from "../server/lib/routing.ts";
 import { parseDotEnv } from "../server/lib/load-env.ts";
@@ -87,6 +89,22 @@ describe("buildRoutingTable defaults", () => {
       harness: "opencode",
       variant: "max",
     });
+  });
+
+  test("dispatch_implement_escalation: DeepSeek-V4-Pro via opencode on iu, no Max fallback, variant max (attempt-3+ implement escalation)", () => {
+    expect(routes.dispatch_implement_escalation).toEqual({
+      model: DEEPSEEK_PRO,
+      backend: "iu",
+      fallback: null,
+      transport: "session",
+      harness: "opencode",
+      variant: "max",
+    });
+  });
+
+  test("the escalation route's model is a verified registry id, exposed at routes.dispatch_implement_escalation.model (warden's GET /api/routing path)", () => {
+    const route = buildRoutingTable({}).routes.dispatch_implement_escalation;
+    expect(validateModel(route.model)).toMatchObject({ ok: true, model: { id: DEEPSEEK_PRO } });
   });
 
   test("review (angles/synthesis/router), otel: Sonnet on max with the quota fallback to iu (the JUDGE tier — deliberately NOT on glm, see routing.ts)", () => {
@@ -235,7 +253,7 @@ describe("buildRoutingTable env overrides", () => {
     expect(ok.routes.triage.model).toBe(HAIKU);
     expect(ok.overrides).toEqual([{ tool: "triage", field: "model", value: HAIKU }]);
 
-    const refused = buildRoutingTable({ SIDECLAW_MODEL_TRIAGE: "DeepSeek-V4-Pro" });
+    const refused = buildRoutingTable({ SIDECLAW_MODEL_TRIAGE: "gpt-6-sol" });
     expect(refused.routes.triage.model).toBe(DEEPSEEK_V41_FLASH);
     expect(refused.overrides[0]?.refused).toContain("unverified");
   });
@@ -297,7 +315,7 @@ describe("buildRoutingTable env overrides", () => {
   });
 
   test("a registered but UNVERIFIED model override is refused, default stays", () => {
-    for (const id of [GLM_FLASH, "DeepSeek-V4-Pro", "gpt-6-sol"]) {
+    for (const id of [GLM_FLASH, "gpt-6-sol", "kimi-k2.7-code"]) {
       const { routes, overrides } = buildRoutingTable({ SIDECLAW_MODEL_DISPATCH: id });
       expect(routes.dispatch.model).toBe(DEEPSEEK_V41_FLASH);
       expect(routes.dispatch.harness).toBe("opencode");
@@ -703,7 +721,8 @@ describe("withModel", () => {
     const check = routeFor("check");
     const dispatch = routeFor("dispatch");
     expect(withModel(check, "not-a-model")).toBe(check);
-    expect(withModel(check, "DeepSeek-V4-Pro")).toBe(check); // registered, unverified
+    expect(withModel(check, "gpt-6-sol")).toBe(check); // registered, unverified
+    expect(withModel(check, "DeepSeek-V4-Pro")).toBe(check); // verified but opencode-only, check is claude
     expect(withModel(check, "gpt-6.1-sol")).toBe(check); // verified but opencode-only, check is claude
     expect(withModel(dispatch, GLM_FLASH)).toBe(dispatch);
   });
@@ -748,6 +767,9 @@ describe("routeFor / describeRoute", () => {
     );
     expect(describeRoute(routeFor("dispatch_implement"))).toBe(
       `${DEEPSEEK_V41_FLASH} on iu via opencode (variant max) (fallback ${SONNET} on max)`,
+    );
+    expect(describeRoute(routeFor("dispatch_implement_escalation"))).toBe(
+      `${DEEPSEEK_PRO} on iu via opencode (variant max)`,
     );
   });
 

@@ -146,6 +146,10 @@ const MODELS: readonly ModelEntry[] = [
     jsonObject: true,
     verified: "2026-09-24",
   },
+  // Probed 2026-10-05 (scripts/probe-implement.ts, opencode harness, variant "max"): two
+  // replayed real implement briefs, both passed their reference tests — 8 and 5 turns,
+  // 51 s / 70 s, $0.061 / $0.067. The dispatch implement attempt-3+ escalation seat
+  // (routing.ts AGENT_OC_ESCALATION); gpt-6.1-sol stays verified-for-Responses only.
   {
     id: "DeepSeek-V4-Pro",
     name: "DeepSeek V4 Pro",
@@ -156,7 +160,7 @@ const MODELS: readonly ModelEntry[] = [
     rate: { in: 0.66, out: 1.98, source: OC_JSON_SOURCE, date: OC_JSON_DATE },
     effort: ["high", "max", "none"],
     jsonObject: false,
-    verified: null,
+    verified: "2026-10-05",
   },
 
   // ── GLM — retired from every route 2026-09-23; kept only as a documented id. ─────────

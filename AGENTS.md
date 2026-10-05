@@ -309,6 +309,10 @@ default to the `review` route; override via
 opencode angle needs both the MODEL and HARNESS overrides) — see
 `docs/routing-and-quota.md` §Per-angle review routes.
 
+A third OpenCode route, `dispatch_implement_escalation`, serves attempt-3+ retries of an
+implement episode (model in `GET /api/routing`); it carries no Max fallback, so the caller
+retries instead.
+
 Live table: **`GET /api/routing`**. Overrides: `SIDECLAW_MODEL_<TOOL>=<id>`,
 `SIDECLAW_BACKEND_<TOOL>=iu|max`, `SIDECLAW_THINKING_TOKENS_<TOOL>=<n>` (read
 once at module load → `make reload`). Full rationale — the tiers, the

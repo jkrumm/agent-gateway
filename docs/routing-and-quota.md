@@ -299,6 +299,18 @@ the module header's Harness paragraph), so a lane switch here is model AND harne
 transport all changing at once, same as it already was reaching Max from AGENT/
 AGENT_IMPLEMENT's IU-native-Anthropic primary.
 
+### escalation
+
+escalation — `dispatch_implement_escalation`, the attempt-3+ retry seat for an implement
+episode (warden reads `routes.dispatch_implement_escalation.model` from `GET /api/routing`),
+2026-10-05. DeepSeek-V4-Pro over the OpenCode harness, variant `"max"`, no Max fallback (a
+gateway id cannot run there — the caller retries instead). Chosen over gpt-6.1-sol on
+`scripts/probe-implement.ts` (two replayed real implement briefs, one run each):
+DeepSeek-V4-Pro passed both reference tests, 8/5 turns, 51 s/70 s, $0.061/$0.067; gpt-6.1-sol
+passed both but at 18/19 turns, 1330 s (one run hit the 300 s idle watchdog)/594 s,
+$0.32/$0.39; the deepseek-v4.1-flash baseline passed both at 31 s/97 s, $0.011/$0.016.
+gpt-6.1-sol stays verified for chat/Responses only (2026-10-02) — rates/limits unchanged.
+
 ### JUDGE
 
 JUDGE: judgment-heavy work that stays on Max — review (angles/synthesis/router) and

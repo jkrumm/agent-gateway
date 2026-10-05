@@ -48,16 +48,25 @@ describe("dispatch `model` refusal", () => {
   test("a registered but unverified id is refused too", async () => {
     const { status, body } = await post({
       tool: "dispatch",
-      params: { cwd: repo, tier: "investigate", brief: "x", model: "DeepSeek-V4-Pro" },
+      params: { cwd: repo, tier: "investigate", brief: "x", model: "gpt-6-sol" },
     });
     expect(status).toBe(400);
-    expect(body.error).toContain("DeepSeek-V4-Pro is not a verified registry model");
+    expect(body.error).toContain("gpt-6-sol is not a verified registry model");
   });
 
   test("a verified id is accepted", async () => {
     const { status, body } = await post({
       tool: "dispatch",
       params: { cwd: repo, tier: "investigate", brief: "x", model: "deepseek-v4.1-flash" },
+    });
+    expect(status).toBe(200);
+    expect(body.ok).toBe(true);
+  });
+
+  test("the escalation model DeepSeek-V4-Pro is verified and accepted for dispatch", async () => {
+    const { status, body } = await post({
+      tool: "dispatch",
+      params: { cwd: repo, tier: "investigate", brief: "x", model: "DeepSeek-V4-Pro" },
     });
     expect(status).toBe(200);
     expect(body.ok).toBe(true);
