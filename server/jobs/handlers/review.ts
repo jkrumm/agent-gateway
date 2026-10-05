@@ -277,7 +277,9 @@ export function salvagedVerdict(
       },
     ],
     testGaps: [],
-    summary: `Review ran ${totalReviewers} reviewers but synthesis failed to serialize a structured verdict (after one retry). Findings were NOT lost — see the discussions entry for the raw synthesizer text. Treat as needs-human.`,
+    summary: upstreamLimit
+      ? `Review ran ${totalReviewers} reviewers but synthesis was killed by an upstream quota/rate limit (after one retry). Findings were NOT lost — see the discussions entry for the raw synthesizer text. Re-run the review after the reset window; this is not a genuine human escalation.`
+      : `Review ran ${totalReviewers} reviewers but synthesis failed to serialize a structured verdict (after one retry). Findings were NOT lost — see the discussions entry for the raw synthesizer text. Treat as needs-human.`,
     schemaVersion: REVIEW_SCHEMA_VERSION,
     upstreamLimit,
     retryable: upstreamLimit,

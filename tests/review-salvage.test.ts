@@ -26,6 +26,10 @@ describe("salvagedVerdict", () => {
     expect(verdict.upstreamLimit).toBe(true);
     expect(verdict.retryable).toBe(true);
     expect(verdict.schemaVersion).toBe(1);
+    // The human-readable summary must not read as a genuine escalation: an owner reading it
+    // should re-run after the reset, not triage a review that was never performed.
+    expect(verdict.summary).toContain("upstream quota/rate limit");
+    expect(verdict.summary).not.toContain("Treat as needs-human");
   });
 
   test("a genuine serialization failure carries no upstream-limit signal", () => {
@@ -40,6 +44,8 @@ describe("salvagedVerdict", () => {
     expect(verdict.outcome).toBe("needs-human");
     expect(verdict.upstreamLimit).toBe(false);
     expect(verdict.retryable).toBe(false);
+    expect(verdict.summary).toContain("Treat as needs-human");
+    expect(verdict.summary).not.toContain("upstream quota/rate limit");
   });
 
   test("preserves the raw synthesizer text for manual triage on both paths", () => {
