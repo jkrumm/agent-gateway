@@ -748,3 +748,95 @@ describe("triage command", () => {
     expect(bad.err).toContain("not valid JSON");
   });
 });
+
+// ── update-pr — result rendering and exit codes ──────────────────────────────────
+
+describe("update-pr command", () => {
+  const UPDATED = {
+    status: "updated",
+    headSha: "bbb2222",
+    previousHeadSha: "aaa1111",
+    baseSha: "ccc3333",
+    checks: { passed: true, summary: "all green" },
+    prUrl: "https://example.com/o/r/pull/42",
+  };
+  const UP_TO_DATE = { ...UPDATED, status: "up_to_date", headSha: "aaa1111" };
+  const CONFLICT = {
+    status: "conflict",
+    headSha: "aaa1111",
+    previousHeadSha: "aaa1111",
+    prUrl: "https://example.com/o/r/pull/42",
+    note: "rebase conflict",
+  };
+
+  function updatePr(result: unknown, extra: string[] = []) {
+    let posted: string | undefined;
+    return runWith(["update-pr", "--repo", "/repo", "--pr", "42", ...extra], {
+      "POST /api/jobs": (init) => {
+        posted = init?.body as string;
+        return { body: { ok: true, job: { id: "j1" } } };
+      },
+      "GET /api/jobs/j1": () => ({
+        body: { ok: true, job: { ...DONE_JOB, tool: "update_pr", result } },
+      }),
+    }).then((r) => ({ ...r, posted }));
+  }
+
+  // The update_pr output has no verdict/steps/blocking, so no dedicated renderer matches and
+  // renderResult falls back to pretty JSON. A `conflict` is a *successful* job (the handler
+  // returns it rather than throwing), so the CLI exits 0 — the status is in the payload.
+  test("up_to_date renders the result JSON and exits 0", async () => {
+    const { code, out, err, posted } = await updatePr(UP_TO_DATE);
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual(UP_TO_DATE);
+    expect(err).toBe("");
+    expect(JSON.parse(posted ?? "")).toEqual({
+      tool: "update_pr",
+      params: { cwd: "/repo", pr: 42 },
+    });
+  });
+
+  test("conflict renders the result JSON and exits 0 (job done, status in the payload)", async () => {
+    const { code, out, err } = await updatePr(CONFLICT);
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual(CONFLICT);
+    expect(err).toBe("");
+  });
+
+  test("--json keeps stdout pure JSON for a conflict", async () => {
+    const { code, out } = await updatePr(CONFLICT, ["--json"]);
+    expect(code).toBe(0);
+    expect(out).toBe(`${JSON.stringify(CONFLICT, null, 2)}\n`);
+  });
+
+  test("a failed update_pr job (handler refusal) exits 1 with the error on stderr", async () => {
+    const { code, err } = await runWith(["update-pr", "--repo", "/repo", "--pr", "42"], {
+      "POST /api/jobs": () => ({ body: { ok: true, job: { id: "j1" } } }),
+      "GET /api/jobs/j1": () => ({
+        body: {
+          ok: true,
+          job: {
+            ...DONE_JOB,
+            tool: "update_pr",
+            status: "failed",
+            result: null,
+            error: "update_pr refused: PR #42 is closed, not open",
+          },
+        },
+      }),
+    });
+    expect(code).toBe(1);
+    expect(err).toContain("update_pr refused");
+  });
+
+  test("a submit-time `update_pr refused` (HTTP 400) exits 2", async () => {
+    const { code, err } = await runWith(["update-pr", "--repo", "/repo", "--pr", "42"], {
+      "POST /api/jobs": () => ({
+        status: 400,
+        body: { ok: false, error: "update_pr refused: cwd is outside every root" },
+      }),
+    });
+    expect(err).toContain("update_pr refused");
+    expect(code).toBe(2);
+  });
+});

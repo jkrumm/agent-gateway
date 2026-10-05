@@ -42,8 +42,6 @@ export const TRIAGE_INPUT = z.object({
     ),
 });
 
-export type TriageParams = z.infer<typeof TRIAGE_INPUT>;
-
 export interface TriageOutput {
   /** The model's answer, validated against `schema`. */
   result: unknown;
@@ -75,6 +73,8 @@ function buildPrompt(prompt: string, schema: Record<string, unknown>): string {
 export async function runTriage(
   rawParams: Record<string, unknown>,
   onProgress?: ProgressSink,
+  jobId?: string,
+  isCancelled?: (jobId: string) => boolean,
 ): Promise<TriageOutput> {
   const params = parseParams(TRIAGE_INPUT, rawParams);
 
@@ -94,6 +94,7 @@ export async function runTriage(
     prompt: buildPrompt(params.prompt, params.schema),
     schema: validator,
     route,
+    isCancelled: jobId !== undefined && isCancelled ? () => isCancelled(jobId) : undefined,
   });
 
   logger.info(

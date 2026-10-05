@@ -12,7 +12,8 @@ process.env.SIDECLAW_IU_USAGE_LOG = join(tmpdir(), `sideclaw-single-shot-test-${
 process.env.IU_API_KEY = "test-key";
 process.env.IU_BASE_URL = "https://iu.example.com/anthropic";
 
-const { singleShotJson, parseJsonLoose } = await import("../server/lib/single-shot.ts");
+const { singleShotJson, parseJsonLoose, SingleShotCancelledError } =
+  await import("../server/lib/single-shot.ts");
 const { routeFor } = await import("../server/lib/routing.ts");
 
 const originalFetch = globalThis.fetch;
@@ -109,6 +110,34 @@ describe("singleShotJson", () => {
     expect(retry).toContain("REJECTED");
     expect(retry).toContain("not a valid JSON object");
     expect(retry).toContain("I cannot decide");
+  });
+
+  test("a cancel requested during attempt 1 stops before the retry: one textComplete call", async () => {
+    queue = [sse("not json"), sse('{"action":"new"}')];
+    let polls = 0;
+    const run = singleShotJson({
+      tool: "triage",
+      prompt: "p",
+      schema: SCHEMA,
+      route: route(),
+      isCancelled: () => ++polls > 0,
+    });
+    await expect(run).rejects.toBeInstanceOf(SingleShotCancelledError);
+    expect(bodies).toHaveLength(1);
+    expect(polls).toBe(1);
+  });
+
+  test("isCancelled is not polled before the first attempt and a false result retries as usual", async () => {
+    queue = [sse("not json"), sse('{"action":"new"}')];
+    const out = await singleShotJson({
+      tool: "triage",
+      prompt: "p",
+      schema: SCHEMA,
+      route: route(),
+      isCancelled: () => false,
+    });
+    expect(out.attempts).toBe(2);
+    expect(bodies).toHaveLength(2);
   });
 
   test("schema-nonconforming answer is retried with the zod path in the reason", async () => {

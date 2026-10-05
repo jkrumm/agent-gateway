@@ -18,7 +18,9 @@ import type { ToolRoute } from "./routing.ts";
 //   - tolerant parse (a ```json fence or stray prose around the object is accepted), then zod
 //     validation;
 //   - ONE retry with the rejection reason appended, then a throw. A transport failure is NOT
-//     retried here — `iuFetch` already retries those, and a second pass would only double-bill.
+//     retried here — `iuFetch` already retries those, and a second pass would only double-bill;
+//   - a cancel requested while attempt 1 was in flight stops the retry (`isCancelled`), so a
+//     cancelled job does not bill a second completion.
 // Usage is recorded per attempt by `textComplete` itself (`recordIuUsage`, tagged with `tool`).
 
 const MIN_MAX_COMPLETION_TOKENS = 16_000;
@@ -26,6 +28,17 @@ const MAX_ATTEMPTS = 2;
 /** How much of the rejected answer is echoed back on the retry — enough to repair, bounded so a
  *  runaway answer cannot double the prompt. */
 const RETRY_ECHO_CHARS = 4_000;
+
+/** The cancel marker: thrown before a retry when the caller's `isCancelled` reports a cancel,
+ *  so the retry loop stops instead of spending another completion. Nothing branches on the
+ *  type — `store.ts`'s `execute()` classifies `cancelled` vs `failed` from the job row's cancel
+ *  request, not from this error — it only lets a direct caller tell the two apart. */
+export class SingleShotCancelledError extends Error {
+  constructor(tool: string) {
+    super(`${tool}: cancelled by request before the retry`);
+    this.name = "SingleShotCancelledError";
+  }
+}
 
 export interface SingleShotResult<T> {
   data: T;
@@ -89,6 +102,9 @@ export async function singleShotJson<T>(opts: {
   prompt: string;
   schema: z.ZodType<T>;
   route: ToolRoute;
+  /** Polled before each retry attempt (never before the first); true aborts with
+   *  `SingleShotCancelledError`. */
+  isCancelled?: () => boolean;
 }): Promise<SingleShotResult<T>> {
   const { tool, schema, route } = opts;
   const entry = getModel(route.model);
@@ -101,6 +117,7 @@ export async function singleShotJson<T>(opts: {
   let lastReason = "";
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    if (attempt >= 2 && opts.isCancelled?.()) throw new SingleShotCancelledError(tool);
     const result = await textComplete({
       prompt,
       model: route.model,
@@ -130,7 +147,7 @@ export async function singleShotJson<T>(opts: {
       { event: "single_shot.rejected", tool, model: route.model, attempt, reason },
       `${tool} single-shot answer rejected`,
     );
-    prompt = retryPrompt(opts.prompt, result.text, reason);
+    if (attempt < MAX_ATTEMPTS) prompt = retryPrompt(opts.prompt, result.text, reason);
   }
 
   throw new Error(`${tool}: model output rejected after ${MAX_ATTEMPTS} attempts — ${lastReason}`);

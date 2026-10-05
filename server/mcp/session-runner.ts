@@ -1054,8 +1054,12 @@ export function isIuNeverAnswered(text: string): boolean {
  *  fine" — the closed set a post-output fallback may act on. */
 const SERVER_ERROR_STATUSES = new Set([500, 502, 503, 504, 529]);
 // Anchored to a status-shaped prefix — a bare number ("took 500 ms") must not switch lanes.
-const SERVER_ERROR_TEXT_RE =
-  /(?:\b(?:IU|API|HTTP)(?: Error)?:?\s*|api_error_status=|\bstatus(?: code)?[ :=]\s*)(?:500|502|503|504|529)\b/i;
+// No `api_error_status=` prefix: that suffix (`appendApiErrorStatus`) only exists next to a
+// numeric `apiErrorStatus`, which `isIuServerError` already decides on before reading text.
+const SERVER_ERROR_TEXT_RE = new RegExp(
+  `(?:\\b(?:IU|API|HTTP)(?: Error)?:?\\s*|\\bstatus(?: code)?[ :=]\\s*)(?:${[...SERVER_ERROR_STATUSES].join("|")})\\b`,
+  "i",
+);
 
 /** Does this attempt's TRANSPORT-sourced evidence say the gateway/API failed server-side
  *  (5xx or a connection-level error) rather than refusing or rejecting the request? Pure.
@@ -1122,6 +1126,28 @@ export function exitCodeIsFailure(
   return !(envelope?.subtype === "success" && envelope.is_error !== true);
 }
 
+/** The `error` string for a non-zero exit that arrived with a result envelope. A present
+ *  non-error subtype (a `success` envelope followed by a process exit 1) reads
+ *  self-contradictory in the parenthetical form — "(success)" was published as part of a
+ *  verdict (job 32118606) — so word those differently. Absent and `error_*` subtypes keep the
+ *  original shape. An `is_error` envelope is never described as a success one, even when its
+ *  subtype says so ("Not logged in"). */
+function describeEnvelopeExit(
+  envelope: { subtype?: string; is_error?: boolean },
+  exitCode: number,
+  errorSubtype: boolean,
+  detail: string | undefined,
+): string {
+  const suffix = detail ? `: ${detail}` : "";
+  if (!envelope.subtype || errorSubtype) {
+    return `Session exited with code ${exitCode} (${envelope.subtype ?? "unknown"})${suffix}`;
+  }
+  if (envelope.is_error === true) {
+    return `Session exited with code ${exitCode} with an is_error result envelope${suffix}`;
+  }
+  return `Session exited with code ${exitCode} after a ${envelope.subtype} result envelope${suffix}`;
+}
+
 /** Build the failure result for `runSessionAttempt`'s `exitCode !== 0` branch. Pure —
  *  extracted for direct unit coverage, same as `classifyErrorEnvelope`. Prefers the
  *  result envelope's own `subtype` over stderr when one arrived (e.g. `error_max_turns`
@@ -1155,7 +1181,7 @@ export function classifyExitFailure(
   const rawText = lastAssistantText || undefined;
   if (envelope) {
     // `errors[]` is CLI-sourced; `result` is the model's own final text and stays out of
-    // `error` — that string feeds the reactive fallback classifier and a needs_human card,
+    // `error` — that string feeds the reactive fallback classifier and a failed card,
     // and an episode's brief is attacker-influenceable. The one exception mirrors
     // `classifyErrorEnvelope`'s zero-turn carve-out: on an `is_error` envelope the model
     // provably never spoke when `turnsObserved === 0`, so `result` is gateway/CLI text.
@@ -1177,17 +1203,7 @@ export function classifyExitFailure(
         rawText,
       };
     }
-    // A present non-error subtype (a `success` envelope followed by a process exit 1)
-    // reads self-contradictory in the parenthetical form — "(success)" was published as
-    // part of a verdict (job 32118606) — so word those differently. Absent and `error_*`
-    // subtypes keep the original shape. An `is_error` envelope is never described as a
-    // success one, even when its subtype says so ("Not logged in").
-    const error =
-      !envelope.subtype || errorSubtype
-        ? `Session exited with code ${exitCode} (${envelope.subtype ?? "unknown"})${detail ? `: ${detail}` : ""}`
-        : envelope.is_error === true
-          ? `Session exited with code ${exitCode} with an is_error result envelope${detail ? `: ${detail}` : ""}`
-          : `Session exited with code ${exitCode} after a ${envelope.subtype} result envelope${detail ? `: ${detail}` : ""}`;
+    const error = describeEnvelopeExit(envelope, exitCode, errorSubtype, detail);
     return { error, noOutput: errorSubtype, rawText };
   }
   const cleanStderr = stripBenignStderr(stderrTrimmed);

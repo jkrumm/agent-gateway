@@ -692,8 +692,16 @@ export async function findOpenPullRequest(
       "GET",
       {},
     );
-    const first: unknown = Array.isArray(list) ? list[0] : undefined;
-    return first ? gitlabMrInfo(first) : null;
+    if (!Array.isArray(list)) return null;
+    // A fork MR can share the branch name; only an MR from this repo's own branch counts.
+    // Parsed lazily, one entry at a time, so a malformed entry AFTER the first same-repo match
+    // cannot hide it — but a malformed entry that is reached before a match still throws
+    // (gitlabMrInfo's own error): an unreadable MR is never silently treated as "no MR".
+    for (const entry of list) {
+      const mr = gitlabMrInfo(entry);
+      if (mr.sameRepo) return mr;
+    }
+    return null;
   }
   const gh = await octokit();
   const { data } = await gh.pulls
@@ -1586,7 +1594,7 @@ const PROJECT_SETTINGS_FILES = [
  *  in-place guard (`assertInPlaceOpencodeConfigAllowed`) and review's scope-mode per-angle
  *  fallback (`runReview`). Kept here, next to the strip list, so the security-relevant set
  *  stays in one place. */
-export const OPENCODE_REPO_CONFIG_PATHS = ["opencode.json", "opencode.jsonc", ".opencode"] as const;
+const OPENCODE_REPO_CONFIG_PATHS = ["opencode.json", "opencode.jsonc", ".opencode"] as const;
 
 /** Which of `OPENCODE_REPO_CONFIG_PATHS` exist directly under `root`, in declaration order.
  *  Read-only; the caller decides whether that is a refusal (dispatch in-place) or a per-angle

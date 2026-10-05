@@ -6,7 +6,12 @@ import { resolveDispatchTarget } from "../../lib/dispatch-policy.ts";
 import { releaseRepoLease, repoLeaseRefusal, tryAcquireRepoLease } from "../../lib/repo-lease.ts";
 import type { ProgressSink } from "../store.ts";
 import { parseParams } from "./util.ts";
-import { checksBlockPush, renderFailedChecks, runRepoCheck } from "./dispatch.ts";
+import {
+  checksBlockPush,
+  renderFailedChecks,
+  runRepoCheck,
+  type RepoCheckContext,
+} from "./repo-check.ts";
 import {
   createWorktree,
   getPullRequest,
@@ -37,9 +42,7 @@ export const UPDATE_PR_INPUT = z.object({
   pr: z.number().int().positive().describe("Number of the open dispatch/* PR (or GitLab MR)."),
 });
 
-export type UpdatePrParams = z.infer<typeof UPDATE_PR_INPUT>;
-
-export const UPDATE_PR_OUTPUT = z.object({
+const UPDATE_PR_OUTPUT = z.object({
   status: z
     .enum(["updated", "up_to_date", "conflict"])
     .describe(
@@ -66,7 +69,7 @@ export async function runUpdatePr(
   jobId?: string,
   isCancelled?: (jobId: string) => boolean,
   /** Test seam — the real check is a model session. */
-  deps: { runCheckFn?: Parameters<typeof runRepoCheck>[2]["runCheckFn"] } = {},
+  deps: Pick<RepoCheckContext, "runCheckFn"> = {},
 ): Promise<UpdatePrOutput> {
   const { cwd, pr } = parseParams(UPDATE_PR_INPUT, rawParams);
   // Same boundary as an implement dispatch: this pushes to a branch in that repo.

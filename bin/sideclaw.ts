@@ -11,7 +11,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { isTerminal, type JobStatus } from "../server/jobs/types";
-import type { DispatchOutput } from "../server/jobs/handlers/dispatch.ts";
+import type { DispatchOutput } from "../server/jobs/handlers/dispatch-verdict.ts";
 import type { CheckOutput } from "../server/jobs/handlers/check.ts";
 import type { ReviewOutput } from "../server/jobs/handlers/review.ts";
 

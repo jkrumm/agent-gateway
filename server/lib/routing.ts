@@ -309,6 +309,15 @@ export function isClaudeModel(model: string): boolean {
   return entry ? entry.backends.includes("max") : model.startsWith("claude");
 }
 
+/** The registry entry for an id routing has already validated. Throws (rather than casting)
+ *  if that invariant ever breaks, so a bad id fails here with its name, not later as a
+ *  property read on `undefined`. */
+function requireModel(id: string): ModelEntry {
+  const entry = getModel(id);
+  if (!entry) throw new Error(`model "${id}" is not in the registry (server/lib/models.ts)`);
+  return entry;
+}
+
 export type ModelValidation = { ok: true; model: ModelEntry } | { ok: false; reason: string };
 
 /** Registry gate for ANY route model: registered AND verified. Exported so a caller that
@@ -451,7 +460,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
     //
     // Session transport only: an external-iu/iu-openai route never runs a harness, so it may
     // carry any verified id with the inert default harness.
-    const entry = getModel(model) as ModelEntry;
+    const entry = requireModel(model);
     if (base.transport === "session" && !entry.harnesses.includes(harness)) {
       if (entry.harnesses.includes("claude")) {
         // A claude-capable id (every Claude id, DeepSeek-V4-Flash) on an opencode route:
@@ -518,7 +527,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
     } else if (variant !== undefined) {
       // A model that does not expose the route's `variant` (a different model's effort ladder)
       // drops it, reported — opencode would otherwise silently fall back to the base options.
-      const effective = getModel(model) as ModelEntry;
+      const effective = requireModel(model);
       if (!effective.effort.includes(variant)) {
         overrides.push({
           tool,
@@ -582,13 +591,13 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
           value: variantOverride,
           refused: `${tool} runs on the claude harness — variant is an opencode-only reasoning-effort knob`,
         });
-      } else if (!(getModel(model) as ModelEntry).effort.includes(variantOverride)) {
+      } else if (!requireModel(model).effort.includes(variantOverride)) {
         overrides.push({
           tool,
           field: "variant",
           value: variantOverride,
           refused: `${model} exposes no "${variantOverride}" effort variant — declared: ${
-            (getModel(model) as ModelEntry).effort.join(", ") || "none"
+            requireModel(model).effort.join(", ") || "none"
           }`,
         });
       } else {
@@ -669,7 +678,7 @@ function assertDefaultRoutesValid(): void {
       const check = validateModel(id);
       if (!check.ok) throw new Error(`default route "${tool}": ${check.reason}`);
     }
-    const entry = getModel(route.model) as ModelEntry;
+    const entry = requireModel(route.model);
     if (route.transport === "session" && !entry.harnesses.includes(route.harness)) {
       throw new Error(
         `default route "${tool}": ${route.model} cannot run on harness ${route.harness}`,

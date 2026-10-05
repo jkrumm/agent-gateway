@@ -68,16 +68,21 @@ Needs Max auth working on the mini (synthesis + the Sonnet baseline).
 - **tsc:** server + frontend typecheck with 0 errors; `bun run typecheck` is now real and part of `make check` (1083 tests green). Review's claimed TS6304/TS6306 composite breakage is false (`make check` passes).
 - **Escalation route:** `routes.dispatch_implement_escalation` = DeepSeek-V4-Pro, OpenCode `max`, no fallback — read by warden for attempt 3+. Probe (2 replayed implement briefs, one run each): V4-Pro 2/2 pass, 5-8 turns, 51-70 s, ~$0.06; gpt-6.1-sol 2/2 pass but 594-1330 s (one idle-watchdog hit), ~$0.32-0.39; flash 2/2 pass, 31-97 s, ~$0.01. Honest read: the briefs were easy, flash passed them too — the evidence picks V4-Pro as the best *escalation* candidate (cheap, fast, no stall), not that escalation beats flash. Thin sample (n=2) on a no-fallback route; re-probe on a brief flash fails. `scripts/probe-implement.ts` / `scripts/ab-review-angles.ts` need `IU_API_KEY`/`IU_BASE_URL` in env (Keychain unreadable headless: `secrets-run read op://common/anthropic/API_KEY|BASE_URL`).
 - **Not done (review improvements, 15 + 4 test gaps):** left in the review result, not applied — notably tests for `opencodeRepoConfigPresent` refusal and ref-mode strip wiring in review.ts, `.catchall` behavior in warden-board, kiosk status refactor. `fallow` still reports unused files/exports (scripts, `server/mcp/tools/dispatch.ts` false positive) — not gating. dotfiles `docs/agent-platform.md` status row still says "review angles off Max still pending (W4)" — update it (outside this repo).
-## Wave 5 — review fixes            <!-- status: active -->
+## Wave 5 — review fixes            <!-- status: done -->
 From the `/review` of `062b646~1..9205e38` (2026-10-05). Fix, `make check`, `/review` the fix diff.
-- [ ] `scripts/deploy.sh`: roll back only when reload succeeded and verify failed; a reload refusal (running jobs, plist drift) aborts with exit 1 and no rollback.
-- [ ] `dispatch.ts` `DispatchTier` TS2304 (fold into W4's tsc step if not done there).
-- [ ] `triage` jobs honour cancel: thread a cancel predicate through `singleShotJson` (checked before the retry) and pass `isCancelRequested` in executor.ts.
-- [ ] GitLab `findOpenPullRequest`: require `sameRepo` (fork MR with the same branch name must not be "the existing PR").
-- [ ] `repo-lease.ts`: guard `realpathSync` like the release path. `single-shot.ts`: skip the dead retry-prompt work on the last attempt.
-- [ ] `session-runner.ts`: derive the 5xx regex from `SERVER_ERROR_STATUSES`, drop the unreachable alternative; replace the nested ternary at ~1185.
-- [ ] Move `runRepoCheck`/`checksBlockPush`/`renderFailedChecks` out of dispatch.ts into a shared module next to check.ts (update-pr.ts stops importing dispatch.ts). Extract the verdict-schema cluster into `dispatch-verdict.ts`.
-- [ ] `routing.ts`: `requireModel()` helper instead of `getModel(...) as ModelEntry` casts.
-- [ ] Test gaps: executor routes `update_pr`; MCP `update_pr` registration; HTTP refusal of a disallowed cwd for `update_pr`; CLI `update-pr` render + exit codes for `conflict`/`up_to_date`.
+- [x] `scripts/deploy.sh`: roll back only when reload succeeded and verify failed; a reload refusal (running jobs, plist drift) aborts with exit 1 and no rollback.
+- [x] `dispatch.ts` `DispatchTier` TS2304 (fold into W4's tsc step if not done there).
+- [x] `triage` jobs honour cancel: thread a cancel predicate through `singleShotJson` (checked before the retry) and pass `isCancelRequested` in executor.ts.
+- [x] GitLab `findOpenPullRequest`: require `sameRepo` (fork MR with the same branch name must not be "the existing PR").
+- [x] `repo-lease.ts`: guard `realpathSync` like the release path. `single-shot.ts`: skip the dead retry-prompt work on the last attempt.
+- [x] `session-runner.ts`: derive the 5xx regex from `SERVER_ERROR_STATUSES`, drop the unreachable alternative; replace the nested ternary at ~1185.
+- [x] Move `runRepoCheck`/`checksBlockPush`/`renderFailedChecks` out of dispatch.ts into a shared module next to check.ts (update-pr.ts stops importing dispatch.ts). Extract the verdict-schema cluster into `dispatch-verdict.ts`.
+- [x] `routing.ts`: `requireModel()` helper instead of `getModel(...) as ModelEntry` casts.
+- [x] Test gaps: executor routes `update_pr`; MCP `update_pr` registration; HTTP refusal of a disallowed cwd for `update_pr`; CLI `update-pr` render + exit codes for `conflict`/`up_to_date`.
 - Deferred, owner call: typed `DispatchRefusal` instead of string-matched refusal messages; `buildRoutingTable` resolve-then-validate restructure.
-**Left behind:**
+**Left behind:** (**server not reloaded** — `make deploy` is the orchestrator's; no tool schema changed, no MCP reconnect.)
+- Gate: `make check` green (1133 tests, 0 lint errors, tsc 0). `/review` of the wave diff found 2 blocking (deploy.sh rollback after a post-restart reload failure; repo-lease raw-cwd fallback) — both fixed, plus 7 improvements and 4 test gaps; the fix round itself was not re-reviewed.
+- `deploy.sh`: refusals are now `scripts/reload-preflight.sh` (exit 3; make collapses recipe failures to exit 2, so it can't be read off `make reload`). Refusal → exit 1, no rollback; any later reload/verify failure → rollback on a clean tree. Tested with stubbed make (`tests/deploy-script.test.ts`).
+- Beyond the brief: `warden-board.ts` was parsing warden's OLD states and rejecting the real board (schema 15: new/triaged/working/merging/verifying/needs_decision/failed) — fixed, header is now `needs_decision · failed · in flight`; docs/code drift in AGENTS.md, README, agent-overview-internals, dispatch-security, routing-and-quota corrected. `hermes-agent` lifted to the permissive default (implement) in `dispatch-policy.ts`; brain and the two private repos unchanged. Takes effect on reload — warden's 'dispatch refused: tier' items retry then.
+- W4 Left behind: added tests for `opencodeRepoConfigPresent`, ref-mode strip wiring (review.ts) and warden-board `.catchall`. Kiosk status refactor not done.
+- Open, owner call: CLI `update-pr` prints raw JSON and exits 0 on `conflict` (a successful job) — callers must read `.status`; `dispatch.ts` is still ~1540 lines (`runDispatch` ~470, split push/in-place paths); opencode-runner ↔ session-runner import cycle + clones; `DispatchRefusal` typed errors; `buildRoutingTable` restructure; the outcome `.describe()` in the published verdict schema now names dispatch-verdict.ts.

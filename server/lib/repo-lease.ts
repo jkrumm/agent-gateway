@@ -13,8 +13,12 @@ import { realpathSync } from "node:fs";
 import { appLogger as logger } from "../logger.ts";
 
 const leases = new Map<string, string>();
+/** The exact key each held `cwd` was acquired under, so release deletes precisely that entry
+ *  even if the path no longer resolves (or now resolves elsewhere) by then. */
+const keyByCwd = new Map<string, string>();
 
-/** Take the repo's lease, or report the job that holds it. */
+/** Take the repo's lease, or report the job that holds it. Fails closed: throws when the
+ *  path cannot be resolved, since a raw-path key could let two aliases of one repo both in. */
 export function tryAcquireRepoLease(
   cwd: string,
   jobId: string,
@@ -23,14 +27,21 @@ export function tryAcquireRepoLease(
   const holder = leases.get(key);
   if (holder !== undefined) return { ok: false, holder };
   leases.set(key, jobId);
+  keyByCwd.set(cwd, key);
   return { ok: true };
 }
 
 /** Best effort by construction: called from a `finally`, where a throw would replace
- *  whatever the try/catch already decided to report. Falls back to the raw `cwd` string as
- *  the map key if the path can no longer be resolved (the repo was moved or deleted
- *  mid-episode) — better to leak one stale map entry than to throw out of a cleanup path. */
+ *  whatever the try/catch already decided to report. Deletes the key remembered at acquire;
+ *  only for a `cwd` it never saw does it re-resolve, falling back to the raw string if the
+ *  path can no longer be resolved. */
 export function releaseRepoLease(cwd: string): void {
+  const acquired = keyByCwd.get(cwd);
+  if (acquired !== undefined) {
+    keyByCwd.delete(cwd);
+    leases.delete(acquired);
+    return;
+  }
   let key: string;
   try {
     key = realpathSync(cwd);

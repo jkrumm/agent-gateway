@@ -3,7 +3,7 @@
 // rebased branch updatable. Real git against a local bare origin, like dispatch-worktree.test.ts.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
@@ -257,6 +257,26 @@ describe("runDispatch — revisionOf refusals", () => {
 });
 
 describe("repo lease", () => {
+  test("an unresolvable cwd fails closed on acquire", () => {
+    const gone = join(tmpdir(), `sideclaw-lease-missing-${randomUUID()}`);
+    expect(() => tryAcquireRepoLease(gone, "job-a")).toThrow();
+  });
+
+  test("release deletes the key acquired even if the path no longer resolves", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sideclaw-lease-"));
+    expect(tryAcquireRepoLease(dir, "job-a").ok).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+    releaseRepoLease(dir);
+    // Recreated at the same path: the stale entry must be gone, not leaked under the old key.
+    mkdirSync(dir);
+    try {
+      expect(tryAcquireRepoLease(dir, "job-b").ok).toBe(true);
+    } finally {
+      releaseRepoLease(dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a second holder is told who has it; release frees it", () => {
     expect(tryAcquireRepoLease(fx.repo, "job-a").ok).toBe(true);
     const second = tryAcquireRepoLease(fx.repo, "job-b");

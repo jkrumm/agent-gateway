@@ -2,15 +2,18 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
-import {
-  runSession,
-  SessionCancelledError,
-  zodValidator,
-  type SessionResult,
-} from "../../mcp/session-runner.ts";
+import { runSession, type SessionResult } from "../../mcp/session-runner.ts";
 import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
 import { parseParams } from "./util.ts";
+import {
+  DISPATCH_SCHEMA_VERSION,
+  WORKER_OUTPUT,
+  workerValidator,
+  type DispatchOutcome,
+  type DispatchOutput,
+  type WorkerOutput,
+} from "./dispatch-verdict.ts";
 import { routeFor, type Harness } from "../../lib/routing.ts";
 import {
   DEFAULT_DISPATCH_TIER,
@@ -23,7 +26,12 @@ import { dataBlock, endOfData, fencePreamble, newFenceNonce } from "../../lib/pr
 import { loadSkillFile } from "../../lib/worker-io.ts";
 import type { DispatchTier, DispatchWorkspace } from "../../lib/dispatch-policy.ts";
 import { releaseRepoLease, repoLeaseRefusal, tryAcquireRepoLease } from "../../lib/repo-lease.ts";
-import { runCheck, type CheckOutput } from "./check.ts";
+import {
+  checksBlockPush,
+  renderFailedChecks,
+  runRepoCheck,
+  type RepoCheckContext,
+} from "./repo-check.ts";
 import {
   commitCount,
   commitPendingWork,
@@ -170,362 +178,23 @@ export const DISPATCH_INPUT = z.object({
     ),
 });
 
-export type DispatchParams = z.infer<typeof DISPATCH_INPUT>;
 // Re-exported, not redeclared — server/lib/dispatch-policy.ts owns the list, and this file's
 // zod enum is built from it above. Existing importers of DispatchTier from here are unchanged.
 export type { DispatchTier } from "../../lib/dispatch-policy.ts";
 
-// ── Output schema — single source of truth ────────────────────────────────────
-//
-// Deliberately strict. A dispatch feeds an automated return path (a Slack post, a watchdog
-// projection) with no human between the worker and the reader, so a prose answer that
-// merely *looks* like a verdict must fail validation here rather than arrive downstream as
-// a `summary` nobody can render. `z.strictObject` rejects extra keys; the enums reject
-// invented confidence/routing values; the length caps reject an essay in `summary`.
-
-const SUMMARY_MAX = 200;
-const VERDICT_MAX = 600;
-const RECOMMENDATION_MAX = 400;
-const ROOT_CAUSE_MAX = 80;
-const DECISION_QUESTION_MAX = 200;
-const ROOT_CAUSE_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
-
-const ROOT_CAUSE_FIELD = z
-  .string()
-  .max(ROOT_CAUSE_MAX)
-  .regex(ROOT_CAUSE_RE)
-  .optional()
-  .describe(
-    `Stable kebab-case key (lowercase a-z, 0-9, single hyphens, at most ${ROOT_CAUSE_MAX} chars) ` +
-      "naming the underlying cause, e.g. stale-lockfile-after-rename. The same cause must " +
-      "always get the same key — name the mechanism, not the symptom, and never include " +
-      "ids, dates, paths or numbers.",
-  );
-
-const DECISION_QUESTION_FIELD = z
-  .string()
-  .min(1)
-  .max(DECISION_QUESTION_MAX)
-  .optional()
-  .describe(
-    `ONLY when nextAction is "human": one concrete question naming two options, at most ` +
-      `${DECISION_QUESTION_MAX} chars. Omit it for every other nextAction.`,
-  );
-
-const VERDICT_FIELDS = {
-  verdict: z
-    .string()
-    .min(1)
-    .max(4000)
-    .describe("What is actually going on and why the episode believes it. 2-5 sentences."),
-  confidence: z
-    .enum(["high", "medium", "low"])
-    .describe(
-      "high = read the code that causes it; medium = evidence points there; low = reasoned from outside.",
-    ),
-  evidence: z
-    .array(
-      z.strictObject({
-        file: z.string().min(1).max(500).describe("Repo-relative path, or the command run."),
-        detail: z.string().min(1).max(1000).describe("What it showed, one sentence."),
-      }),
-    )
-    .max(30)
-    .describe("What the episode actually inspected. Empty only if it inspected nothing."),
-  recommendation: z
-    .string()
-    .min(1)
-    .max(2000)
-    .describe("The single most useful next step, concrete and actionable."),
-  nextAction: z
-    .enum(["none", "issue", "implement", "human"])
-    .describe("Routing hint for the caller: nothing needed | track it | fix it | needs a human."),
-  summary: z
-    .string()
-    .min(1)
-    .max(SUMMARY_MAX)
-    .describe("One line for Slack. Hard-capped — this is a notification, not a report."),
-  // Additive and OPTIONAL at the schema level: results persisted before these fields existed,
-  // the handler's own salvage/withheld wrappers and any consumer pinned to an older schemaVersion
-  // must keep validating. Optional-ness is the compat decision; the prompt demands them.
-  rootCause: ROOT_CAUSE_FIELD,
-  decisionQuestion: DECISION_QUESTION_FIELD,
-};
-
-// What the WORKER is held to is tighter than what the handler may RETURN: the handler folds
-// `artifactNote` into `verdict`, and the salvage wrapper carries up to 3000 chars of raw
-// worker text, so the output-side `verdict`/`recommendation` caps (4000/2000) stay loose while
-// the worker's own are the terse ones below. Overlong `summary`/`verdict`/`recommendation`/`rootCause`/`decisionQuestion` is
-// normalized by `normalizeWorkerOutput` BEFORE validation (evidence and artifact fields stay strict).
-const WORKER_VERDICT_FIELDS = {
-  ...VERDICT_FIELDS,
-  verdict: z
-    .string()
-    .min(1)
-    .max(VERDICT_MAX)
-    .describe(
-      `What is going on and why the episode believes it. At most ${VERDICT_MAX} characters, 2-4 terse sentences.`,
-    ),
-  recommendation: z
-    .string()
-    .min(1)
-    .max(RECOMMENDATION_MAX)
-    .describe(
-      `The single most useful next step, concrete and actionable. At most ${RECOMMENDATION_MAX} characters.`,
-    ),
-};
-
-// Artifact text the WORKER authors but does NOT publish. Empty strings are legitimate and
-// mean "nothing worth filing / nothing was changed" — a tier that finds no work is a
-// successful run, so the minimum length is 0 and the coherence check lives in the handler
-// (a schema rejection here would trigger the salvage retry for what is a valid outcome).
-const ISSUE_FIELDS = {
-  issueTitle: z.string().max(120).describe('GitHub issue title, or "" to file nothing.'),
-  issueBody: z.string().max(60000).describe('GitHub issue body (markdown), or "" to file nothing.'),
-};
-
-const PR_FIELDS = {
-  prTitle: z
-    .string()
-    .max(200)
-    .describe('Conventional-commit PR subject, or "" if nothing was changed.'),
-  prBody: z.string().max(60000).describe('PR body (markdown), or "" if nothing was changed.'),
-};
-
-// A consumer (today: warden, in another repo) pins this number and treats a mismatch as a
-// loud refusal rather than a best-effort parse — the failure this exists to design out is a
-// consumer silently ignoring a verdict whose shape moved under it. Bump it in this file
-// whenever a field's meaning or presence on DISPATCH_OUTPUT changes.
-//
-// Bumped 1 → 2: added the "checks_failed" outcome (see DISPATCH_OUTCOMES below) — the
-// implement tier now runs the repo's own `check` before any push, and a consumer that only
-// knew the old ten outcomes would otherwise silently misclassify this one.
-// Bumped 2 → 3: added the "applied_in_place" outcome and the `changedFiles` field — the
-// implement tier gained a workspace mode that edits the live checkout and publishes
-// nothing. `changedFiles` is absent on every other outcome, so a consumer that ignores it
-// degrades gracefully, but the new outcome must not be silently misclassified.
-//
-// Also true as of this version, with no field-shape change to warrant its own bump: a
-// fallow-only check failure on the implement tier's push path no longer yields
-// "checks_failed" — fallow audits whole touched files and its findings are advisory, so they
-// ride along in the opened PR instead of withholding it (see `checksBlockPush`, below).
-// Bumped 3 → 4: added the "pr_updated" (a `revisionOf` episode updated its existing PR) and
-// "conflict" (rebase onto the latest base failed; nothing pushed) outcomes. Shipped together
-// with warden's pin, which handles both.
-export const DISPATCH_SCHEMA_VERSION = 4;
-
-/** Machine-readable classification of how this episode ended — the fifteen ways `runDispatch`
- *  can return, so a consumer never has to substring-match `artifactNote`'s prose to tell them
- *  apart. Two ordering rules a consumer should know: `withheld` overwrites whatever this would
- *  otherwise have been (the real verdict was scanned out, so no tier-specific outcome is
- *  trustworthy either), and `salvaged` never coexists with a tier outcome — a salvaged run
- *  never reached the tier-specific logic that would have set one.
- *
- *  - verdict_only   investigate: always — no artifact tier exists for it.
- *  - issue_declined author: the episode concluded nothing was worth tracking, no issue filed.
- *  - issue_failed   author: `openIssue` threw (secret-scan refusal, missing token scope).
- *  - issue_filed    author: filed OK, `artifactUrl` set.
- *  - no_changes     implement: the episode changed nothing (0 commits).
- *  - diff_refused   implement: branch discarded — too large, a workflow diff, or a secret match.
- *  - checks_failed  implement: pushed, but the repo's own `check` failed — no PR was opened.
- *  - branch_no_pr   implement: pushed, but the worker authored no PR text.
- *  - pr_failed      implement: pushed, but opening the pull request threw.
- *  - pr_opened      implement: full success — `artifactUrl` + `branch` both set.
- *  - pr_updated     implement + `revisionOf`: pushed to the prior branch (force-with-lease)
- *                   and the EXISTING open PR now carries it — `artifactUrl` is that PR.
- *  - conflict       implement: the rebase onto the latest default branch failed. Nothing was
- *                   pushed and the worktree is gone; the caller re-dispatches from the new
- *                   base (a worker never hand-resolves a conflict).
- *  - applied_in_place  implement, workspace in-place: edits are UNCOMMITTED in the live
- *                      checkout, `changedFiles` lists them; nothing was pushed. The owner
- *                      reviews and commits. A check failure still lands here (reported in
- *                      the verdict) because nothing was published that a red check could
- *                      gate — unlike `checks_failed`, `nextAction` is the worker's own.
- *  - salvaged       any tier: a serialization failure retried into a degraded verdict.
- *  - withheld       any tier: the secret scanner matched and replaced the verdict text.
- */
-export const DISPATCH_OUTCOMES = [
-  "verdict_only",
-  "issue_declined",
-  "issue_failed",
-  "issue_filed",
-  "no_changes",
-  "diff_refused",
-  "checks_failed",
-  "branch_no_pr",
-  "pr_failed",
-  "pr_opened",
-  "pr_updated",
-  "conflict",
-  "applied_in_place",
-  "salvaged",
-  "withheld",
-] as const;
-
-export type DispatchOutcome = (typeof DISPATCH_OUTCOMES)[number];
-
-export const DISPATCH_OUTPUT = z.strictObject({
-  ...VERDICT_FIELDS,
-  ...ISSUE_FIELDS,
-  ...PR_FIELDS,
-  // Set by the HANDLER, never by the worker — required on every return path, including
-  // salvage and withheld. See the DISPATCH_OUTCOMES doc comment above for the values and the
-  // two ordering rules.
-  outcome: z
-    .enum(DISPATCH_OUTCOMES)
-    .describe(
-      "Typed classification of how the episode ended — see the DISPATCH_OUTCOMES doc comment " +
-        "in dispatch.ts for what each value means. withheld and salvaged both override " +
-        "whatever a tier-specific outcome would otherwise have been.",
-    ),
-  schemaVersion: z
-    .literal(DISPATCH_SCHEMA_VERSION)
-    .describe(
-      "Version of this output shape. Pin this number; a mismatch means the shape moved under " +
-        "you and should be a loud refusal, not a best-effort parse.",
-    ),
-  issueTitle: ISSUE_FIELDS.issueTitle.optional(),
-  issueBody: ISSUE_FIELDS.issueBody.optional(),
-  prTitle: PR_FIELDS.prTitle.optional(),
-  prBody: PR_FIELDS.prBody.optional(),
-  // Set by the HANDLER, never by the worker (which is why they are optional — the schema is
-  // also what the worker is validated against).
-  //
-  // `degraded`: without it, a salvaged verdict and a real needs-human verdict are the
-  // identical {confidence:"low", nextAction:"human"} tuple, and an automated Slack post or
-  // watchdog projection could only tell them apart by substring-matching English prose.
-  // They need opposite handling: one is "sideclaw itself failed, retry or alert", the other
-  // is a genuine finding to track.
-  degraded: z
-    .boolean()
-    .optional()
-    .describe(
-      "True only when the tool failed to obtain a structured verdict and this object is a " +
-        "salvage wrapper around raw worker text. Absent/false on a real verdict.",
-    ),
-  artifactUrl: z
-    .string()
-    .optional()
-    .describe(
-      "URL of the artifact the episode deposited — a GitHub issue (author) or a draft pull " +
-        "request (implement). Absent when the tier produces none, or when the episode " +
-        "concluded that nothing should be filed or changed.",
-    ),
-  branch: z
-    .string()
-    .optional()
-    .describe(
-      "Branch the implement tier pushed. Present without `artifactUrl` only when the branch " +
-        "landed but no PR was opened — read the verdict for why.",
-    ),
-  // Set by the HANDLER, never by the worker. Present only on outcome `applied_in_place`:
-  // the files the episode changed in the live checkout, still uncommitted there.
-  changedFiles: z
-    .array(z.string())
-    .optional()
-    .describe(
-      "workspace 'in-place' only: repo-relative paths the episode changed in the live " +
-        "checkout, uncommitted. Absent on every other outcome.",
-    ),
-});
-
-export type DispatchOutput = z.infer<typeof DISPATCH_OUTPUT>;
-
-// What the WORKER is shown and graded against, per tier. The handler-only fields are
-// omitted from all three, so a worker cannot set them: they are the handler's markers, and
-// a field the worker can write is not a marker — it is a suggestion. Leaving `degraded` in
-// the --json-schema also advertised its meaning, which is an invitation to a thin answer to
-// flag itself as a tool failure (or an injected brief to disguise a real one).
-//
-// `decisionQuestion` is gated on `nextAction`: the contract says it exists ONLY for `human`,
-// so a worker schema rejects it on any other action (the normalizer below strips it first, so
-// a stray one never costs an episode). "Required when human" is deliberately NOT a validation
-// failure — a human verdict without a question (an injection finding, an unreadable repo) is
-// still a finished episode, and failing it would burn a retry and end in a degraded salvage;
-// the prompt demands the question and `runDispatch` logs its absence instead.
-const gateDecisionQuestion = <T extends { nextAction: string; decisionQuestion?: string }>(
-  v: T,
-  ctx: z.RefinementCtx,
-): void => {
-  if (v.decisionQuestion === undefined || v.nextAction === "human") return;
-  ctx.addIssue({
-    code: "custom",
-    path: ["decisionQuestion"],
-    message: 'decisionQuestion is only allowed when nextAction is "human"',
-  });
-};
-
-export const WORKER_OUTPUT = {
-  investigate: z.strictObject(WORKER_VERDICT_FIELDS).superRefine(gateDecisionQuestion),
-  author: z
-    .strictObject({ ...WORKER_VERDICT_FIELDS, ...ISSUE_FIELDS })
-    .superRefine(gateDecisionQuestion),
-  implement: z
-    .strictObject({ ...WORKER_VERDICT_FIELDS, ...PR_FIELDS })
-    .superRefine(gateDecisionQuestion),
-} as const satisfies Record<DispatchTier, z.ZodType>;
-
-/** What a worker session actually returns: the full dispatch output MINUS the two fields the
- *  handler adds afterwards (`outcome`, `schemaVersion`). The per-tier `WORKER_OUTPUT` schemas
- *  are assignable to this — each is a strict subset (investigate omits the issue/PR fields,
- *  author omits the PR fields) — so `runSession<WorkerOutput>` can validate the worker without
- *  claiming it already carries handler-only fields. */
-export type WorkerOutput = Omit<DispatchOutput, "outcome" | "schemaVersion">;
-
-/** Truncate to `max` characters total, ending in an ellipsis. */
-function clampText(text: string, max: number): string {
-  const t = text.trim();
-  return t.length <= max ? t : `${t.slice(0, max - 1).trimEnd()}…`;
-}
-
-/** Coerce an arbitrary string into the `rootCause` key shape; "" when nothing usable is left. */
-function normalizeRootCause(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, ROOT_CAUSE_MAX)
-    .replace(/-+$/g, "");
-}
-
-/**
- * Lenient pre-validation pass over the worker's raw object. The caps live in WORKER_OUTPUT
- * (that is what the worker is shown via --json-schema), but a finished episode must never be
- * thrown away for being wordy: overlong text is truncated with an ellipsis, a `rootCause`
- * that is not quite kebab-case is coerced (or dropped when nothing usable remains), and a
- * `decisionQuestion` that is empty or accompanies a non-human `nextAction` is dropped.
- * Anything that is not a plain object, and every field it does not own, passes through
- * untouched so the strict schema still judges the shape.
- */
-export function normalizeWorkerOutput(data: unknown): unknown {
-  if (typeof data !== "object" || data === null || Array.isArray(data)) return data;
-  const out: Record<string, unknown> = { ...data };
-  for (const [key, max] of [
-    ["summary", SUMMARY_MAX],
-    ["verdict", VERDICT_MAX],
-    ["recommendation", RECOMMENDATION_MAX],
-  ] as const) {
-    if (typeof out[key] === "string") out[key] = clampText(out[key], max);
-  }
-  if (typeof out.rootCause === "string") {
-    const key = normalizeRootCause(out.rootCause);
-    if (key) out.rootCause = key;
-    else delete out.rootCause;
-  }
-  if (typeof out.decisionQuestion === "string") {
-    const q = clampText(out.decisionQuestion, DECISION_QUESTION_MAX);
-    if (q && out.nextAction === "human") out.decisionQuestion = q;
-    else delete out.decisionQuestion;
-  }
-  return out;
-}
-
-/** `SessionOptions.validate` for a tier: normalize leniently, then hold the result to the
- *  strict worker schema. */
-export function workerValidator(tier: DispatchTier) {
-  const validate = zodValidator(WORKER_OUTPUT[tier]);
-  return (data: unknown) => validate(normalizeWorkerOutput(data));
-}
+// The verdict contract lives in dispatch-verdict.ts. Re-exported so existing importers of
+// these names from this module keep working unchanged.
+export {
+  DISPATCH_OUTCOMES,
+  DISPATCH_OUTPUT,
+  DISPATCH_SCHEMA_VERSION,
+  WORKER_OUTPUT,
+  normalizeWorkerOutput,
+  workerValidator,
+  type DispatchOutcome,
+  type DispatchOutput,
+  type WorkerOutput,
+} from "./dispatch-verdict.ts";
 
 // ── Per-tier session profile ──────────────────────────────────────────────────
 
@@ -588,7 +257,7 @@ exactly. If your reduced budget only supports a partial answer, say so in \`verd
  *  already has that. Deliberately tells the worker to re-read git state before acting, since it
  *  is a NEW process attaching to an old transcript and its own belief about what it already did
  *  may be stale relative to what actually landed on disk before the kill. */
-export const RESUME_CONTINUATION_PROMPT =
+const RESUME_CONTINUATION_PROMPT =
   "Continue the task; the daemon that hosted you restarted. Re-read `git status`/`git diff` " +
   "in this worktree before acting, then finish and emit the structured output.";
 
@@ -1467,52 +1136,6 @@ export async function runDispatch(
   }
 }
 
-/** Run the repo's own `check` tool, handling the two failure shapes `depositBranch` and
- *  `finishInPlace` both need identically: a cancellation must propagate as exactly that
- *  (never as a failed check, which would push or report as if the episode ran to
- *  completion), and any OTHER throw becomes a synthetic failed check step rather than an
- *  unhandled rejection — a broken check tool may only make an episode MORE cautious, never
- *  silently wave a red run through. Re-checked for cancellation after the check returns too:
- *  the race a cancel arriving while the check itself was still running, which the try/catch
- *  above can't observe. */
-export async function runRepoCheck(
-  cwd: string,
-  note: (s: string) => void,
-  checkCtx: {
-    jobId?: string;
-    isCancelled?: (jobId: string) => boolean;
-    runCheckFn?: typeof runCheck;
-  },
-): Promise<CheckOutput> {
-  const { jobId, isCancelled, runCheckFn = runCheck } = checkCtx;
-  let checkOutput: CheckOutput;
-  try {
-    checkOutput = await runCheckFn(
-      { cwd },
-      (p) => note(`check: ${p.lastAction}`),
-      jobId,
-      isCancelled,
-    );
-  } catch (err) {
-    if (err instanceof SessionCancelledError) throw err;
-    checkOutput = {
-      passed: false,
-      steps: [
-        {
-          name: "check",
-          passed: false,
-          errors: [err instanceof Error ? err.message : String(err)],
-        },
-      ],
-      summary: "check tool failed to run",
-    };
-  }
-  if (jobId && isCancelled?.(jobId)) {
-    throw new SessionCancelledError(jobId);
-  }
-  return checkOutput;
-}
-
 /** The in-place half of the implement tier: attribute the episode's edits against the
  *  pre-episode snapshot, run the repo's own check (reported, never gating a push — there is
  *  no push), scan the change set, and report. Never reverts, stashes or discards anything.
@@ -1529,11 +1152,7 @@ export async function finishInPlace(
   cwd: string,
   snapshot: InPlaceSnapshot,
   note: (s: string) => void,
-  checkCtx: {
-    jobId?: string;
-    isCancelled?: (jobId: string) => boolean;
-    runCheckFn?: typeof runCheck;
-  } = {},
+  checkCtx: RepoCheckContext = {},
 ): Promise<{
   outcome: DispatchOutcome;
   changedFiles: string[];
@@ -1630,29 +1249,6 @@ export async function finishInPlace(
   };
 }
 
-/** Failing check steps rendered into `artifactNote`-sized text: step name + its first few
- *  error lines, bounded to ~1500 chars so a chatty test runner's dump stays a note rather than
- *  a second log. */
-export function renderFailedChecks(steps: CheckOutput["steps"]): string {
-  const rendered = steps
-    .filter((s) => !s.passed)
-    .map((s) => `${s.name}: ${(s.errors ?? []).slice(0, 3).join(" | ") || "(no error detail)"}`)
-    .join("; ");
-  return rendered.length > 1500 ? `${rendered.slice(0, 1500)}…` : rendered;
-}
-
-/** Whether a failed check should block the push. fallow findings are advisory (see the
- *  comment at its call site) — a `passed: false` result whose only failing steps are fallow
- *  does not block. Every other shape does, INCLUDING a `passed: false` with no failing step
- *  recorded at all: that shape means the check tool itself is confused, not that it found
- *  nothing wrong, and treating it as passing would be the one silent failure mode this
- *  function exists to rule out — fail-safe, not fail-open. */
-export function checksBlockPush(check: CheckOutput): boolean {
-  const failedSteps = check.steps.filter((s) => !s.passed);
-  const advisorySteps = failedSteps.filter((s) => s.name === "fallow");
-  return !check.passed && (failedSteps.length === 0 || advisorySteps.length < failedSteps.length);
-}
-
 /** Commit, bound-check, push and open the draft PR. Returns what actually landed — a tier
  *  that legitimately changed nothing, and one whose diff was refused, are both successful
  *  runs with no artifact, and each says why in the verdict.
@@ -1664,11 +1260,7 @@ export async function depositBranch(
   identity: RepoIdentity,
   data: WorkerOutput,
   note: (s: string) => void,
-  checkCtx: {
-    jobId?: string;
-    isCancelled?: (jobId: string) => boolean;
-    runCheckFn?: typeof runCheck;
-  } = {},
+  checkCtx: RepoCheckContext = {},
 ): Promise<{ artifactUrl?: string; branch?: string; outcome: DispatchOutcome; note: string }> {
   const text = artifactText(data.prTitle, data.prBody);
   const subject = text?.title ?? `chore: dispatched change on ${worktree.branch}`;

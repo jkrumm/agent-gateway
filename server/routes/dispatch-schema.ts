@@ -5,9 +5,9 @@ import {
   DISPATCH_OUTPUT,
   DISPATCH_SCHEMA_VERSION,
   WORKER_OUTPUT,
-} from "../jobs/handlers/dispatch.ts";
+} from "../jobs/handlers/dispatch-verdict.ts";
 
-// The dispatch verdict schema (server/jobs/handlers/dispatch.ts), published for a consumer in
+// The dispatch verdict schema (server/jobs/handlers/dispatch-verdict.ts), published for a consumer in
 // another repo (today: warden) to fetch and pin rather than copy by hand — a copy drifts, and
 // drift here presents as "verdict silently ignored". `version` is DISPATCH_SCHEMA_VERSION: a
 // consumer pins that number and treats a mismatch as a loud refusal, not a best-effort parse.

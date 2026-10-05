@@ -36,7 +36,10 @@ only with a clean working tree, `git switch --detach HEAD~1` + `make reload` +
 verify, and prints loudly that the checkout is detached (return with `git switch
 master`); with a dirty tree it refuses and says how to recover. `FORCE=1` /
 `RESTART_MCP=1` pass through to `reload`, whose refusals (running jobs, plist
-drift) stay intact — `scripts/deploy.sh`. Detail below.
+drift) stay intact — `scripts/deploy.sh`. Those refusals come from
+`scripts/reload-preflight.sh` (exit 3, which `make` would collapse to 2, so deploy.sh
+runs it directly): a refusal exits 1 with no rollback since the old server was never
+touched; any later reload failure rolls back like a failed verify. Detail below.
 
 **sideclaw runs exclusively via LaunchAgent. Never start it standalone.**
 
@@ -416,11 +419,13 @@ re-queues it once, like `check`. `review`'s angle router runs on the same helper
 
 ### Dispatch — bounded episodes inside another repo
 
-The `dispatch` job hands ONE episode to a Claude Code session running inside
-a named repo, so it works with that repo's own `AGENTS.md`/`CLAUDE.md`/rules/skills in
-context — for an observer (Hermes) that has the state but not agent-shaped
-context. One episode, one verdict, no steering (mid-run redirection is
-`rd bg` + `rd say`, not this).
+The `dispatch` job hands ONE episode to a worker session running inside a named
+repo — an OpenCode worker by default (harness per route, see `GET /api/routing`;
+`claude -p` only on a Claude-id route or the Max fallback) — so it works with that
+repo's own `AGENTS.md`/`CLAUDE.md`/rules/skills in context. Callers are warden and
+interactive sessions; an observer like Hermes files work through `warden run`, not
+directly. One episode, one verdict, no steering (mid-run redirection is an
+`rd wave` tab + `rd say`, not this).
 
 **Tiers.** `investigate` (read-only → verdict), `author` (read-only → verdict
 + issue), `implement` (write → verdict + branch + **draft** PR). The artifact
@@ -487,7 +492,7 @@ boundary for a sensitive episode, not the permission profile.
   gates every submission before it costs anything: `cwd` must resolve to a
   repo directly under a configured root, at or under that repo's tier
   ceiling. Only `dotfiles-private`/`homelab-private` (sensitive) and
-  `brain`/`hermes-agent` default below `implement`; every other repo,
+  `brain` default below `implement`; every other repo (`hermes-agent` included),
   including `sideclaw`, `warden` and `dotfiles` themselves, is
   `implement`-reachable by default. `SIDECLAW_DISPATCH_CEILINGS`/`_SENSITIVE`
   can only narrow, never widen, any repo's rule (marking a repo sensitive
