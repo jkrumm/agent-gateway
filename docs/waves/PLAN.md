@@ -58,8 +58,9 @@ angles off Max where measured equal, and no model id outside `GET /api/routing`.
 
 ## Wave 4 — review angles off Max, measured            <!-- status: active -->
 Needs Max auth working on the mini (synthesis + the Sonnet baseline).
-- [ ] Close the OpenCode-angle gaps from W3's Left behind: Max fallback on an overridden angle, strip `opencode.json`/`.opencode/` in review's cwd, a true read-only OpenCode profile (deny edit + bash-writes), `settingSources` parity.
+- [x] Close the OpenCode-angle gaps from W3's Left behind: Max fallback on an overridden angle, strip `opencode.json`/`.opencode/` in review's cwd, a true read-only OpenCode profile (deny edit + bash-writes), `settingSources` parity.
 - [ ] A/B `review_angle_{senior_dev,typescript,frontend,qa}` on OpenCode vs Sonnet over ≥5 recent real diffs (warden/sideclaw/weatherorb PRs); record the table in `docs/routing-and-quota.md`; adopt per angle only where equal or better.
 - [ ] Fix the `tsc` errors so `make check` can include typecheck.
 - [ ] Add route `dispatch_implement_escalation` (warden reads `routes.dispatch_implement_escalation.model` from `GET /api/routing` for attempt 3+): probe DeepSeek-V4-Pro and gpt-6.1-sol as OpenCode implement workers on one real brief each, mark the winner verified, route it.
 **Left behind:**
+READY-FOR-RELOAD — step 1 committed (gaps 1-4; `make check` green, 1074 tests). Steps 2-4 pending; the A/B needs the reload (Max auth fix 9205e38) first. Known residual: in scope mode a read-only OpenCode angle's compound diff command (printf/xargs) is blocked by the bash allowlist — check before adopting any angle.
