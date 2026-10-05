@@ -12,6 +12,7 @@ import {
   Spinner,
   Tooltip,
 } from "@blueprintjs/core";
+import type { Toaster } from "@blueprintjs/core";
 import { api } from "../lib/api";
 import { useTheme } from "../main";
 import { DiagramEditor } from "./DiagramEditor";
@@ -45,11 +46,12 @@ const EMPTY_EXCALIDRAW = JSON.stringify({
   files: {},
 });
 
-// Module-level toaster singleton — created once on first use
-let _toaster: OverlayToaster | null = null;
+// Module-level toaster singleton — created once on first use. `OverlayToaster.createAsync`
+// resolves to the `Toaster` interface, not the `OverlayToaster` class it is implemented by.
+let _toaster: Toaster | null = null;
 function showToast(message: string, intent: "success" | "warning" = "success") {
   const icon = intent === "warning" ? "warning-sign" : "tick-circle";
-  const show = (t: OverlayToaster) =>
+  const show = (t: Toaster) =>
     t.show({ message, intent, icon, timeout: intent === "warning" ? 4000 : 2500 });
 
   if (_toaster) {
@@ -64,6 +66,7 @@ function showToast(message: string, intent: "success" | "warning" = "success") {
 
 type DocWithWebkit = Document & {
   webkitFullscreenElement?: Element;
+  webkitFullscreenEnabled?: boolean;
   webkitExitFullscreen?: () => Promise<void>;
 };
 type ElWithWebkit = HTMLElement & {

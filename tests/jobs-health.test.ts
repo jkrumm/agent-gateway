@@ -19,6 +19,20 @@ import {
   ROUTE_STREAK_LIMIT,
 } from "../server/mcp/session-runner.ts";
 
+// Wire shape of GET /api/jobs/health as this file asserts it — only the fields the tests
+// touch. `res.json()` is typed `unknown` under Bun's globals, so the body is cast at each
+// call rather than accessed on `unknown`.
+type JobsHealthBody = {
+  ok: boolean;
+  draining: boolean;
+  recoveredFromDrain: boolean;
+  sinceBootMs: number;
+  backendFallbacks: { count: number; reasons: Record<string, number> };
+  routeStreaks: Record<string, number>;
+  degradedRoutes: string[];
+  warnings: string[];
+};
+
 describe("recoveryStatusFor", () => {
   test("idempotent read-only tools are re-queued once", () => {
     for (const tool of ["check", "overview", "narrative", "review"] as const) {
@@ -214,7 +228,7 @@ describe("GET /api/jobs/health", () => {
   test("carries backendFallbacks alongside the job-store health fields, not just jobHealth()'s own shape", async () => {
     const res = await jobsRoutes.handle(new Request("http://localhost/api/jobs/health"));
     expect(res.status).toBe(200);
-    const body = await res.json();
+    const body = (await res.json()) as JobsHealthBody;
     expect(body.ok).toBe(true);
     expect(body.backendFallbacks).toEqual({
       count: expect.any(Number),
@@ -227,7 +241,7 @@ describe("GET /api/jobs/health", () => {
   // literal quietly stopped emitting one. Assert the wire shape, not just the pure evaluator.
   test("reports the drain-state fields a consumer branches on", async () => {
     const res = await jobsRoutes.handle(new Request("http://localhost/api/jobs/health"));
-    const body = await res.json();
+    const body = (await res.json()) as JobsHealthBody;
     expect(body.draining).toBe(false);
     expect(body.recoveredFromDrain).toBe(false);
     expect(typeof body.sinceBootMs).toBe("number");
@@ -239,7 +253,7 @@ describe("GET /api/jobs/health", () => {
     try {
       setDraining();
       const res = await jobsRoutes.handle(new Request("http://localhost/api/jobs/health"));
-      const body = await res.json();
+      const body = (await res.json()) as JobsHealthBody;
       expect(body.draining).toBe(true);
     } finally {
       __resetForTests();
@@ -256,7 +270,7 @@ describe("GET /api/jobs/health", () => {
     expect(ROUTE_STREAK_LIMIT).toBe(3);
 
     const res = await jobsRoutes.handle(new Request("http://localhost/api/jobs/health"));
-    const body = await res.json();
+    const body = (await res.json()) as JobsHealthBody;
     const key = `${tool}@iu/glm-5.3-flash`;
 
     expect(body.ok).toBe(true);
@@ -271,7 +285,7 @@ describe("GET /api/jobs/health", () => {
   test("warnings lists a backend-fallback count alongside any degraded route", async () => {
     recordFallback("iu-unavailable", "jobs-health-fallback-tool");
     const res = await jobsRoutes.handle(new Request("http://localhost/api/jobs/health"));
-    const body = await res.json();
+    const body = (await res.json()) as JobsHealthBody;
     expect(body.backendFallbacks.count).toBeGreaterThanOrEqual(1);
     expect(
       body.warnings.some((w: string) => w.includes("backend fallback(s) in the last hour")),
@@ -287,7 +301,7 @@ describe("GET /api/jobs/health", () => {
     const key = `${tool}@iu/glm-5.3-flash`;
     recordRouteOutcome(tool, "iu", "glm-5.3-flash", true); // resets/never-fails, stays out of the report
     const res = await jobsRoutes.handle(new Request("http://localhost/api/jobs/health"));
-    const body = await res.json();
+    const body = (await res.json()) as JobsHealthBody;
     expect(body.routeStreaks[key]).toBeUndefined();
     expect(body.degradedRoutes).not.toContain(key);
     expect(body.warnings.some((w: string) => w.includes(key))).toBe(false);
@@ -300,7 +314,7 @@ describe("GET /api/jobs/health", () => {
     recordRouteOutcome(tool, "iu", "glm-5.3-flash", false); // 2 < ROUTE_STREAK_LIMIT (3)
 
     const res = await jobsRoutes.handle(new Request("http://localhost/api/jobs/health"));
-    const body = await res.json();
+    const body = (await res.json()) as JobsHealthBody;
 
     expect(body.routeStreaks[key]).toBe(2);
     expect(body.degradedRoutes).not.toContain(key);

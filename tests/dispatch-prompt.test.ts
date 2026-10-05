@@ -17,6 +17,7 @@ import {
   assertSensitiveTierAllowed,
   buildPrompt,
   DISPATCH_INPUT,
+  DISPATCH_SCHEMA_VERSION,
   IN_PLACE_ADDENDUM,
   isSalvageable,
   loadSkillPrompt,
@@ -448,6 +449,8 @@ describe("applySensitiveScan", () => {
     recommendation: "Add the missing grant and run tailscale-acl-push.",
     nextAction: "implement",
     summary: "ACL grant is missing the Collie port",
+    outcome: "verdict_only",
+    schemaVersion: DISPATCH_SCHEMA_VERSION,
   };
 
   const SECRET_SHAPES: ReadonlyArray<{ name: string; text: string }> = [

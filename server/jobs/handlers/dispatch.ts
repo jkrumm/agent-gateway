@@ -465,6 +465,13 @@ export const WORKER_OUTPUT = {
     .superRefine(gateDecisionQuestion),
 } as const satisfies Record<DispatchTier, z.ZodType>;
 
+/** What a worker session actually returns: the full dispatch output MINUS the two fields the
+ *  handler adds afterwards (`outcome`, `schemaVersion`). The per-tier `WORKER_OUTPUT` schemas
+ *  are assignable to this — each is a strict subset (investigate omits the issue/PR fields,
+ *  author omits the PR fields) — so `runSession<WorkerOutput>` can validate the worker without
+ *  claiming it already carries handler-only fields. */
+export type WorkerOutput = Omit<DispatchOutput, "outcome" | "schemaVersion">;
+
 /** Truncate to `max` characters total, ending in an ellipsis. */
 function clampText(text: string, max: number): string {
   const t = text.trim();
@@ -704,7 +711,7 @@ function readBaseNote(wt: DispatchWorktree): string {
  *  clock before returning a "verdict" that describes an outage as if it were a finding about
  *  the repo. `runSession` marks the salvageable class with `noOutput`, which now covers the
  *  schema-validation path too (see finalize() in session-runner.ts). */
-export function isSalvageable(r: SessionResult<DispatchOutput>): boolean {
+export function isSalvageable(r: SessionResult<WorkerOutput>): boolean {
   // `noOutput` covers the parse and schema-validation paths. It does NOT cover the CLI
   // giving up on its own structured-output retries (`error_max_structured_output_retries`)
   // or hitting `error_max_turns` — those surface as `is_error`, which runSession returns
@@ -1197,7 +1204,7 @@ export async function runDispatch(
     resumeCtx?.onWorktreeReady?.(worktreeMeta);
     if (strippedSettings.length > 0) note(`stripped ${strippedSettings.join(", ")}`);
     const runEpisode = (p: string, opts: { resumeSessionId?: string } = {}) =>
-      runSession<DispatchOutput>({
+      runSession<WorkerOutput>({
         cwd: sessionCwd,
         prompt: p,
         resumeSessionId: opts.resumeSessionId,
@@ -1655,7 +1662,7 @@ export function checksBlockPush(check: CheckOutput): boolean {
 export async function depositBranch(
   worktree: DispatchWorktree,
   identity: RepoIdentity,
-  data: DispatchOutput,
+  data: WorkerOutput,
   note: (s: string) => void,
   checkCtx: {
     jobId?: string;
@@ -1856,7 +1863,7 @@ export async function depositBranch(
  *  claim a rationale nobody produced. A pushed `dispatch/…` branch costs nothing and is one
  *  command to delete, whereas discarding it throws away the entire run. */
 export async function salvage(
-  result: SessionResult<DispatchOutput>,
+  result: SessionResult<WorkerOutput>,
   firstRawText: string | undefined,
   meta: { cwd: string; tier: DispatchTier; brief: string; startMs: number },
   worktree: DispatchWorktree | undefined,

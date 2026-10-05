@@ -14,10 +14,10 @@ afterEach(() => {
   __resetActiveProcsForTests();
 });
 
-function fakeProc() {
+function fakeProc(exitCode: number | null = null) {
   const kills: string[] = [];
   const proc = {
-    exitCode: null as number | null,
+    exitCode,
     kill(signal: string) {
       kills.push(signal);
     },
@@ -45,8 +45,7 @@ describe("terminateSessionsForJob", () => {
   });
 
   test("skips a proc that already exited", () => {
-    const exited = fakeProc();
-    exited.proc.exitCode = 0;
+    const exited = fakeProc(0);
     __registerProcForTests(exited.proc, "job-c");
 
     const signalled = terminateSessionsForJob("job-c");

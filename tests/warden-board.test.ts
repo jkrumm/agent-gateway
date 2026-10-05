@@ -66,7 +66,7 @@ function rawBoard(overrides: Record<string, unknown> = {}): Record<string, unkno
 describe("fetchWardenBoard — ok", () => {
   test("normalizes a healthy /board response", async () => {
     const board = await fetchWardenBoard({
-      fetchImpl: (async () => jsonResponse(rawBoard())) as typeof fetch,
+      fetchImpl: async () => jsonResponse(rawBoard()),
     });
     expect(board.ok).toBe(true);
     if (!board.ok) throw new Error("unreachable");
@@ -91,8 +91,7 @@ describe("fetchWardenBoard — ok", () => {
 
   test("an item with repo: null parses ok:true, carries null through and renders a placeholder", async () => {
     const board = await fetchWardenBoard({
-      fetchImpl: (async () =>
-        jsonResponse(rawBoard({ items: [rawItem({ repo: null })] }))) as typeof fetch,
+      fetchImpl: async () => jsonResponse(rawBoard({ items: [rawItem({ repo: null })] })),
     });
     expect(board.ok).toBe(true);
     if (!board.ok) throw new Error("unreachable");
@@ -109,7 +108,7 @@ describe("fetchWardenBoard — ok", () => {
 
   test("inFlightJob prefers validation_job, then implement_job, then dispatch_job", async () => {
     const board = await fetchWardenBoard({
-      fetchImpl: (async () =>
+      fetchImpl: async () =>
         jsonResponse(
           rawBoard({
             items: [
@@ -123,7 +122,7 @@ describe("fetchWardenBoard — ok", () => {
               rawItem({ event_id: 3, dispatch_job: "d-3" }),
             ],
           }),
-        )) as typeof fetch,
+        ),
     });
     if (!board.ok) throw new Error("unreachable");
     expect(board.items.map((i) => i.inFlightJob)).toEqual(["v-1", "i-2", "d-3"]);
@@ -132,7 +131,7 @@ describe("fetchWardenBoard — ok", () => {
   test("caps items at 20 and sets itemsTruncated", async () => {
     const items = Array.from({ length: 25 }, (_, i) => rawItem({ event_id: i }));
     const board = await fetchWardenBoard({
-      fetchImpl: (async () => jsonResponse(rawBoard({ items }))) as typeof fetch,
+      fetchImpl: async () => jsonResponse(rawBoard({ items })),
     });
     if (!board.ok) throw new Error("unreachable");
     expect(board.items).toHaveLength(20);
@@ -144,7 +143,7 @@ describe("fetchWardenBoard — ok", () => {
   test("exactly 20 items — itemsTruncated stays false unless warden itself said truncated", async () => {
     const items = Array.from({ length: 20 }, (_, i) => rawItem({ event_id: i }));
     const board = await fetchWardenBoard({
-      fetchImpl: (async () => jsonResponse(rawBoard({ items }))) as typeof fetch,
+      fetchImpl: async () => jsonResponse(rawBoard({ items })),
     });
     if (!board.ok) throw new Error("unreachable");
     expect(board.items).toHaveLength(20);
@@ -154,7 +153,7 @@ describe("fetchWardenBoard — ok", () => {
   test("exactly 20 items with warden's own `truncated: true` — itemsTruncated is true", async () => {
     const items = Array.from({ length: 20 }, (_, i) => rawItem({ event_id: i }));
     const board = await fetchWardenBoard({
-      fetchImpl: (async () => jsonResponse(rawBoard({ items, truncated: true }))) as typeof fetch,
+      fetchImpl: async () => jsonResponse(rawBoard({ items, truncated: true })),
     });
     if (!board.ok) throw new Error("unreachable");
     expect(board.items).toHaveLength(20);
@@ -163,7 +162,7 @@ describe("fetchWardenBoard — ok", () => {
 
   test("0 items — empty board, itemsTruncated false", async () => {
     const board = await fetchWardenBoard({
-      fetchImpl: (async () => jsonResponse(rawBoard({ items: [] }))) as typeof fetch,
+      fetchImpl: async () => jsonResponse(rawBoard({ items: [] })),
     });
     if (!board.ok) throw new Error("unreachable");
     expect(board.items).toHaveLength(0);
@@ -174,7 +173,7 @@ describe("fetchWardenBoard — ok", () => {
 describe("fetchWardenBoard — failure modes", () => {
   test("a non-2xx status resolves to ok:false with the status in the error", async () => {
     const board = await fetchWardenBoard({
-      fetchImpl: (async () => jsonResponse({ error: "schema mismatch" }, 503)) as typeof fetch,
+      fetchImpl: async () => jsonResponse({ error: "schema mismatch" }, 503),
     });
     expect(board.ok).toBe(false);
     if (board.ok) throw new Error("unreachable");
@@ -183,9 +182,9 @@ describe("fetchWardenBoard — failure modes", () => {
 
   test("a network/timeout error (rejected fetch) resolves to ok:false, never throws", async () => {
     const board = await fetchWardenBoard({
-      fetchImpl: (async () => {
+      fetchImpl: async () => {
         throw new Error("The operation was aborted");
-      }) as typeof fetch,
+      },
     });
     expect(board.ok).toBe(false);
     if (board.ok) throw new Error("unreachable");
@@ -194,7 +193,7 @@ describe("fetchWardenBoard — failure modes", () => {
 
   test("malformed JSON resolves to ok:false, never throws", async () => {
     const board = await fetchWardenBoard({
-      fetchImpl: (async () => new Response("not json", { status: 200 })) as typeof fetch,
+      fetchImpl: async () => new Response("not json", { status: 200 }),
     });
     expect(board.ok).toBe(false);
     if (board.ok) throw new Error("unreachable");
@@ -203,7 +202,7 @@ describe("fetchWardenBoard — failure modes", () => {
 
   test("a response that parses but fails schema validation resolves to ok:false", async () => {
     const board = await fetchWardenBoard({
-      fetchImpl: (async () => jsonResponse({ nonsense: true })) as typeof fetch,
+      fetchImpl: async () => jsonResponse({ nonsense: true }),
     });
     expect(board.ok).toBe(false);
     if (board.ok) throw new Error("unreachable");
@@ -225,10 +224,10 @@ describe("fetchWardenBoard — default baseUrl", () => {
     delete process.env.WARDEN_API_URL;
     const urls: string[] = [];
     const board = await fetchWardenBoard({
-      fetchImpl: (async (input: RequestInfo | URL) => {
+      fetchImpl: async (input: string | URL) => {
         urls.push(String(input));
         return jsonResponse(rawBoard());
-      }) as typeof fetch,
+      },
     });
     expect(board.ok).toBe(true);
     expect(urls[0]?.startsWith("http://127.0.0.1:7735")).toBe(true);
@@ -244,10 +243,10 @@ describe("cachedFetchWardenBoard", () => {
     __resetWardenBoardCacheForTests();
     setSystemTime(new Date("2026-01-01T00:00:00Z"));
     let calls = 0;
-    const fetchImpl = (async () => {
+    const fetchImpl = async () => {
       calls += 1;
       return jsonResponse(rawBoard());
-    }) as typeof fetch;
+    };
 
     const first = await cachedFetchWardenBoard({ fetchImpl });
     setSystemTime(new Date("2026-01-01T00:00:44Z")); // 44s later — still within 45s TTL
@@ -261,10 +260,10 @@ describe("cachedFetchWardenBoard", () => {
     __resetWardenBoardCacheForTests();
     setSystemTime(new Date("2026-01-02T00:00:00Z"));
     let calls = 0;
-    const fetchImpl = (async () => {
+    const fetchImpl = async () => {
       calls += 1;
       return jsonResponse(rawBoard());
-    }) as typeof fetch;
+    };
 
     await cachedFetchWardenBoard({ fetchImpl });
     setSystemTime(new Date("2026-01-02T00:00:46Z")); // 46s later — past the 45s TTL

@@ -69,7 +69,7 @@ describe("recover() — dispatch resume", () => {
 
       const after = getJob(created.id);
       // pending (or already promoted to running against the never-resolving fake executor).
-      expect(["pending", "running"]).toContain(after?.status);
+      expect(["pending", "running"]).toContain(after?.status ?? "");
       expect(after?.error).toBeNull();
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -83,7 +83,7 @@ describe("recover() — dispatch resume", () => {
     initJobStore({ executor: NEVER_EXECUTE });
 
     const after = getJob(created.id);
-    expect(["pending", "running"]).toContain(after?.status);
+    expect(["pending", "running"]).toContain(after?.status ?? "");
   });
 
   test("a session id but its worktree is gone → pending, fresh — resume markers cleared", () => {
@@ -103,7 +103,7 @@ describe("recover() — dispatch resume", () => {
     initJobStore({ executor: NEVER_EXECUTE });
 
     const after = getJob(created.id);
-    expect(["pending", "running"]).toContain(after?.status);
+    expect(["pending", "running"]).toContain(after?.status ?? "");
   });
 
   test("over the attempt cap → interrupted, resumable or not", () => {
@@ -140,7 +140,7 @@ describe("recover() — dispatch resume", () => {
       initJobStore({ executor: NEVER_EXECUTE });
 
       const after = getJob(created.id);
-      expect(["pending", "running"]).toContain(after?.status);
+      expect(["pending", "running"]).toContain(after?.status ?? "");
     }
   });
 });

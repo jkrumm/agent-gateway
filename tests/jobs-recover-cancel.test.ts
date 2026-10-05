@@ -65,6 +65,6 @@ describe("recover() and a persisted cancel request", () => {
     const after = getJob(created.id);
     expect(after?.status).not.toBe("cancelled");
     // "check" (REQUEUE_ON_RECOVER, attempts 0 < MAX_RECOVER_ATTEMPTS) goes pending → running.
-    expect(["pending", "running"]).toContain(after?.status);
+    expect(["pending", "running"]).toContain(after?.status ?? "");
   });
 });

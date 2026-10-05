@@ -7,9 +7,9 @@
     "jsx": "react-jsx",
     "strict": true,
     "skipLibCheck": true,
-    "outDir": ".out/src",
-    "composite": true,
-    "noEmit": false
+    "noEmit": true,
+    "composite": false,
+    "allowImportingTsExtensions": true
   },
-  "include": ["src/**/*", "vite.config.ts"]
+  "include": ["src/**/*", "vite.config.ts", "server/**/*"]
 }

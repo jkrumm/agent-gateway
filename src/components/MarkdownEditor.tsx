@@ -86,9 +86,11 @@ const lightTheme = createTheme({
 // ── Horizontal rule decoration ──────────────────────────────────────
 
 function buildHrDecorations(view: EditorView): DecorationSet {
-  const decorations: Array<
-    ReturnType<typeof Decoration.line> | ReturnType<typeof Decoration.mark>
-  > = [];
+  // `Decoration.line/mark(...).range(...)` yields a `Range<Decoration>` (a decorated span),
+  // not the bare `Decoration` the builders return — derive the indexed type from the builder
+  // so it does not drift from @codemirror.
+  type RangeDecoration = ReturnType<ReturnType<typeof Decoration.line>["range"]>;
+  const decorations: RangeDecoration[] = [];
   syntaxTree(view.state).iterate({
     enter(node) {
       if (node.name === "HorizontalRule") {

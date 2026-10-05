@@ -5,15 +5,17 @@ const ALLOWED_ORIGINS = ["http://sideclaw.local", "http://localhost"];
 
 export const kioskRoute = new Elysia().get(
   "/api/open-kiosk",
-  async ({ query, error }) => {
+  async ({ query, set }) => {
     const { url } = query;
     if (!ALLOWED_ORIGINS.some((o) => url.startsWith(o))) {
-      return error(400, { ok: false, error: "URL must be a local sideclaw URL" });
+      set.status = 400;
+      return { ok: false, error: "URL must be a local sideclaw URL" };
     }
 
     const chrome = await findChrome();
     if (!chrome) {
-      return error(503, { ok: false, error: "No Chrome binary found" });
+      set.status = 503;
+      return { ok: false, error: "No Chrome binary found" };
     }
 
     // Isolated profile so kiosk doesn't interfere with existing Chrome sessions

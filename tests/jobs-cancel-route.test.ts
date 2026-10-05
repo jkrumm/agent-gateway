@@ -17,11 +17,19 @@ async function flush(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 
-async function postCancel(id: string) {
+// `res.json()` is typed `unknown` under Bun's globals; the fields below are the ones this
+// file reads. `job`/`error` are optional because the 404/409 bodies carry only one of them.
+type CancelBody = {
+  ok: boolean;
+  error?: string;
+  job?: { status: string; error: string | null };
+};
+
+async function postCancel(id: string): Promise<{ status: number; body: CancelBody }> {
   const res = await jobsRoutes.handle(
     new Request(`http://localhost/api/jobs/${id}/cancel`, { method: "POST" }),
   );
-  return { status: res.status, body: await res.json() };
+  return { status: res.status, body: (await res.json()) as CancelBody };
 }
 
 describe("POST /api/jobs/:id/cancel", () => {
@@ -49,11 +57,11 @@ describe("POST /api/jobs/:id/cancel", () => {
     const { status, body } = await postCancel(created.id);
     expect(status).toBe(200);
     expect(body.ok).toBe(true);
-    expect(body.job.status).toBe("cancelled");
-    expect(body.job.error).toBe("cancelled by request");
+    expect(body.job?.status).toBe("cancelled");
+    expect(body.job?.error).toBe("cancelled by request");
 
     const res = await jobsRoutes.handle(new Request(`http://localhost/api/jobs/${created.id}`));
-    const polled = await res.json();
+    const polled = (await res.json()) as { job: { status: string } };
     expect(polled.job.status).toBe("cancelled");
   });
 
@@ -63,7 +71,7 @@ describe("POST /api/jobs/:id/cancel", () => {
     expect(status).toBe(200);
 
     const res = await jobsRoutes.handle(new Request("http://localhost/api/jobs/health"));
-    const body = await res.json();
+    const body = (await res.json()) as { failedLastHour: number };
     expect(body.failedLastHour).toBe(0);
   });
 });

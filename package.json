@@ -9,7 +9,7 @@
     "dev:server": "bun --watch server/index.ts",
     "dev:client": "vite",
     "build": "vite build",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit --allowImportingTsExtensions && tsc -p tsconfig.src.json --noEmit",
     "test": "bun test",
     "lint": "oxlint src server tests",
     "format": "oxfmt src server tests --write",

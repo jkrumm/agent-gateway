@@ -112,7 +112,12 @@ export default function MarkdownPreview({ content }: Props) {
       // react-shiki renders its own <pre>; collapse react-markdown's wrapper.
       pre: ({ children }) => <>{children}</>,
       code: ({ node, className, children }) => {
-        const inline = node ? isInlineCode(node) : !String(children).includes("\n");
+        // react-shiki bundles its own copy of @types/hast, so its `Element` is a distinct
+        // (but structurally identical, at runtime) nominal type from react-markdown's — the
+        // one cast the duplicate types need.
+        const inline = node
+          ? isInlineCode(node as Parameters<typeof isInlineCode>[0])
+          : !String(children).includes("\n");
         if (inline) return <Code>{children}</Code>;
 
         const lang = /language-(\w+)/.exec(className ?? "")?.[1];

@@ -40,7 +40,7 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
         }
       }
       if (body.tool === "dispatch") {
-        const params = body.params ?? {};
+        const params = (body.params ?? {}) as Record<string, unknown>;
         const cwd = params.cwd;
         const tierRaw = "tier" in params ? params.tier : DEFAULT_DISPATCH_TIER;
         if (typeof cwd === "string" && typeof tierRaw === "string") {
@@ -55,7 +55,7 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
       // means the episode runs on the route's default while the caller believes otherwise —
       // refuse loudly here instead, for every tool that takes one (dispatch, review, overview,
       // narrative). Non-string values fall through to the handler's zod.
-      const model = body.params?.model;
+      const model = (body.params as Record<string, unknown> | undefined)?.model;
       if (typeof model === "string" && !validateModel(model).ok) {
         set.status = 400;
         return {

@@ -681,7 +681,7 @@ export function updateJobSessionId(id: string, sessionId: string): void {
  *  as resumable without a `session_id` too (see `dispatchRecoveryStatusFor`). Stored as the full
  *  object, not just its `path` — see `JobRecord.worktreeMeta`'s doc comment for why `base` must
  *  survive a resume unchanged rather than be re-derived. */
-export function updateJobWorktreeMeta(id: string, meta: Record<string, unknown>): void {
+export function updateJobWorktreeMeta(id: string, meta: object): void {
   db.run("UPDATE jobs SET worktree_meta = ? WHERE id = ? AND status = 'running'", [
     JSON.stringify(meta),
     id,

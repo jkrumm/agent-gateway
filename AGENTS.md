@@ -22,12 +22,11 @@ Frontend UI (kiosk fullscreen, validating UI changes): `docs/ui-and-caching.md`.
 
 ## Validate
 
-`make check` — format (`oxfmt --check`), lint (`oxlint`), `bun test`; non-zero on
-failure, no side effects. Not in it, deliberately: **tsc**. `bun run typecheck`
-checks nothing (`tsconfig.json` has `files: []`); the real server check is
-`bunx tsc -p tsconfig.server.json --noEmit --allowImportingTsExtensions` (~66
-pre-existing errors) and `-p tsconfig.src.json` (frontend) also fails today. Run
-them by hand and compare error counts, don't gate on them.
+`make check` — format (`oxfmt --check`), lint (`oxlint`), typecheck
+(`bun run typecheck` = `tsc -p tsconfig.server.json --noEmit --allowImportingTsExtensions`
+then `tsc -p tsconfig.src.json --noEmit`), `bun test`; non-zero on failure, no
+side effects. Both projects typecheck with zero errors, so a type error now gates
+a change the same way lint and tests do.
 
 ## Deploy
 
@@ -98,7 +97,9 @@ Full forensic story (why BTM denies this specific label/executable):
 - **MCP schema changes need a client reconnect** — `make reload` does not restart the
   MCP process; Zod strips the unknown field until `/mcp` reconnects
   (§MCP Server).
-- **`tsc` checks nothing by default** — `tsconfig.json` has `files: []` (§Validate).
+- **`tsc` runs per project, not via the root config** — `tsconfig.json` has
+  `files: []`; `bun run typecheck` (part of `make check`) checks the server and
+  frontend projects explicitly (§Validate).
 - **Logs live in `~/Library/Logs`, never `/tmp`** (§Deploy).
 - **No tailnet door, deliberately** — the job API has no auth; keep the
   `exclude sideclaw` in `~/.config/caddy-tailnet.ports` (§Architecture).

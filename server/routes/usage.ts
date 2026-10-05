@@ -1,6 +1,6 @@
 import { Elysia, t } from "elysia";
 
-interface UsageData {
+export interface UsageData {
   five_hour_pct: number;
   five_hour_mins_left: number | null;
   seven_day_pct: number | null;

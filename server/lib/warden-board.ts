@@ -77,8 +77,9 @@ export type WardenBoard =
 // The ten chain states warden's own `counts` always carries with a guaranteed zero (see
 // `WardenCounts`'s doc comment) — required as numbers so a missing/renamed key fails schema
 // validation loudly instead of silently degrading every consumer to a `?? 0` guess.
-// `.passthrough()` keeps any *other* non-terminal state (e.g. a future `snoozed`) readable
-// rather than dropped.
+// `.catchall(z.number())` keeps any *other* non-terminal state (e.g. a future `snoozed`)
+// readable rather than dropped, and — unlike `.passthrough()`, whose inferred index
+// signature is `unknown` — types that extra state as the number `WardenCounts` declares.
 const WARDEN_COUNTS_RAW = z
   .object({
     new: z.number(),
@@ -92,7 +93,7 @@ const WARDEN_COUNTS_RAW = z
     merge_blocked: z.number(),
     split: z.number(),
   })
-  .passthrough();
+  .catchall(z.number());
 
 const WARDEN_ITEM_RAW = z.object({
   event_id: z.union([z.string(), z.number()]),
@@ -140,10 +141,15 @@ function toWardenItem(raw: z.infer<typeof WARDEN_ITEM_RAW>): WardenItem {
 
 export interface FetchWardenBoardOptions {
   /** Override for tests — a stubbed `fetch`-shaped function. Defaults to the global `fetch`. */
-  fetchImpl?: typeof fetch;
+  fetchImpl?: FetchLike;
   /** Override for tests. Defaults to `WARDEN_API_URL` env, then the loopback default. */
   baseUrl?: string;
 }
+
+/** The subset of the global `fetch` this module actually calls. Typing the injection point to
+ *  that subset (rather than `typeof fetch`, whose Bun-flavored type also carries a
+ *  `preconnect` property) lets a plain async test stub be assigned directly, without a cast. */
+export type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 /** Fetches and normalizes warden's `GET /board`. Never throws — any failure (network, non-2xx,
  *  timeout, malformed JSON/schema) resolves to `{ ok: false, error, fetchedAt }` so a warden
@@ -155,7 +161,7 @@ export async function fetchWardenBoard(opts?: FetchWardenBoardOptions): Promise<
     /\/+$/,
     "",
   );
-  const doFetch = opts?.fetchImpl ?? fetch;
+  const doFetch: FetchLike = opts?.fetchImpl ?? fetch;
 
   let res: Response;
   try {

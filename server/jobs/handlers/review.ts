@@ -521,7 +521,9 @@ async function cleanupReviewFetchRef(cwd: string, jobKey: string): Promise<void>
  *  branch controls this string, and it gets spliced into a `bash -c` command. Pure and
  *  synchronous — no shell, no network — so a caller can assert "refused before any shell
  *  runs" directly against it. */
-export function assertSafeDefaultBranch(identity: RepoIdentity): void {
+export function assertSafeDefaultBranch(
+  identity: Pick<RepoIdentity, "owner" | "repo" | "defaultBranch">,
+): void {
   try {
     validateBranchRef(identity.defaultBranch);
   } catch (err) {

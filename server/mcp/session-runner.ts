@@ -9,6 +9,8 @@ import { processKind } from "../lib/process-context.ts";
 import { getIuConfig } from "../lib/iu-openai.ts";
 import { IDLE_TIMEOUT_MS } from "../lib/idle-timeout.ts";
 import { runOpencodeAttempt } from "./opencode-runner.ts";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import {
   isClaudeModel,
   withModel,
@@ -490,14 +492,11 @@ function describeTool(item: { name?: string; input?: Record<string, unknown> }):
 
 // ── Progress helper ────────────────────────────────────────────────────────────
 
-/** Minimal shape of the MCP tool handler `extra` param — avoids importing SDK types. */
-interface McpExtra {
-  _meta?: { progressToken?: string | number };
-  sendNotification: (notification: {
-    method: string;
-    params: Record<string, unknown>;
-  }) => Promise<void>;
-}
+/** The MCP tool handler `extra` param, exactly as the SDK hands it to a `registerTool`
+ *  callback. Using the SDK's own type (rather than a hand-rolled structural subset) keeps
+ *  `sendNotification`'s contravariant parameter compatible: the SDK expects a typed
+ *  `ServerNotification`, which a minimal `{ method, params }` shape cannot satisfy. */
+type McpExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
 /** Build an onProgress callback from MCP extra. Returns undefined if the client didn't request progress. */
 export function mcpProgressCallback(extra: McpExtra): SessionOptions["onProgress"] | undefined {
@@ -902,13 +901,13 @@ export interface ResolvedBackend {
  *  rather than a gate that guesses. Process-local and unpersisted by design — jobs run their
  *  sessions in the HTTP server, so that process's count is the one worth reporting, and a
  *  restart legitimately resets it. */
-const fallbackLog: { at: number; reason: string; tool: string }[] = [];
+const fallbackLog: { at: number; reason: string; tool: string | undefined }[] = [];
 const FALLBACK_WINDOW_MS = 60 * 60 * 1000;
 
 /** Exported only so `tests/session-retry.test.ts` can drive the window/aggregation
  *  logic directly (via `bun:test`'s `setSystemTime`) without spawning a session — no
  *  other caller outside this module should ever call it. */
-export function recordFallback(reason: string, tool: string): void {
+export function recordFallback(reason: string, tool: string | undefined): void {
   const now = Date.now();
   fallbackLog.push({ at: now, reason, tool });
   // Prune here rather than on read: a fallback is rare, a health poll is every 30 s.
@@ -1082,7 +1081,11 @@ export function isIuServerError(evidence: {
  *  too — transport/CLI-sourced, same standing as the rest of that text. A no-op when no
  *  status was observed (the timeout and `!envelope` paths, which never reached a result
  *  event). Shared by both `runSessionAttempt` return paths that can carry a status. */
-function appendApiErrorStatus(text: string, status: number | undefined): string {
+function appendApiErrorStatus(
+  text: string | undefined,
+  status: number | undefined,
+): string | undefined {
+  if (text === undefined) return undefined;
   return status !== undefined ? `${text} api_error_status=${status}` : text;
 }
 
@@ -1941,6 +1944,12 @@ async function runSessionAttempt<T = unknown>(
     };
   }
 
+  // Captured as a const so the closures below (`logSessionEnd`, `finalize`) keep the
+  // narrowing the guard above established: control-flow narrowing on a `let` does not
+  // survive into a nested function body, since the variable could be reassigned before the
+  // closure runs.
+  const resultEnvelope = envelope;
+
   runnerLogger().debug(
     {
       type: envelope.type,
@@ -2018,8 +2027,8 @@ async function runSessionAttempt<T = unknown>(
         model,
         backend,
         durationMs,
-        costUsd: envelope.total_cost_usd,
-        turns: envelope.num_turns,
+        costUsd: resultEnvelope.total_cost_usd,
+        turns: resultEnvelope.num_turns,
       },
       "session end",
     );
@@ -2035,7 +2044,11 @@ async function runSessionAttempt<T = unknown>(
           { event: "session.invalid_output", project: cwd, ...errCtx, error: v.error },
           "session output failed validation",
         );
-        emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns, ...costFields });
+        emitAttribution("error", {
+          durationMs,
+          turns: resultEnvelope.num_turns ?? turns,
+          ...costFields,
+        });
         // Carry the worker's output through as `rawText`, exactly as the unparseable
         // branches below do. A schema-validation failure means the session DID produce
         // something — it just did not fit the declared shape — so a handler salvaging a
@@ -2049,11 +2062,15 @@ async function runSessionAttempt<T = unknown>(
         return unclassifiedOutputFailure(v.error, asText, apiRetrySeen, backend, model);
       }
       logSessionEnd();
-      emitAttribution("ok", { durationMs, turns: envelope.num_turns ?? turns, ...costFields });
+      emitAttribution("ok", {
+        durationMs,
+        turns: resultEnvelope.num_turns ?? turns,
+        ...costFields,
+      });
       return { ok: true, data: v.value, backend, model };
     }
     logSessionEnd();
-    emitAttribution("ok", { durationMs, turns: envelope.num_turns ?? turns, ...costFields });
+    emitAttribution("ok", { durationMs, turns: resultEnvelope.num_turns ?? turns, ...costFields });
     return { ok: true, data: value, backend, model };
   };
 
@@ -2071,7 +2088,7 @@ async function runSessionAttempt<T = unknown>(
     runnerLogger().error({ raw: raw.slice(0, 500), ...errCtx }, "result JSON parse failed");
     emitAttribution("error", {
       durationMs,
-      turns: envelope.num_turns ?? turns,
+      turns: resultEnvelope.num_turns ?? turns,
       reason: "json_parse",
       ...costFields,
     });
@@ -2109,7 +2126,7 @@ async function runSessionAttempt<T = unknown>(
   );
   emitAttribution("error", {
     durationMs,
-    turns: envelope.num_turns ?? turns,
+    turns: resultEnvelope.num_turns ?? turns,
     reason: "no_output",
     ...costFields,
   });

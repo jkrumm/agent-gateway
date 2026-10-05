@@ -1,13 +1,11 @@
 # Repo contract (dotfiles/docs/agent-platform.md §Repo contract): check · deploy · verify · logs.
 
-# All local validation, no side effects. Gating: format, lint, tests. NOT gating and left out
-# on purpose: server tsc (`tsc -p tsconfig.server.json --allowImportingTsExtensions`, ~66
-# pre-existing errors) and frontend tsc (`-p tsconfig.src.json`, fails today on a
-# cross-project include + hast types). `package.json`'s `typecheck` checks nothing
-# (tsconfig.json has `files: []`).
+# All local validation, no side effects. Gating: format, lint, typecheck
+# (`bun run typecheck` = server project then frontend project), tests.
 check:
 	bun run format:check
 	bun run lint
+	bun run typecheck
 	bun test
 
 # Ships the checked-out HEAD: reload + verify; on a failed verify rolls back to HEAD~1

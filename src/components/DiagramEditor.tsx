@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useImperativeHandle, useMemo, useRef } from "react";
 import { Spinner } from "@blueprintjs/core";
-import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw";
+import type {
+  ExcalidrawImperativeAPI,
+  ExcalidrawInitialDataState,
+} from "@excalidraw/excalidraw/types";
 
 export type SaveStatus = "idle" | "dirty" | "saving" | "synced";
 
@@ -58,7 +61,7 @@ export const DiagramEditor = React.forwardRef<DiagramEditorHandle, Props>(functi
     onStatusChangeRef.current(status);
   }, []);
 
-  const parsedInitialData = useMemo(() => {
+  const parsedInitialData = useMemo((): ExcalidrawInitialDataState => {
     if (!initialData) {
       return {
         elements: [],
@@ -68,11 +71,10 @@ export const DiagramEditor = React.forwardRef<DiagramEditorHandle, Props>(functi
       };
     }
     try {
-      const parsed = JSON.parse(initialData) as {
-        elements?: unknown[];
-        appState?: Record<string, unknown>;
-        files?: Record<string, unknown>;
-      };
+      // Stored JSON written by an earlier `serializeAsJSON` — the same shape Excalidraw's
+      // initialData expects. Each field falls back independently, so a partial/legacy file
+      // still loads rather than taking the whole diagram down.
+      const parsed = JSON.parse(initialData) as ExcalidrawInitialDataState;
       return {
         elements: parsed.elements ?? [],
         appState: parsed.appState ?? {},

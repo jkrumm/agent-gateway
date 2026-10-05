@@ -153,7 +153,7 @@ describe("POST /api/shutdown", () => {
       const res = await shutdownRoutes.handle(
         new Request("http://localhost/api/shutdown", { method: "POST" }),
       );
-      const body = await res.json();
+      const body = (await res.json()) as { ok: boolean };
 
       expect(res.status).toBe(403);
       expect(body.ok).toBe(false);
