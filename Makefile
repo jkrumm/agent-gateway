@@ -103,27 +103,11 @@ build:
 # hung. This is safe now that a worker actually killed anyway (idle timeout, a crash, FORCE=1)
 # is resumable on the next boot (server/jobs/store.ts's `dispatchRecoveryStatusFor`) rather than
 # a dead end — waiting forever here no longer risks losing work forever if it never finishes.
+# The refusals above (plist drift, running jobs) live in scripts/reload-preflight.sh, which exits
+# 3 on a refusal. make itself collapses that to exit 2, so scripts/deploy.sh runs the script
+# directly to tell a refusal (nothing was touched) from a post-restart failure.
 reload: build
-	@tracked="com.jkrumm.sideclaw-server.plist"; \
-	installed="$$HOME/Library/LaunchAgents/com.jkrumm.sideclaw-server.plist"; \
-	if [ -f "$$installed" ]; then \
-	  tracked_json=$$(plutil -convert json -o - "$$tracked" 2>/dev/null); \
-	  installed_json=$$(plutil -convert json -o - "$$installed" 2>/dev/null); \
-	  if [ -n "$$tracked_json" ] && [ "$$tracked_json" != "$$installed_json" ]; then \
-	    echo "refusing to reload: $$tracked differs from the plist launchd has loaded ($$installed) — 'make reload' only signals the running job, it never re-reads the plist. Run 'make install-agent' first, then 'make reload'."; \
-	    exit 1; \
-	  fi; \
-	fi
-	@tracked_exit=$$(grep -A1 '<key>ExitTimeOut</key>' com.jkrumm.sideclaw-server.plist | grep -o '[0-9]\+'); \
-	live_exit=$$(launchctl print gui/$$(id -u)/com.jkrumm.sideclaw-server 2>/dev/null | awk -F'= ' '/exit timeout = /{print $$2; exit}'); \
-	if [ -n "$$tracked_exit" ] && [ -n "$$live_exit" ] && [ "$$tracked_exit" != "$$live_exit" ]; then \
-	  echo "refusing to reload: launchd's LIVE ExitTimeOut ($${live_exit}s) does not match the tracked plist ($${tracked_exit}s) — 'launchctl bootstrap' never took (the file compare above cannot see this: see the comment above this target). Run 'make install-agent' first, then 'make reload'."; \
-	  exit 1; \
-	fi
-	@if [ -z "$(FORCE)" ]; then \
-	  n=$$(curl -sf --max-time 3 http://127.0.0.1:7705/api/jobs/health 2>/dev/null | jq -r '.running // 0' 2>/dev/null || echo 0); \
-	  if [ "$${n:-0}" != "0" ]; then echo "refusing to reload: $$n job(s) running — waiting is normal (jobs commonly run minutes), or FORCE=1 make reload discards them"; exit 1; fi; \
-	fi
+	@scripts/reload-preflight.sh
 	@if [ -n "$(RESTART_MCP)" ]; then \
 	  pkill -f "sideclaw/server/mcp.ts" 2>/dev/null || true; \
 	else \

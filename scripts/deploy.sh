@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Ships the checked-out HEAD: `make reload` (build + self-drain + restart), then `make verify`.
-# On a failed verify, rolls the checkout back to HEAD~1 (detached) and reloads again — only
-# when the working tree is clean; otherwise it refuses and says how to recover by hand.
+# On a failed verify (reload succeeded, the new server is unhealthy), rolls the checkout back to
+# HEAD~1 (detached) and reloads again — only when the working tree is clean; otherwise it refuses
+# and says how to recover by hand. A REFUSED reload (running jobs, plist drift) never rolls back:
+# the old server was not touched, so the refusal's own message is the reason; exit 1. Refusals are
+# detected by running scripts/reload-preflight.sh (exit 3) first — make collapses its own failures
+# to exit 2, so the code cannot be read off `make reload`. Any other reload failure happens after
+# the old server was drained/killed, so it takes the same rollback path as a failed verify.
 # FORCE=1 is passed through to every reload (running jobs otherwise make reload refuse).
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -20,6 +25,16 @@ verify_with_retry() {
 }
 
 echo "deploying $head"
+scripts/reload-preflight.sh
+rc=$?
+if [ "$rc" -eq 3 ]; then
+  echo "deploy of $head REFUSED (see above) — the running server was not touched, not rolling back"
+  exit 1
+fi
+if [ "$rc" -ne 0 ]; then
+  echo "deploy of $head FAILED: reload preflight errored (exit $rc) — not rolling back"
+  exit 1
+fi
 if make --no-print-directory reload && verify_with_retry; then
   echo "deployed $head and verified"
   exit 0
