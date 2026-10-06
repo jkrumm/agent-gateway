@@ -239,6 +239,16 @@ export interface SessionOptions<T = unknown> {
    */
   retryAfterOutput?: boolean;
   /**
+   * Per-call idle-watchdog budget (ms): the session is killed only after this long with no
+   * stdout chunk, defaulting to `IDLE_TIMEOUT_MS` (5 min). Callers whose worker legitimately
+   * goes quiet for longer than that raise it. `check` does: a single Bash step buffers its
+   * command output and emits no stdout for the step's whole duration, so the default
+   * 5-minute session window would kill the session before the worker's own per-step idle
+   * window (up to 600s for a test step) could ever apply. Still an idle watchdog, never a
+   * wall-clock ceiling — a session that keeps producing output runs past it.
+   */
+  idleTimeoutMs?: number;
+  /**
    * MCP servers to expose to the worker, in `claude --mcp-config`'s `mcpServers` shape
    * (e.g. `{ hyperdx: { type: "http", url, headers } }`). Merged under `--strict-mcp-config`,
    * so this is the *entire* server set the worker sees — never the repo's own `.mcp.json`.
@@ -1501,6 +1511,7 @@ async function runSessionAttempt<T = unknown>(
     jsonSchema,
     settingSources = "project",
     readOnly = false,
+    idleTimeoutMs = IDLE_TIMEOUT_MS,
     mcpServers,
     extraDisallowedTools,
     extraEnv,
@@ -1654,10 +1665,10 @@ async function runSessionAttempt<T = unknown>(
       }, HEARTBEAT_INTERVAL_MS)
     : null;
 
-  // Idle watchdog — killed only once no stdout chunk has arrived for IDLE_TIMEOUT_MS. No
-  // absolute ceiling: see the module header comment on IDLE_TIMEOUT_MS for why a single
-  // wall-clock timer can't tell "still working" from "wedged". Two-stage SIGTERM → wait 5s →
-  // SIGKILL.
+  // Idle watchdog — killed only once no stdout chunk has arrived for the effective idle
+  // budget (`idleTimeoutMs`, `IDLE_TIMEOUT_MS` by default). No absolute ceiling: see the
+  // module header comment on IDLE_TIMEOUT_MS for why a single wall-clock timer can't tell
+  // "still working" from "wedged". Two-stage SIGTERM → wait 5s → SIGKILL.
   let killReason: "idle" | null = null;
   let idleMsAtKill: number | null = null;
   let lastChunkAt: number | null = null;
@@ -1684,7 +1695,7 @@ async function runSessionAttempt<T = unknown>(
     }, 5000);
   };
   const idleWatchdog = setInterval(() => {
-    if (isIdleTimedOut(Date.now(), lastChunkAt ?? spawnedAt)) kill("idle");
+    if (isIdleTimedOut(Date.now(), lastChunkAt ?? spawnedAt, idleTimeoutMs)) kill("idle");
   }, IDLE_CHECK_INTERVAL_MS);
 
   // stderr is buffered whole (it's small — diagnostics only); stdout is consumed as
@@ -1860,8 +1871,8 @@ async function runSessionAttempt<T = unknown>(
   const durationMs = Math.round(performance.now() - startMs);
 
   if (killReason) {
-    // Only one watchdog left — "idle" is a wedged worker that produced no stdout for
-    // IDLE_TIMEOUT_MS.
+    // Only one watchdog left — "idle" is a wedged worker that produced no stdout for the
+    // effective idle budget (`idleTimeoutMs`).
     emitAttribution("timeout_idle", {
       durationMs,
       turns,
@@ -1869,7 +1880,7 @@ async function runSessionAttempt<T = unknown>(
       idleMsAtKill,
     });
     // Keeps the "Session timed out" prefix `timedOutStuck` matches in `planNextAttempt`.
-    const error = `Session timed out — idle ${idleMsAtKill}ms with no stdout (budget ${IDLE_TIMEOUT_MS}ms)`;
+    const error = `Session timed out — idle ${idleMsAtKill}ms with no stdout (budget ${idleTimeoutMs}ms)`;
     // `classificationText` here is always this fixed string, which QUOTA_ERROR_RE never
     // matches, and a hang produces no `api_retry` event either — a Max quota exhaustion
     // that surfaces as a stall rather than a fast is_error/429 is invisible to both
