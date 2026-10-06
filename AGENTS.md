@@ -469,8 +469,10 @@ updated|up_to_date|conflict, headSha, checks}`; checks are skipped when nothing 
 red result is still pushed (the merge train reads `checks`). **One implement-class episode
 per repo at a time, across every caller** (`server/lib/repo-lease.ts`, in-process map —
 exact because the server is single-process): worktree, in-place and `update_pr` all take it;
-a second is refused with the holder's job id. `DISPATCH_SCHEMA_VERSION` is 4 since
-`pr_updated`/`conflict`; warden's pin moves with it.
+a second is refused with the holder's job id. `DISPATCH_SCHEMA_VERSION` is 5 since
+`checks_tool_failed` (the repo's `check` tool threw before it could grade the diff —
+an infrastructure failure, re-run the dispatch) split out from `checks_failed`; warden's
+pin moves with it.
 
 **`sensitive`** opens `investigate` for secret-bearing repos (`dotfiles-private`,
 `homelab-private`) — refused outright at any other tier, before a worktree

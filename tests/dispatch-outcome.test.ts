@@ -175,7 +175,7 @@ describe("depositBranch outcomes", () => {
     );
   });
 
-  test("checks_failed — an unserialisable check result is treated as a failure, never a pass", async () => {
+  test("checks_tool_failed — a thrown check tool is its own outcome, never a red suite", async () => {
     const wt = await createWorktree(fx.repo, key(), "broken-check", "master");
     fx.write("added.txt", "content\n", wt.path);
     await commitPendingWork(wt, "work worth pushing");
@@ -184,8 +184,9 @@ describe("depositBranch outcomes", () => {
         throw new Error("check tool exploded");
       },
     });
-    expect(result.outcome).toBe("checks_failed");
+    expect(result.outcome).toBe("checks_tool_failed");
     expect(result.note).toMatch(/check tool exploded/);
+    expect(result.note).toMatch(/infrastructure failure/);
   });
 
   test("a cancellation thrown by runCheckFn propagates and never pushes", async () => {
@@ -380,7 +381,7 @@ describe("GET /api/dispatch-schema", () => {
     expect(body.ok).toBe(true);
     expect(body.version).toBe(DISPATCH_SCHEMA_VERSION);
     expect(body.outcomes.toSorted()).toEqual([...DISPATCH_OUTCOMES].toSorted());
-    expect(body.outcomes).toHaveLength(15);
+    expect(body.outcomes).toHaveLength(16);
     expect(body.output.type).toBe("object");
     expect(Object.keys(body.output.properties)).toContain("outcome");
     expect(Object.keys(body.output.properties)).toContain("schemaVersion");
