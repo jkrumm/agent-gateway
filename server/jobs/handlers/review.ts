@@ -178,7 +178,7 @@ const SYNTHESIS_OUTPUT = z.object({
   outcome: z
     .enum(REVIEW_OUTCOMES)
     .describe(
-      'Review verdict. "clean" = no findings. "actionable" = items for implementation agent. "needs-human" = has discussions requiring human decision.',
+      'Review verdict. "clean" = no findings. "actionable" = items for implementation agent. "needs-human" = has owner-only decisions requiring human input (or a reviewer failed).',
     ),
   blocking: z
     .array(FINDING)
@@ -186,11 +186,13 @@ const SYNTHESIS_OUTPUT = z.object({
   improvements: z
     .array(FINDING)
     .describe(
-      "Code quality, readability, small refactors — recommended fixes the implementation agent should apply.",
+      "Code quality, readability, small refactors, and design opinions a senior developer can act on — recommended fixes the implementation agent should apply.",
     ),
   discussions: z
     .array(FINDING)
-    .describe("Big refactors, architecture changes, technology choices — needs human decision."),
+    .describe(
+      "Owner-only decisions: a product call, an irreversible data operation, spend, or anything touching another person. Design opinions and big refactors belong in improvements.",
+    ),
   testGaps: z
     .array(z.string())
     .describe("Missing test coverage, e.g. 'server/auth.ts — unit: expired token, revoked token'."),

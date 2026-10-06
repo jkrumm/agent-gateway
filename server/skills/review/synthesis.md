@@ -32,15 +32,15 @@ You have received findings from these sources (some may be empty):
 
 4. **Classify action level** for each finding:
    - **blocking**: Bugs, security vulnerabilities, type errors, data loss risks — must fix before merging. Always actionable, never a discussion.
-   - **improvement**: Code quality, readability, small refactors, obvious wins that any senior developer would agree on — the implementation agent should apply these without asking. Includes: naming improvements, dead code removal, guard clauses, complexity reduction, missing error handling, accessibility fixes, performance quick wins.
-   - **discussion**: Big refactors, new abstraction layers, architecture changes, technology choices, behavior changes — needs human decision. Only use this for changes where reasonable developers would disagree or where the blast radius is significant.
+   - **improvement**: Code quality, readability, small refactors, obvious wins that any senior developer would agree on — the implementation agent should apply these without asking. Includes: naming improvements, dead code removal, guard clauses, complexity reduction, missing error handling, accessibility fixes, performance quick wins, and design opinions a reasonable senior developer could act on without the owner (restructuring, layering, tech choices within the existing stack). Carry the tradeoff in the message.
+   - **discussion**: ONLY findings that genuinely require the OWNER to decide — a product decision, an irreversible data operation, spend, or anything touching another person. `human` is not for missing permissions, a red CI run, or a low-confidence finding. A big refactor, new abstraction layer, architecture change or technology choice is NOT automatically a discussion: file it as an `improvement` unless acting on it needs one of those owner-only calls.
 
 5. **Extract test gaps**: Pull all `[TEST GAP]` findings into the `testGaps` array. Rephrase as actionable items.
 
 6. **Determine outcome**:
    - `"clean"` — zero findings across all categories AND all specialist reviewers ran successfully → "Approved. No issues found."
    - `"actionable"` — has blocking/improvements/testGaps but no discussions → "N items to address."
-   - `"needs-human"` — has at least one discussion OR one or more specialist reviewers reported `⚠️ SESSION FAILED` → "N items to address, M need your decision."
+   - `"needs-human"` — has at least one discussion (i.e. an owner-only decision per #4) OR one or more specialist reviewers reported `⚠️ SESSION FAILED` → "N items to address, M need your decision."
 
 **CRITICAL — reviewer session failures:**
 If any specialist reviewer's input begins with `⚠️ SESSION FAILED`, that reviewer did NOT examine the diff. Their absence is missing input, not approval. In that case:
@@ -63,7 +63,13 @@ Return ONLY a JSON object:
   "improvements": [
     { "file": "path.ts", "line": 10, "message": "Issue and fix", "angle": "senior-dev" }
   ],
-  "discussions": [{ "file": "path.ts", "message": "Tradeoff and options", "angle": "architect" }],
+  "discussions": [
+    {
+      "file": "path.ts",
+      "message": "Owner decision required: options and tradeoff",
+      "angle": "architect"
+    }
+  ],
   "testGaps": ["path.ts — unit: specific scenarios to test"],
   "summary": "2-3 sentence assessment. State the outcome, key findings, and overall code health."
 }

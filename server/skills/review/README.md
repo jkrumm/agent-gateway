@@ -116,12 +116,12 @@ External tools run in parallel with agents:
 
 ### Three-Tier Action Classification
 
-| Category       | Meaning                                    | Who acts                               |
-| -------------- | ------------------------------------------ | -------------------------------------- |
-| `blocking`     | Bugs, security, type errors, data loss     | Must fix — implementation agent        |
-| `improvements` | Code quality, readability, small refactors | Recommended fix — implementation agent |
-| `discussions`  | Big refactors, arch changes, tech choices  | Human decides                          |
-| `testGaps`     | Missing test coverage                      | Implementation agent writes tests      |
+| Category       | Meaning                                                                | Who acts                               |
+| -------------- | ---------------------------------------------------------------------- | -------------------------------------- |
+| `blocking`     | Bugs, security, type errors, data loss                                 | Must fix — implementation agent        |
+| `improvements` | Code quality, readability, design opinions                             | Recommended fix — implementation agent |
+| `discussions`  | Owner-only decisions (product, irreversible data, spend, other people) | Human decides                          |
+| `testGaps`     | Missing test coverage                                                  | Implementation agent writes tests      |
 
 ### Outcome Values
 
@@ -129,7 +129,7 @@ External tools run in parallel with agents:
 | ------------- | -------------------------------------------------- | ------------------------------- |
 | `clean`       | Zero findings                                      | Ship it                         |
 | `actionable`  | Has blocking/improvements/testGaps, no discussions | Apply fixes, then ship          |
-| `needs-human` | Has discussions                                    | Human reviews discussions first |
+| `needs-human` | Has owner-only discussions, or a reviewer failed   | Human reviews discussions first |
 
 ## Rule Loading
 
