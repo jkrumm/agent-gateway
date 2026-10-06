@@ -191,7 +191,7 @@ const SYNTHESIS_OUTPUT = z.object({
   discussions: z
     .array(FINDING)
     .describe(
-      "Owner-only decisions: a product call, an irreversible data operation, spend, or anything touching another person. Design opinions and big refactors belong in improvements.",
+      "Owner-only decisions: a product call, an irreversible data operation, spend, or anything touching another person. Design opinions and big refactors belong in improvements. Also carries one entry per reviewer whose session failed (see the reviewer-session-failures safety net).",
     ),
   testGaps: z
     .array(z.string())
