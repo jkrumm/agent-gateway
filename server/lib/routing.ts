@@ -172,8 +172,9 @@ export const DEEPSEEK_PRO = "DeepSeek-V4-Pro";
 // touches one line instead of hunting down every duplicate. One-line "why" per tier; the
 // dated evidence behind each lives in docs/routing-and-quota.md § Route history. ──────────
 //
-// CLASSIFY: cheap mechanical work (check, overview) — a gateway model, thinking capped so
-//   cheap work stays cheap, Haiku on Max as the reverse lane.
+// CLASSIFY: cheap mechanical work (check, overview) — Haiku over IU, thinking capped so cheap
+//   work stays cheap, Haiku on Max as the reverse lane. (DeepSeek-V4-Flash over `claude -p` was
+//   rejected by IU from 2026-10-04: unrecognized_model; opencode's read-only bash cannot run make.)
 // AGENT_OC / AGENT_OC_IMPLEMENT / AGENT_OC_ESCALATION: dispatch (investigate/author),
 //   dispatch_implement and its attempt-3+ escalation on the OpenCode harness — cheaper and
 //   faster than the retired `claude -p` agent tiers; `variant` is the reasoning-effort split
@@ -227,7 +228,7 @@ const ANGLE_OC: ToolRoute = {
 //   iu-openai transport, no session overhead, no Max lane, `harness` inert.
 // adversary sits alone: its own model, same iu-openai transport as VISION.
 const CLASSIFY: ToolRoute = {
-  model: DEEPSEEK_FLASH,
+  model: HAIKU,
   backend: "iu",
   fallback: { backend: "max", model: HAIKU },
   transport: "session",

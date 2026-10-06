@@ -290,6 +290,12 @@ applies here too, and it is the model that stalled an 84-minute dispatch episode
 already carries, at a lower thinking budget, on strictly easier work. `GLM_FLASH` stays
 exported as a named id, but it is unverified in the registry, so a
 `SIDECLAW_MODEL_<TOOL>=glm-5.3-flash` override is now refused.
+2026-10-06: moved to Haiku over IU (`claude-haiku-4-5`, same Haiku-on-Max reverse lane). From
+2026-10-04 IU rejected DeepSeek-V4-Flash over `claude -p` (`[claude-code:unrecognized_model]`,
+then a Requesty 400 "Invalid request"), so every check/overview job fell to Max mid-stream,
+and the route sat in `degradedRoutes`. The opencode shape AGENT_OC uses was tried for
+`check` first and rejected: its worker's read-only bash profile cannot run `make`. Measured:
+a `check` of warden (`make check`, ~138s bare) passed on Haiku/IU in 220s with no fallback.
 
 ### AGENT
 

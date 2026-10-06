@@ -42,10 +42,10 @@ describe("buildRoutingTable defaults", () => {
     expect(overrides).toEqual([]);
   });
 
-  test("check, overview: DeepSeek-V4-Flash on iu, Haiku on max as the reverse lane (the CLASSIFY tier), thinking capped at 2048", () => {
+  test("check, overview: Haiku on iu, Haiku on max as the reverse lane (the CLASSIFY tier), thinking capped at 2048", () => {
     for (const tool of ["check", "overview"] as const) {
       expect(routes[tool]).toEqual({
-        model: DEEPSEEK_FLASH,
+        model: HAIKU,
         backend: "iu",
         fallback: { backend: "max", model: HAIKU },
         transport: "session",
@@ -197,9 +197,14 @@ describe("buildRoutingTable env overrides", () => {
   });
 
   test("a max backend on a gateway id is refused, default stays", () => {
-    const { routes, overrides } = buildRoutingTable({ SIDECLAW_BACKEND_CHECK: "max" });
+    const { routes, overrides } = buildRoutingTable({
+      SIDECLAW_MODEL_CHECK: DEEPSEEK_FLASH,
+      SIDECLAW_BACKEND_CHECK: "max",
+    });
     expect(routes.check.backend).toBe("iu");
-    expect(overrides[0]?.refused).toContain("max only serves Claude ids");
+    expect(overrides.find((o) => o.field === "backend")?.refused).toContain(
+      "max only serves Claude ids",
+    );
   });
 
   test("an unknown backend name is refused", () => {
@@ -297,13 +302,13 @@ describe("buildRoutingTable env overrides", () => {
 
   test("whitespace-only overrides are ignored", () => {
     const { routes, overrides } = buildRoutingTable({ SIDECLAW_MODEL_CHECK: "  " });
-    expect(routes.check.model).toBe(DEEPSEEK_FLASH);
+    expect(routes.check.model).toBe(HAIKU);
     expect(overrides).toEqual([]);
   });
 
   test("an unregistered model override is refused, default stays", () => {
     const { routes, overrides } = buildRoutingTable({ SIDECLAW_MODEL_CHECK: "not-a-model" });
-    expect(routes.check.model).toBe(DEEPSEEK_FLASH);
+    expect(routes.check.model).toBe(HAIKU);
     expect(overrides).toEqual([
       {
         tool: "check",
@@ -340,7 +345,7 @@ describe("buildRoutingTable env overrides", () => {
 
   test("a GPT id on a claude-harness tool is refused — Responses-only ids have no claude -p path", () => {
     const { routes, overrides } = buildRoutingTable({ SIDECLAW_MODEL_CHECK: "gpt-6.1-sol" });
-    expect(routes.check.model).toBe(DEEPSEEK_FLASH);
+    expect(routes.check.model).toBe(HAIKU);
     expect(routes.check.harness).toBe("claude");
     expect(overrides).toEqual([
       {
@@ -460,7 +465,7 @@ describe("buildRoutingTable env overrides", () => {
       SIDECLAW_MODEL_CHECK: DEEPSEEK_V41_FLASH,
     });
     expect(routes.check.harness).toBe("claude");
-    expect(routes.check.model).toBe(DEEPSEEK_FLASH); // reverted to CLASSIFY's own default
+    expect(routes.check.model).toBe(HAIKU); // reverted to CLASSIFY's own default
     expect(overrides).toEqual([
       {
         tool: "check",
@@ -777,7 +782,7 @@ describe("routeFor / describeRoute", () => {
     const a = routeFor("check");
     a.model = "mutated";
     if (a.fallback) a.fallback.model = "mutated";
-    expect(routeFor("check").model).toBe(DEEPSEEK_FLASH);
+    expect(routeFor("check").model).toBe(HAIKU);
     expect(routeFor("check").fallback?.model).toBe(HAIKU);
   });
 
@@ -794,9 +799,7 @@ describe("routeFor / describeRoute", () => {
   });
 
   test("describeRoute renders the fallback model or the primary when none is fixed", () => {
-    expect(describeRoute(routeFor("check"))).toBe(
-      `${DEEPSEEK_FLASH} on iu (fallback ${HAIKU} on max)`,
-    );
+    expect(describeRoute(routeFor("check"))).toBe(`${HAIKU} on iu (fallback ${HAIKU} on max)`);
     expect(describeRoute(routeFor("review"))).toBe(`${SONNET} on max (fallback ${SONNET} on iu)`);
     expect(describeRoute(routeFor("adversary"))).toBe("gpt-5.6-terra on iu");
   });
