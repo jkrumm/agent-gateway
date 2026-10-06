@@ -894,6 +894,15 @@ describe("isIdleTimedOut", () => {
     expect(isIdleTimedOut(IDLE_TIMEOUT_MS - 1, 0)).toBe(false);
     expect(isIdleTimedOut(IDLE_TIMEOUT_MS, 0)).toBe(true);
   });
+
+  test("a caller-supplied window replaces the default budget", () => {
+    // check raises this so a single buffered Bash step — silent for its whole duration —
+    // is not killed before the worker's own per-step idle window can apply.
+    const custom = 12 * 60 * 1000;
+    expect(isIdleTimedOut(IDLE_TIMEOUT_MS + 1, 0, custom)).toBe(false);
+    expect(isIdleTimedOut(custom - 1, 0, custom)).toBe(false);
+    expect(isIdleTimedOut(custom, 0, custom)).toBe(true);
+  });
 });
 
 // ── Post-output IU 5xx fallback ──────────────────────────────────────────────────────

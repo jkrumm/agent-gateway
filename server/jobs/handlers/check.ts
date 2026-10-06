@@ -3,6 +3,7 @@ import { join } from "path";
 import { z } from "zod";
 import { runSession, zodValidator } from "../../mcp/session-runner.ts";
 import { routeFor } from "../../lib/routing.ts";
+import { IDLE_TIMEOUT_MS } from "../../lib/idle-timeout.ts";
 import { appLogger as logger } from "../../logger.ts";
 import type { ProgressSink } from "../store.ts";
 import { parseParams } from "./util.ts";
@@ -101,6 +102,24 @@ const DEFAULT_STEP_IDLE_SECONDS = 180;
 /** The test step specifically defaults higher — e2e suites legitimately go quiet between
  *  assertions for longer than a lint or typecheck step ever should. */
 const DEFAULT_TEST_IDLE_SECONDS = 600;
+
+/** Margin (seconds) the session-level idle watchdog keeps above the worker's largest per-step
+ *  idle window. During a single Bash step `claude -p` emits no stdout at all — `run_step`
+ *  buffers the command's output into a temp file and `cat`s it only once the step ends (see
+ *  `idleWatchdogBlock`) — so the session watchdog must outlast the step's own idle window or
+ *  it kills the session first and the step window never applies. The margin covers the
+ *  tool-use turn that launches the step and the tool-result turn that reports it. */
+const SESSION_IDLE_MARGIN_SECONDS = 120;
+
+/** The session-level idle-watchdog budget for a check run, in ms: the larger of the two
+ *  per-step idle windows the worker was told to use, plus a safety margin. Never below the
+ *  shared `IDLE_TIMEOUT_MS` default, so a caller passing a small `stepTimeoutSeconds` cannot
+ *  make the session watchdog stricter than every other tool's. Pure and exported so the
+ *  derivation is unit-testable without spawning a worker. */
+export function checkSessionIdleTimeoutMs(stepSeconds: number, testSeconds: number): number {
+  const stepBoundMs = (Math.max(stepSeconds, testSeconds) + SESSION_IDLE_MARGIN_SECONDS) * 1000;
+  return Math.max(IDLE_TIMEOUT_MS, stepBoundMs);
+}
 
 /** The idle-watchdog instructions, parameterized by the effective idle windows. Shared by
  *  both prompt paths (explicit-commands and discovery) so they can never drift — the
@@ -215,6 +234,10 @@ export async function runCheck(
       jsonSchema: CHECK_JSON_SCHEMA,
       route: routeFor("check"),
       readOnly: true,
+      // The session watchdog must outlast the worker's own per-step idle windows: within a
+      // single Bash step no stdout is emitted, so the shared 5-minute default would kill the
+      // session before a long test step's window could apply.
+      idleTimeoutMs: checkSessionIdleTimeoutMs(stepSeconds, testSeconds),
       // No `retryAfterOutput`: glm-5.3-flash thinking is capped at 2048 tokens here
       // (`ToolRoute.thinkingTokens`, MAX_THINKING_TOKENS), but it can still run genuinely
       // slow on hard validation runs, not stuck — a timeout after it has already produced
