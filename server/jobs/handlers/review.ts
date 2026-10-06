@@ -168,7 +168,13 @@ export const REVIEW_OUTCOMES = ["clean", "actionable", "needs-human"] as const;
 // A consumer (today: warden) pins this number and treats a mismatch as a loud refusal rather
 // than a best-effort parse — same contract as DISPATCH_SCHEMA_VERSION in dispatch.ts. Bump it
 // whenever a field's meaning or presence on REVIEW_OUTPUT changes.
-export const REVIEW_SCHEMA_VERSION = 1;
+//
+// Bumped 1 → 2: added the `degraded` field — a salvage or all-angles-failed verdict (the
+// tool itself failed to produce a review) is now machine-distinguishable from a genuine
+// needs-human finding, the same split dispatch draws with its own `degraded` marker. A
+// consumer that ignores the field degrades gracefully (a degraded verdict is still a
+// needs-human outcome), but must not silently misclassify it as a real finding.
+export const REVIEW_SCHEMA_VERSION = 2;
 
 // What the SYNTHESIS worker is shown and graded against. `schemaVersion` is deliberately not
 // part of this one — it is set by the HANDLER on every return path (the clean shortcut, both
@@ -211,6 +217,23 @@ export const REVIEW_OUTPUT = SYNTHESIS_OUTPUT.extend({
     .describe(
       "Version of this output shape. Pin this number; a mismatch means the shape moved under " +
         "you and should be a loud refusal, not a best-effort parse.",
+    ),
+  // Set by the HANDLER, never by the synthesis worker (which is why it is absent from
+  // SYNTHESIS_OUTPUT, the schema the worker is graded against) — same split as
+  // `schemaVersion` above.
+  //
+  // `degraded`: without it, a salvaged synthesis and a genuine needs-human verdict are the
+  // identical {outcome:"needs-human"} tuple, and a consumer like warden could only tell them
+  // apart by substring-matching English prose. They need opposite handling: one is "sideclaw
+  // itself failed, retry or alert", the other is a genuine finding to track. Mirrors dispatch's
+  // `degraded` marker (dispatch-verdict.ts).
+  degraded: z
+    .boolean()
+    .optional()
+    .describe(
+      "True only when the tool failed to obtain a structured verdict — synthesis failed to " +
+        "serialize after a retry, or every specialist reviewer session failed — and this " +
+        "object is a salvage wrapper rather than a real review. Absent/false on a real verdict.",
     ),
 });
 
@@ -1211,6 +1234,7 @@ export async function runReview(
         testGaps: [],
         summary: `All ${totalReviewers} specialist reviewers failed — no review was actually performed. Causes: ${failedAngles.map((r) => `${r.angle}: ${r.failureReason}`).join("; ")}. Do NOT treat this as approval.`,
         schemaVersion: REVIEW_SCHEMA_VERSION,
+        degraded: true,
       };
     }
 
@@ -1326,6 +1350,7 @@ export async function runReview(
         testGaps: [],
         summary: `Review ran ${totalReviewers} reviewers but synthesis failed to serialize a structured verdict (after one retry). Findings were NOT lost — see the discussions entry for the raw synthesizer text. Treat as needs-human.`,
         schemaVersion: REVIEW_SCHEMA_VERSION,
+        degraded: true,
       };
     }
 

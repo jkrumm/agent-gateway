@@ -297,5 +297,6 @@ describe("GET /api/review-schema", () => {
     expect(body.output.type).toBe("object");
     expect(Object.keys(body.output.properties)).toContain("outcome");
     expect(Object.keys(body.output.properties)).toContain("schemaVersion");
+    expect(Object.keys(body.output.properties)).toContain("degraded");
   });
 });
