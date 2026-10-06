@@ -102,8 +102,7 @@ result envelope empty and the whole run has to be repeated.
 - `none` — done; nothing further is needed.
 - `issue` — a real defect worth tracking, but not worth fixing right now.
 - `implement` — a bounded, well-understood code change that should be made.
-- `human` — you could not determine it, it is ambiguous, or it needs a judgement call
-  (including anything touching infrastructure, secrets, or production data).
+- `human` — only an owner-level call or a real blocker; see **Choosing `human`** below.
 
 `evidence` may be empty only if you genuinely inspected nothing — which should itself be
 rare and should push `confidence` to `low`.
