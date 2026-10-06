@@ -1360,9 +1360,9 @@ export async function depositBranch(
 
   if (checksBlockPush(checkOutput)) {
     // A check tool that THREW is an infrastructure failure (re-run), not a red suite (fix the
-    // code). Distinguish it in the verdict so a human is not sent chasing phantom failures;
-    // the outcome stays `checks_failed` — a distinct machine outcome needs a schema bump that
-    // is coordinated with warden, which pins DISPATCH_SCHEMA_VERSION.
+    // code). It gets its own outcome (`checks_tool_failed`, since schema v5) so a consumer can
+    // re-dispatch rather than send a human at phantom failures; `nextAction` is deliberately
+    // NOT forced to `human` the way `checks_failed` is, because a re-run is the fix.
     const toolFailure = checkOutput.toolFailure;
     note(`pushing ${worktree.branch} (${toolFailure ? "check tool failed" : "checks failed"})`);
     await pushBranch(worktree, identity);
@@ -1381,7 +1381,7 @@ export async function depositBranch(
     );
     return {
       branch: worktree.branch,
-      outcome: "checks_failed",
+      outcome: toolFailure ? "checks_tool_failed" : "checks_failed",
       note: toolFailure
         ? (worktree.remoteHead
             ? ` The prior branch was updated (force-with-lease) but the repo's check TOOL `
