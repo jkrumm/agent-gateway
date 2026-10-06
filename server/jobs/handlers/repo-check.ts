@@ -43,7 +43,10 @@ export async function runRepoCheck(
     );
   } catch (err) {
     if (err instanceof SessionCancelledError) throw err;
-    const message = err instanceof Error ? err.message : String(err);
+    // Never empty: callers branch on `toolFailure` being truthy, and `new Error("")` or
+    // `throw ""` must still read as a tool failure, not a red suite.
+    const message =
+      (err instanceof Error ? err.message : String(err)) || "check tool threw with no message";
     checkOutput = {
       passed: false,
       steps: [

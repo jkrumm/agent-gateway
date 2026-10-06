@@ -35,6 +35,15 @@ describe("runRepoCheck", () => {
     expect(out.summary).toBe("check tool failed to run");
   });
 
+  test("a check that throws an empty message is still a toolFailure", async () => {
+    const out = await runRepoCheck("/tmp/x", () => {}, {
+      runCheckFn: async () => {
+        throw new Error("");
+      },
+    });
+    expect(out.toolFailure).toBe("check tool threw with no message");
+  });
+
   test("a real failed check carries no toolFailure marker", async () => {
     const out = await runRepoCheck("/tmp/x", () => {}, {
       runCheckFn: async () => ({
