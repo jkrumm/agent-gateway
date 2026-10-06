@@ -316,6 +316,17 @@ describe("TIERS", () => {
       expect(prompt.length).toBeGreaterThan(200);
     }
   });
+
+  test("the shared prompt constrains `human` to an allow-list and demands a decisionQuestion", async () => {
+    // The over-escalation regression: without this the worker treats `human` as a safe
+    // default and parks ordinary, reversible work for a person to decide.
+    for (const tier of TIER_NAMES) {
+      const prompt = await loadSkillPrompt(tier);
+      expect(prompt).toContain("Choosing `human`");
+      expect(prompt).toContain("reversible");
+      expect(prompt).toContain("A `human` verdict must carry a `decisionQuestion`");
+    }
+  });
 });
 
 // ── What the worker may say ───────────────────────────────────────────────────

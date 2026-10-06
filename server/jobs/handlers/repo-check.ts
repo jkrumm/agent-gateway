@@ -11,21 +11,29 @@ export type RepoCheckContext = {
   runCheckFn?: typeof runCheck;
 };
 
+/** A `CheckOutput` plus a handler-only marker the push-gate callers read to report the truth:
+ *  `toolFailure` is present only on the synthesized failure `runRepoCheck` builds when the
+ *  check tool itself THREW (an infrastructure failure — a re-run is the fix), and absent on a
+ *  real red suite (the repo's checks ran and failed). It is deliberately NOT part of
+ *  `CheckOutput`/the check tool's own output schema — the check tool never emits it. */
+export type RepoCheckOutput = CheckOutput & { toolFailure?: string };
+
 /** Run the repo's own `check` tool, handling the two failure shapes `depositBranch` and
  *  `finishInPlace` both need identically: a cancellation must propagate as exactly that
  *  (never as a failed check, which would push or report as if the episode ran to
  *  completion), and any OTHER throw becomes a synthetic failed check step rather than an
  *  unhandled rejection — a broken check tool may only make an episode MORE cautious, never
- *  silently wave a red run through. Re-checked for cancellation after the check returns too:
- *  the race a cancel arriving while the check itself was still running, which the try/catch
- *  above can't observe. */
+ *  silently wave a red run through. That synthetic failure carries `toolFailure` so a caller
+ *  can report an infrastructure failure instead of misreading it as a red suite. Re-checked
+ *  for cancellation after the check returns too: the race a cancel arriving while the check
+ *  itself was still running, which the try/catch above can't observe. */
 export async function runRepoCheck(
   cwd: string,
   note: (s: string) => void,
   checkCtx: RepoCheckContext,
-): Promise<CheckOutput> {
+): Promise<RepoCheckOutput> {
   const { jobId, isCancelled, runCheckFn = runCheck } = checkCtx;
-  let checkOutput: CheckOutput;
+  let checkOutput: RepoCheckOutput;
   try {
     checkOutput = await runCheckFn(
       { cwd },
@@ -35,16 +43,18 @@ export async function runRepoCheck(
     );
   } catch (err) {
     if (err instanceof SessionCancelledError) throw err;
+    const message = err instanceof Error ? err.message : String(err);
     checkOutput = {
       passed: false,
       steps: [
         {
           name: "check",
           passed: false,
-          errors: [err instanceof Error ? err.message : String(err)],
+          errors: [message],
         },
       ],
       summary: "check tool failed to run",
+      toolFailure: message,
     };
   }
   if (jobId && isCancelled?.(jobId)) {

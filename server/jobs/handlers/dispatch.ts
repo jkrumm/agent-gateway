@@ -1191,18 +1191,32 @@ export async function finishInPlace(
       `for review: ${changedFiles.join(", ")}.`,
   ];
   if (!checkOutput.passed) {
-    notes.push(
-      ` The repo's checks FAILED (${checkOutput.summary}). ${renderFailedChecks(checkOutput.steps)}`,
-    );
-    logger.warn(
-      {
-        event: "dispatch.in_place_checks_failed",
-        project: cwd,
-        summary: checkOutput.summary,
-        failedSteps: checkOutput.steps.filter((s) => !s.passed).map((s) => s.name),
-      },
-      "in-place dispatch checks failed — reported in the verdict, nothing was published",
-    );
+    // A check tool that THREW is an infrastructure failure, not a red suite — say so, so the
+    // owner reading the verdict re-runs rather than chasing phantom test failures.
+    if (checkOutput.toolFailure) {
+      notes.push(` The repo's checks could not be run: ${checkOutput.toolFailure}`);
+      logger.warn(
+        {
+          event: "dispatch.in_place_check_tool_failed",
+          project: cwd,
+          error: checkOutput.toolFailure,
+        },
+        "in-place dispatch check tool failed to run — reported in the verdict, nothing published",
+      );
+    } else {
+      notes.push(
+        ` The repo's checks FAILED (${checkOutput.summary}). ${renderFailedChecks(checkOutput.steps)}`,
+      );
+      logger.warn(
+        {
+          event: "dispatch.in_place_checks_failed",
+          project: cwd,
+          summary: checkOutput.summary,
+          failedSteps: checkOutput.steps.filter((s) => !s.passed).map((s) => s.name),
+        },
+        "in-place dispatch checks failed — reported in the verdict, nothing was published",
+      );
+    }
   } else {
     notes.push(` The repo's checks passed (${checkOutput.summary}).`);
   }
@@ -1345,28 +1359,42 @@ export async function depositBranch(
       : "";
 
   if (checksBlockPush(checkOutput)) {
-    note(`pushing ${worktree.branch} (checks failed)`);
+    // A check tool that THREW is an infrastructure failure (re-run), not a red suite (fix the
+    // code). Distinguish it in the verdict so a human is not sent chasing phantom failures;
+    // the outcome stays `checks_failed` — a distinct machine outcome needs a schema bump that
+    // is coordinated with warden, which pins DISPATCH_SCHEMA_VERSION.
+    const toolFailure = checkOutput.toolFailure;
+    note(`pushing ${worktree.branch} (${toolFailure ? "check tool failed" : "checks failed"})`);
     await pushBranch(worktree, identity);
     logger.warn(
       {
-        event: "dispatch.checks_failed",
+        event: toolFailure ? "dispatch.check_tool_failed" : "dispatch.checks_failed",
         branch: worktree.branch,
         summary: checkOutput.summary,
-        failedSteps: checkOutput.steps.filter((s) => !s.passed).map((s) => s.name),
+        ...(toolFailure
+          ? { error: toolFailure }
+          : { failedSteps: checkOutput.steps.filter((s) => !s.passed).map((s) => s.name) }),
       },
-      "dispatch checks failed before push — branch pushed with no PR",
+      toolFailure
+        ? "dispatch check tool failed to run before push — branch pushed with no PR"
+        : "dispatch checks failed before push — branch pushed with no PR",
     );
     return {
       branch: worktree.branch,
       outcome: "checks_failed",
-      note:
-        (worktree.remoteHead
-          ? ` The prior branch was updated (force-with-lease) but its checks failed `
-          : ` The branch was pushed but NO pull request was opened: the repo's checks failed `) +
-        `(${checkOutput.summary}). ${renderFailedChecks(checkOutput.steps)} ` +
-        (worktree.remoteHead
-          ? `Fix the failures in a further revision.`
-          : `Fix the failures, then open the PR by hand — the work is not lost.`),
+      note: toolFailure
+        ? (worktree.remoteHead
+            ? ` The prior branch was updated (force-with-lease) but the repo's check TOOL `
+            : ` The branch was pushed but NO pull request was opened: the repo's check TOOL `) +
+          `failed to run (${toolFailure}) — an infrastructure failure, not a red suite. ` +
+          `Re-run the dispatch to re-check; the pushed work is not lost.`
+        : (worktree.remoteHead
+            ? ` The prior branch was updated (force-with-lease) but its checks failed `
+            : ` The branch was pushed but NO pull request was opened: the repo's checks failed `) +
+          `(${checkOutput.summary}). ${renderFailedChecks(checkOutput.steps)} ` +
+          (worktree.remoteHead
+            ? `Fix the failures in a further revision.`
+            : `Fix the failures, then open the PR by hand — the work is not lost.`),
     };
   }
 

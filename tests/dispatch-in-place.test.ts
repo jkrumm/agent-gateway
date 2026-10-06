@@ -366,7 +366,7 @@ describe("finishInPlace", () => {
     ).rejects.toBeInstanceOf(SessionCancelledError);
   });
 
-  test("a generic throw from the check tool is reported as a failed check, never re-thrown", async () => {
+  test("a generic throw from the check tool is reported as a tool failure, never re-thrown", async () => {
     const snap = await snapshotInPlace(fx.repo);
     fx.write("episode.txt", "the episode's work\n");
     const result = await finishInPlace(fx.repo, snap, () => {}, {
@@ -375,7 +375,7 @@ describe("finishInPlace", () => {
       },
     });
     expect(result.outcome).toBe("applied_in_place");
-    expect(result.note).toMatch(/checks FAILED/);
+    expect(result.note).toMatch(/checks could not be run/);
     expect(result.note).toMatch(/check tool exploded/);
   });
 
