@@ -144,9 +144,13 @@ const PR_FIELDS = {
 // Bumped 3 → 4: added the "pr_updated" (a `revisionOf` episode updated its existing PR) and
 // "conflict" (rebase onto the latest base failed; nothing pushed) outcomes. Shipped together
 // with warden's pin, which handles both.
-export const DISPATCH_SCHEMA_VERSION = 4;
+// Bumped 4 → 5: added the "checks_tool_failed" outcome — the repo's own `check` tool THREW
+// (an infrastructure failure a re-run fixes), as distinct from a real red suite. A consumer
+// that must re-dispatch rather than send a human at phantom failures reads this instead of
+// substring-matching the verdict prose.
+export const DISPATCH_SCHEMA_VERSION = 5;
 
-/** Machine-readable classification of how this episode ended — the fifteen ways `runDispatch`
+/** Machine-readable classification of how this episode ended — the sixteen ways `runDispatch`
  *  can return, so a consumer never has to substring-match `artifactNote`'s prose to tell them
  *  apart. Two ordering rules a consumer should know: `withheld` overwrites whatever this would
  *  otherwise have been (the real verdict was scanned out, so no tier-specific outcome is
@@ -160,6 +164,10 @@ export const DISPATCH_SCHEMA_VERSION = 4;
  *  - no_changes     implement: the episode changed nothing (0 commits).
  *  - diff_refused   implement: branch discarded — too large, a workflow diff, or a secret match.
  *  - checks_failed  implement: pushed, but the repo's own `check` failed — no PR was opened.
+ *  - checks_tool_failed  implement: pushed, but the repo's `check` TOOL threw before it could
+ *                   grade the diff — an infrastructure failure (re-run the dispatch), not a
+ *                   red suite. No PR was opened. Unlike `checks_failed`, `nextAction` is not
+ *                   forced to `human`: a re-run is the fix.
  *  - branch_no_pr   implement: pushed, but the worker authored no PR text.
  *  - pr_failed      implement: pushed, but opening the pull request threw.
  *  - pr_opened      implement: full success — `artifactUrl` + `branch` both set.
@@ -184,6 +192,7 @@ export const DISPATCH_OUTCOMES = [
   "no_changes",
   "diff_refused",
   "checks_failed",
+  "checks_tool_failed",
   "branch_no_pr",
   "pr_failed",
   "pr_opened",
