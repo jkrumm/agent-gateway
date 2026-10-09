@@ -115,10 +115,10 @@ Full forensic story (why BTM denies this specific label/executable):
 
 ## MCP Server
 
-agent-gateway exposes workflow tools (`check`, `review`, `dispatch`, `overview`,
+agent-gateway exposes workflow tools (`check`, `review`, `dispatch`, `update_pr`, `overview`,
 `narrative`, `triage`, `otel`) plus the synchronous multimodal tools (`read_image`,
 `read_drawing`, `excalidraw_diagram`) plus the job-polling tools
-(`job_status`, `job_wait`) as an MCP server — a **separate process** from the
+(`job_status`, `job_wait`, `job_cancel`) as an MCP server — a **separate process** from the
 LaunchAgent, spawned on-demand by Claude Code via stdio transport.
 `GET /api/agents` (below) is HTTP-only, deliberately outside this MCP
 surface — see `### agents, overview, narrative`. `otel` alone runs inline via
@@ -230,14 +230,41 @@ cap** (`AGENT_GATEWAY_JOB_CONCURRENCY`, default 3) queues excess submissions as
 limits — while draining, that queue backs up too, which `GET
 /api/jobs/health`'s `draining: true` flag distinguishes from a wedged queue.
 
-**`POST /api/jobs/:id/cancel`** cancels one job — `pending` lands `cancelled`
+**`POST /api/jobs/:id/cancel`** (MCP: `job_cancel`, CLI: `agw cancel`) cancels one job — `pending` lands `cancelled`
 immediately, `running` gets a best-effort SIGTERM (`terminateSessionsForJob`)
 and lands `cancelled` once the worker exits, never `failed` and never counted
-in `failedLastHour`; there is no MCP tool for this, only the HTTP route. The
+in `failedLastHour`; an already-terminal job answers 409, which `job_cancel` returns as `outcome: already_terminal`, not an error. The
 `cancelled` value is a widened enum on `job_status`/`job_wait`'s output schema
 too, so per the MCP-schema-change rule above, an already-connected client needs
 an `/mcp` reconnect (or session restart) before it can poll a cancelled job
 without its Zod validation silently stripping the field.
+
+**Alerting (Wave 4).** `server/lib/health.ts` `computeHealth()` is the payload behind
+`/api/jobs/health` plus `pageable`/`pageReason` (`!ok` or any `degradedRoutes`) and
+`openBreakers`. `server/lib/kuma-push.ts` pushes it to an Uptime Kuma push monitor every
+`AGENT_GATEWAY_KUMA_PUSH_INTERVAL_MS` (60 s): `down` + reason when pageable, else `up`. Push URL:
+`AGENT_GATEWAY_KUMA_PUSH_URL` or the chmod-600 file `~/.config/uptime-kuma/agent-gateway-push-url`;
+unresolved URL = warn once and no push, so Kuma's missed-heartbeat alert fires. A drain keeps
+pushing `up`; the timer stops only on process exit.
+
+**Circuit breaker.** `tool@iu/model` opens after `ROUTE_STREAK_LIMIT` consecutive transport-class
+failures (429/5xx/connection; not 4xx, not stalls) for `AGENT_GATEWAY_BREAKER_COOLDOWN_MS` (5 min).
+While open, a route that declares a fallback goes straight to it (`reason: breaker-open`, counted
+in `backendFallbacks`); after the cooldown one probe tries the primary. No fallback or
+`AGENT_GATEWAY_WORKER_FALLBACK=none` = never short-circuits. It reacts to observed failures — not
+the removed proactive quota pre-check.
+
+**Retention.** Full `jobs` rows are pruned at 24 h / 200 rows; a slim `job_stats` table (no params,
+no result; tool, status, timings, attempts, backend, model, 300-char error head, repo) is written
+at every terminal transition and kept 90 days. `jobStatsSummary(days)` in `server/jobs/store.ts`
+aggregates it.
+
+**MCP Tasks extension** (`io.modelcontextprotocol/tasks`, SEP-2663, Final; verified 2026-10-09).
+TypeScript SDK 1.x does not implement it (v1 tops out at spec 2025-11-25, only the legacy
+`.experimental.tasks` API), so this server stays on stdio + SDK 1.x. When an SDK ships it:
+`jobId` ≙ `taskId`, `job_wait` ≙ `tasks/get` polling (no `tasks/result` exists in the extension),
+`job_cancel` ≙ `tasks/cancel`; status map pending/running → `working`, done → `completed`,
+failed/interrupted → `failed`, cancelled → `cancelled`.
 
 Job lifecycle events log to `~/Library/Logs/agent-gateway.jsonl` (`job.create` /
 `job.start` / `job.done` / `job.fail` / `job.cancelled` / `job.recover` /

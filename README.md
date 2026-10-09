@@ -59,6 +59,9 @@ Logs: `~/Library/Logs/agent-gateway.jsonl` (structured, both processes), `agent-
 | `AGENT_GATEWAY_REVIEW_OCR=0` | disable the OpenCodeReview (`ocr` CLI) phase-1 review input |
 | `AGENT_GATEWAY_JOB_CONCURRENCY` (3) | running-job cap |
 | `AGENT_GATEWAY_AGENT_STALE_HOURS` (24) | agent snapshot stale threshold |
+| `AGENT_GATEWAY_KUMA_PUSH_URL` (else `~/.config/uptime-kuma/agent-gateway-push-url`, chmod 600) | full Uptime Kuma push-monitor URL (`https://<kuma-host>/api/push/<token>`); each tick pushes `down` + reason when a route is degraded or the queue unhealthy, else `up`. Unset = no push, one warn, Kuma's missed-heartbeat alert fires |
+| `AGENT_GATEWAY_KUMA_PUSH_INTERVAL_MS` (60000) | Kuma heartbeat interval |
+| `AGENT_GATEWAY_BREAKER_COOLDOWN_MS` (300000) | how long a tripped `tool@iu/model` circuit breaker sends the first attempt straight to the route's fallback before one probe retries the primary |
 | `ARGO_URL` | Argo API base for the overview push (default `https://argo.jkrumm.com/api`) |
 
 The HTTP server gets `.env` from Bun's cwd auto-load; the MCP process reads the same file
