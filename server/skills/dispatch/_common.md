@@ -148,4 +148,6 @@ Every text field is read on a phone and matched by a machine. Hard limits:
   are reading** (e.g. a shared library or config the other repo depends on): the bare name of
   that repo, at most 100 characters, matching `^[A-Za-z0-9._-]+$` (letters, digits, dots,
   underscores, hyphens — no `owner/`, no path, no `.git`). Omit it when the finding belongs to
-  the repo you are in; do not use it to restate the repo you are reading.
+  the repo you are in; do not use it to restate the repo you are reading. When you set
+  `owningRepo`, `nextAction` must still be `human` (with a `decisionQuestion`), so a consumer
+  that ignores this field pages exactly as it does today.
