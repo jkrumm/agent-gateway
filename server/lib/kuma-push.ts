@@ -39,7 +39,7 @@ export function resolveKumaPushUrl(
   env: string | undefined = process.env.AGENT_GATEWAY_KUMA_PUSH_URL,
   urlFile: string = URL_FILE,
 ): string | null {
-  if (env) return env;
+  if (env?.trim()) return env.trim();
   if (!existsSync(urlFile)) return null;
   try {
     return readFileSync(urlFile, "utf8").replace(/\s+/g, "") || null;

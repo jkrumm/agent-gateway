@@ -139,6 +139,7 @@ function unavailable(error: string, fetchedAt: number): WardenBoard {
       const oldest = unavailableLog.keys().next().value;
       if (oldest !== undefined) unavailableLog.delete(oldest);
     }
+    unavailableLog.delete(error); // re-insert at the end: Map order is the eviction recency
     unavailableLog.set(error, { loggedAt: fetchedAt, suppressed: 0 });
     logger.warn(
       {

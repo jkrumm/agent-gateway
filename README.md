@@ -57,6 +57,7 @@ Logs: `~/Library/Logs/agent-gateway.jsonl` (structured, both processes), `agent-
 | `AGENT_GATEWAY_HARNESS_<TOOL>` (`claude` \| `opencode`), `AGENT_GATEWAY_VARIANT_<TOOL>` | per-tool harness/reasoning-effort override — `dispatch`/`dispatch_implement` default to `opencode` over IU's OpenAI route (model: `GET /api/routing`), refused on a fixed-transport tool same as the model/backend overrides |
 | `AGENT_GATEWAY_WORKER_FALLBACK=none` | disable both fallback directions |
 | `AGENT_GATEWAY_REVIEW_OCR=0` | disable the OpenCodeReview (`ocr` CLI) phase-1 review input |
+| `AGENT_GATEWAY_REVIEW_CODERABBIT=0` | skip the CodeRabbit CLI phase-1 input (a hung binary otherwise stalls every review 60 s) |
 | `AGENT_GATEWAY_JOB_CONCURRENCY` (3) | running-job cap |
 | `AGENT_GATEWAY_AGENT_STALE_HOURS` (24) | agent snapshot stale threshold |
 | `AGENT_GATEWAY_KUMA_PUSH_URL` (else `~/.config/uptime-kuma/agent-gateway-push-url`, chmod 600) | full Uptime Kuma push-monitor URL (`https://<kuma-host>/api/push/<token>`); each tick pushes `down` + reason when a route is degraded or the queue unhealthy, else `up`. Unset = no push, one warn, Kuma's missed-heartbeat alert fires |

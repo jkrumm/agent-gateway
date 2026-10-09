@@ -420,38 +420,62 @@ async function shell(
   cwd: string,
   timeoutMs = 30_000,
 ): Promise<{ stdout: string; ok: boolean }> {
+  const failed = { stdout: "", ok: false };
+  let proc: ReturnType<typeof Bun.spawn>;
   try {
-    const proc = Bun.spawn(["bash", "-c", cmd], {
-      cwd,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    proc = Bun.spawn(["bash", "-c", cmd], { cwd, stdout: "pipe", stderr: "pipe" });
+  } catch {
+    return failed;
+  }
 
-    // Two-stage timeout: SIGTERM → 5s grace → SIGKILL
-    let sigkillTimer: ReturnType<typeof setTimeout> | null = null;
-    const timeout = setTimeout(() => {
-      proc.kill("SIGTERM");
-      sigkillTimer = setTimeout(() => {
-        if (proc.exitCode === null) proc.kill("SIGKILL");
-        sigkillTimer = null;
-      }, 5000);
-    }, timeoutMs);
+  // Signals go to the wrapper's children too (`pkill -P`): killing only `bash` leaves a hung
+  // `coderabbit` holding the stdout pipe open, so the reads never end and the whole review wedges
+  // in "gathering" (seen 2026-10-09: 100+ orphaned `coderabbit review` processes, a review stuck
+  // for 29 min). The exitCode guard keeps `proc.kill` off an already-reaped process.
+  const killTree = (signal: "TERM" | "KILL") => {
+    Bun.spawnSync(["pkill", `-${signal}`, "-P", String(proc.pid)]);
+    if (proc.exitCode === null) proc.kill(signal === "TERM" ? "SIGTERM" : "SIGKILL");
+  };
 
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const exitCode = await proc.exited;
-    clearTimeout(timeout);
-    if (sigkillTimer) clearTimeout(sigkillTimer);
+  // Two-stage timeout: SIGTERM → 5s grace → SIGKILL, then a hard deadline that gives up on
+  // the pipes and the exit wait alike if a descendant still holds them.
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  timers.push(
+    setTimeout(() => {
+      killTree("TERM");
+      timers.push(setTimeout(() => killTree("KILL"), 5000));
+    }, timeoutMs),
+  );
+  const deadline = new Promise<null>((resolve) => {
+    timers.push(setTimeout(() => resolve(null), timeoutMs + 10_000));
+  });
 
+  const finished = Promise.all([
+    new Response(proc.stdout as ReadableStream).text(),
+    new Response(proc.stderr as ReadableStream).text(),
+    proc.exited,
+  ]);
+  finished.catch(() => {}); // a late rejection after the deadline must not go unhandled
+
+  try {
+    const outcome = await Promise.race([finished, deadline]);
+    if (!outcome) {
+      killTree("KILL");
+      return failed;
+    }
+    const [stdout, stderr, exitCode] = outcome;
     // Merge stderr into stdout — tools like fallow/coderabbit may write findings to stderr
     const combined = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
     return { stdout: combined, ok: exitCode === 0 };
   } catch {
-    return { stdout: "", ok: false };
+    return failed;
+  } finally {
+    for (const t of timers) clearTimeout(t);
   }
 }
+
+/** Test seam for the timeout/kill behaviour of `shell`. */
+export const __shellForTests = shell;
 
 // ── PR/branch worktree ────────────────────────────────────────────────────────
 //
@@ -957,6 +981,9 @@ export async function runReview(
       // already-pushed commits. See `fallowBaseFor` for the `auto`/`skip` cases.
       fallowCmd = fallowCommand(fallowBaseFor(resolvedScope));
     }
+    // Kill switch, same shape as AGENT_GATEWAY_REVIEW_OCR: a wedged CodeRabbit CLI (its
+    // `--version` hung on this host 2026-10-09) otherwise costs every review a full 60 s stall.
+    if (process.env.AGENT_GATEWAY_REVIEW_CODERABBIT === "0") coderabbitCmd = "true";
 
     // Scope mode runs in the caller's LIVE checkout, which must never be stripped — another
     // session may own those files. Instead, each opencode-harness angle is refused below and

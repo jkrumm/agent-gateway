@@ -118,9 +118,14 @@ function installSessionStub(): void {
 }
 
 beforeEach(async () => {
-  for (const k of ["AGENT_GATEWAY_REVIEW_OCR", "AGENT_GATEWAY_REVIEW_ADVERSARY"])
+  for (const k of [
+    "AGENT_GATEWAY_REVIEW_OCR",
+    "AGENT_GATEWAY_REVIEW_ADVERSARY",
+    "AGENT_GATEWAY_REVIEW_CODERABBIT",
+  ])
     savedEnv[k] = process.env[k];
   process.env.AGENT_GATEWAY_REVIEW_OCR = "0";
+  process.env.AGENT_GATEWAY_REVIEW_CODERABBIT = "0";
   process.env.AGENT_GATEWAY_REVIEW_ADVERSARY = "false";
   seen = [];
   fx = await makeFixture();
