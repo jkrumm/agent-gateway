@@ -325,7 +325,7 @@ describe("renderNarrativePage", () => {
     expect(page).toContain("tags: [project, engineering, narrative]");
     expect(page).toContain("timestamp: 2026-03-10");
     expect(page).toContain('repo: "weatherorb"');
-    expect(page).toContain("generated_by: sideclaw/narrative");
+    expect(page).toContain("generated_by: agent-gateway/narrative");
   });
 
   test('revised_from is the since timestamp when present, "bootstrap" when since is null', () => {

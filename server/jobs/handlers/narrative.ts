@@ -69,7 +69,7 @@ export const NARRATIVE_INPUT = z.object({
     .describe(
       `Override worker model. Default: "${routeFor("narrative").model}" — the reasoning tier, since this is ` +
         "editorial judgment over a prompt, not mechanical classification. Any model id routes " +
-        "through the same worker backend as every other sideclaw job.",
+        "through the same worker backend as every other agent-gateway job.",
     ),
 });
 export type NarrativeParams = z.infer<typeof NARRATIVE_INPUT>;
@@ -280,7 +280,7 @@ export function renderNarrativePage(input: RenderNarrativePageInput): string {
     `timestamp: ${timestamp}`,
     `repo: ${yamlString(repo)}`,
     `revised_from: ${yamlString(revisedFrom)}`,
-    "generated_by: sideclaw/narrative",
+    "generated_by: agent-gateway/narrative",
     "---",
   ].join("\n");
 

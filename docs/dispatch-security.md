@@ -107,10 +107,10 @@ the caller.
   a notice naming the matched pattern(s) and the absolute path of the
   withheld file; `evidence` is emptied; `confidence` is preserved;
   `nextAction` is forced to `"human"`. The full, unmodified verdict is
-  written to `~/.local/state/sideclaw/private-verdicts/<jobId>.md`
+  written to `~/.local/state/agent-gateway/private-verdicts/<jobId>.md`
   (`writeWithheldVerdict`, `dispatch-git.ts`) — directory `0700`, file
   `0600`, same state root as worktrees and salvage bundles
-  (`sideclawStateRoot`), each with its own env override for the test suite.
+  (`agentGatewayStateRoot`), each with its own env override for the test suite.
   Logged at `warn` (`dispatch.verdict_withheld`).
 - **This is deliberately not the scanner's usual refuse-don't-redact stance.**
   `assertNoSecrets` refuses to publish an issue/PR body that matches, and
@@ -218,7 +218,7 @@ both were tested and neither holds.
   `server/index.ts` beside `initJobStore`). The `finally` teardown covers
   every exit path *inside* the process; a SIGKILL has none, and that is the
   ordinary case — launchd restarts on crash and `make reload` kickstarts
-  deliberately. What leaks is not just a directory under sideclaw's state
+  deliberately. What leaks is not just a directory under agent-gateway's state
   dir: the `.git/worktrees` registration and the `dispatch/…` branch land in
   the **live repo**, visible in the user's `git branch`. Each leftover is
   self-describing (a linked worktree's `.git` is a file naming the main repo;
@@ -252,14 +252,14 @@ both were tested and neither holds.
   skills; that is the point of dispatching. It must not also load the repo's
   `.claude/settings.json`, and by default it did. Both measured on CLI
   2.1.220 (2026-08-03) with canaries in a scratch repo, under the exact flag
-  vector sideclaw uses:
+  vector agent-gateway uses:
   - **Hooks executed.** A `SessionStart` hook ran *before the model took a
     turn*, and a `PreToolUse` hook ran on the worker's first Bash call —
     arbitrary commands, supplied by the repo being audited, in a session
     whose brief is attacker-influenced. Same "repo-controlled code is not a
     check" argument that makes the dispatch commit `--no-verify`, one layer
     up. Fixed by `WORKER_SETTINGS` (`--settings
-    '{"disableAllHooks":true}'`) on **every** sideclaw worker, not just
+    '{"disableAllHooks":true}'`) on **every** agent-gateway worker, not just
     dispatch. `--setting-sources user` also stops it but takes the repo's
     CLAUDE.md with it (measured: the codeword probe answered `NONE`), and
     `--settings '{"hooks":{}}'` merges, so the repo's hooks still fired.
@@ -377,7 +377,7 @@ Claude Code session can hand a scoped episode to another repo.
   every failure is caught, logged (`dispatch.worktree_salvage_failed`) and returns
   `null` — because the worktree must be torn down whether or not the salvage
   attempt succeeded. Neither call site guards teardown on salvage's outcome.
-- **Where it lands.** `~/.local/state/sideclaw/salvage/`, never `/tmp` — same
+- **Where it lands.** `~/.local/state/agent-gateway/salvage/`, never `/tmp` — same
   reasoning as the logs (`.claude/rules/logs.md`): macOS sweeps untouched
   `/tmp` files after 3+ days, which is exactly the wrong lifetime for the one
   copy of a crashed episode's work. Filename is the branch name with `/`
@@ -420,7 +420,7 @@ Three things about the setup are load-bearing:
   invocation, and the diverged-branch case proves the push fails rather than
   overwrites. Nothing in the suite reaches the network or needs a credential.
 - **`WORKTREE_ROOT` is read per call** (`worktreeRoot()`, overridable by
-  `SIDECLAW_WORKTREE_ROOT`, never set in production). `sweepStaleWorktrees`
+  `AGENT_GATEWAY_WORKTREE_ROOT`, never set in production). `sweepStaleWorktrees`
   deletes *every* directory under that root on the stated assumption that
   one instance of this server exists; a test run is a second process, so
   against the real root it would tear down a live episode's worktree.

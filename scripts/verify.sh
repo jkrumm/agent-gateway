@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Probes the live sideclaw (LaunchAgent, 127.0.0.1:7705). Exit 0 = live and healthy.
+# Probes the live agent-gateway (LaunchAgent, 127.0.0.1:7705). Exit 0 = live and healthy.
 # Read-only: two GETs, no side effects.
 set -uo pipefail
 

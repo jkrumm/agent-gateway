@@ -208,7 +208,7 @@ describe("runReview pr/branch input validation", () => {
 
 // ── fetch-ref cleanup when the throw lands before `worktree` ever exists ────────
 //
-// `fetchReviewHead` creates `refs/sideclaw-review/<jobKey>` in the CALLER's live repo, then
+// `fetchReviewHead` creates `refs/agent-gateway-review/<jobKey>` in the CALLER's live repo, then
 // `resolveReviewBase` runs — which throws for `fx.repo` specifically, because the fixture's
 // `origin` is a local bare repo, not GitHub. That's the exact ordering the leak needed: the
 // fetch already landed the ref, the throw happens strictly before `worktree` is ever
@@ -227,7 +227,7 @@ describe("fetch-ref cleanup on a throw before the worktree exists", () => {
     );
 
     const leftover = await git(
-      ["for-each-ref", "--format=%(refname)", "refs/sideclaw-review"],
+      ["for-each-ref", "--format=%(refname)", "refs/agent-gateway-review"],
       fx.repo,
     );
     expect(leftover.trim()).toBe("");

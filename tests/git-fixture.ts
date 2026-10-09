@@ -52,9 +52,9 @@ export class Fixture {
     readonly repo: string,
     /** Bare repo serving as `origin`. */
     readonly origin: string,
-    /** This fixture's private SIDECLAW_WORKTREE_ROOT. */
+    /** This fixture's private AGENT_GATEWAY_WORKTREE_ROOT. */
     readonly worktrees: string,
-    /** This fixture's private SIDECLAW_SALVAGE_ROOT. */
+    /** This fixture's private AGENT_GATEWAY_SALVAGE_ROOT. */
     readonly salvage: string,
   ) {}
 
@@ -106,7 +106,7 @@ export class Fixture {
 
   cleanup(): void {
     rmSync(this.root, { recursive: true, force: true });
-    // `repo` sits under the shared SIDECLAW_DISPATCH_ROOTS test root, not under `this.root` —
+    // `repo` sits under the shared AGENT_GATEWAY_DISPATCH_ROOTS test root, not under `this.root` —
     // see the DISPATCH_ROOT comment above makeFixture.
     rmSync(this.repo, { recursive: true, force: true });
   }
@@ -114,10 +114,10 @@ export class Fixture {
 
 // `repo` (below) is created directly under this root, not under the fixture's own `root` —
 // server/lib/dispatch-policy.ts only admits a `cwd` that is a DIRECT child of a configured
-// dispatch root, and tests/setup.ts points SIDECLAW_DISPATCH_ROOTS here for exactly that
+// dispatch root, and tests/setup.ts points AGENT_GATEWAY_DISPATCH_ROOTS here for exactly that
 // reason. `origin`/`worktrees`/`salvage` stay under the fixture's own root: nothing checks
 // the dispatch policy against them, only against the repo a dispatch actually runs in.
-const DISPATCH_ROOT = process.env.SIDECLAW_DISPATCH_ROOTS?.split(",")[0]?.trim() || tmpdir();
+const DISPATCH_ROOT = process.env.AGENT_GATEWAY_DISPATCH_ROOTS?.split(",")[0]?.trim() || tmpdir();
 
 /**
  * Build the fixture. `master` exists in both the checkout and origin, carrying one commit.
@@ -127,7 +127,7 @@ const DISPATCH_ROOT = process.env.SIDECLAW_DISPATCH_ROOTS?.split(",")[0]?.trim()
  * place before a test deliberately installs a failing pre-commit hook into it.
  */
 export async function makeFixture(): Promise<Fixture> {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "sideclaw-dispatch-")));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "agent-gateway-dispatch-")));
   const origin = join(root, "origin.git");
   const repo = realpathSync(mkdtempSync(join(DISPATCH_ROOT, "repo-")));
   const worktrees = join(root, "worktrees");
@@ -150,7 +150,7 @@ export async function makeFixture(): Promise<Fixture> {
   await git(["remote", "add", "origin", origin], repo);
   await git(["push", "-q", "-u", "origin", "master"], repo);
 
-  process.env.SIDECLAW_WORKTREE_ROOT = worktrees;
-  process.env.SIDECLAW_SALVAGE_ROOT = salvage;
+  process.env.AGENT_GATEWAY_WORKTREE_ROOT = worktrees;
+  process.env.AGENT_GATEWAY_SALVAGE_ROOT = salvage;
   return fx;
 }

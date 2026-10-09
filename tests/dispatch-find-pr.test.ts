@@ -34,7 +34,7 @@ describe("findOpenPullRequest (GitLab)", () => {
   let savedPath: string | undefined;
 
   beforeEach(() => {
-    binDir = mkdtempSync(join(tmpdir(), "sideclaw-glab-"));
+    binDir = mkdtempSync(join(tmpdir(), "agent-gateway-glab-"));
     argvLog = join(binDir, "argv.log");
     writeFileSync(
       join(binDir, "glab"),

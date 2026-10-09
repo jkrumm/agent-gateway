@@ -44,7 +44,7 @@ export const OVERVIEW_INPUT = z.object({
     .positive()
     .optional()
     .describe(
-      "Override the stale-agent threshold (SIDECLAW_AGENT_STALE_HOURS, default 24) used to " +
+      "Override the stale-agent threshold (AGENT_GATEWAY_AGENT_STALE_HOURS, default 24) used to " +
         "derive each agent's deterministic `state` in the snapshot this job enriches.",
     ),
 });
@@ -376,7 +376,7 @@ export async function runOverview(
 
   const result = await runSession<OverviewWorkerOutput>({
     // No repo tools needed — every fact is already in the prompt. homedir() rather than the
-    // sideclaw repo root so nothing implies this is a sideclaw-scoped task.
+    // agent-gateway repo root so nothing implies this is a agent-gateway-scoped task.
     cwd: homedir(),
     prompt,
     tool: "overview",

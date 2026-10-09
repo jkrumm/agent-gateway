@@ -36,7 +36,7 @@ export function registerReadImageTool(server: McpServer): void {
 WHEN TO CALL: to understand a screenshot, diagram, photo, or any image as text. For paired Excalidraw drawings (.svg + .excalidraw) prefer read_drawing.
 READ-ONLY: never modifies files (SVGs are rasterized to a temp PNG that is cleaned up). Safe to retry.
 CWD: pass an absolute file path. SVGs are rasterized via headless Chrome first; other formats read as-is.
-OUTPUT: \`text\` holds the reading. Default model ${routeFor("read_image").model} (fast, strong on dense diagrams; SIDECLAW_MODEL_READ_IMAGE overrides). Routes to a non-EU vendor — fine for git-committed/non-sensitive images.`,
+OUTPUT: \`text\` holds the reading. Default model ${routeFor("read_image").model} (fast, strong on dense diagrams; AGENT_GATEWAY_MODEL_READ_IMAGE overrides). Routes to a non-EU vendor — fine for git-committed/non-sensitive images.`,
       inputSchema: {
         path: z.string().describe("Absolute path to the image file (.png/.jpg/.svg/...)."),
         prompt: z

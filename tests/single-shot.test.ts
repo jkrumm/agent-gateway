@@ -8,7 +8,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 
-process.env.SIDECLAW_IU_USAGE_LOG = join(tmpdir(), `sideclaw-single-shot-test-${Date.now()}.jsonl`);
+process.env.AGENT_GATEWAY_IU_USAGE_LOG = join(
+  tmpdir(),
+  `agent-gateway-single-shot-test-${Date.now()}.jsonl`,
+);
 process.env.IU_API_KEY = "test-key";
 process.env.IU_BASE_URL = "https://iu.example.com/anthropic";
 

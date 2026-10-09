@@ -1,4 +1,4 @@
-// The harness-agnostic CLI (bin/sideclaw.ts). These pin the argv → POST-body mapping,
+// The harness-agnostic CLI (bin/agw.ts). These pin the argv → POST-body mapping,
 // the `--repo` name→path resolution, the exit-code mapping, and that `--json` keeps stdout
 // pure JSON — all against exported pure functions plus one mocked-fetch round trip, so no
 // test spawns a server.
@@ -22,7 +22,7 @@ import {
   type FetchLike,
   type JobCommand,
   type RequestBody,
-} from "../bin/sideclaw.ts";
+} from "../bin/agw.ts";
 
 function bodyFor(argv: string[], cwd = "/repo"): RequestBody {
   const { command } = parseArgs(argv);
@@ -165,7 +165,7 @@ describe("argv parsing → POST body", () => {
 });
 
 describe("--repo resolution", () => {
-  const root = mkdtempSync(join(tmpdir(), "sideclaw-cli-root-"));
+  const root = mkdtempSync(join(tmpdir(), "agent-gateway-cli-root-"));
   mkdirSync(join(root, "my-repo"));
   afterAll(() => rmSync(root, { recursive: true, force: true }));
 
@@ -679,7 +679,7 @@ describe("human-readable rendering", () => {
 // ── triage: no repo, two files in, the validated answer out ────────────────────────
 
 describe("triage command", () => {
-  const dir = mkdtempSync(join(tmpdir(), "sideclaw-cli-triage-"));
+  const dir = mkdtempSync(join(tmpdir(), "agent-gateway-cli-triage-"));
   const promptFile = join(dir, "prompt.txt");
   const schemaFile = join(dir, "schema.json");
   const badSchemaFile = join(dir, "bad.json");

@@ -1,4 +1,4 @@
-# sideclaw — Agent Instructions
+# agent-gateway — Agent Instructions
 
 ## Architecture
 
@@ -10,8 +10,18 @@ would let any tag:mac/phone/tablet node `POST /api/jobs` with `dispatch
 implement`. Don't remove that exclusion. (`excalidraw-hydrate.ts` still stamps
 `https://sideclaw.local` as a diagram `source`, a dead localias-proxy convention.)
 
-Bun loads `.env` automatically from the `sideclaw/` directory — all env vars
-(`PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH`, `GITHUB_TOKEN`, `SIDECLAW_*`,
+**Renamed from `sideclaw` (2026-10-09).** CLI `agw` (`bin/sideclaw` is a deprecated shim that
+execs it), MCP server and tools `mcp__agent-gateway__*`, env prefix `AGENT_GATEWAY_*` — a
+`SIDECLAW_*` var is still aliased at boot by `server/lib/env-compat.ts` and warned once
+(`env.legacy_prefix`), to be dropped after the deprecation window. Still carrying the old name
+on purpose, each renamed with its owner repo: the `sideclaw-iu` usage sink, the
+`sideclaw.test` Caddy host and its `exclude sideclaw` line. `scripts/rename-codemod.ts`
+re-runs the rewrite; `scripts/migrate-runtime.sh` (drain, move data/state/logs, new label) and
+`scripts/post-move.sh` (Claude Code state, MCP registration, then the migration) are the
+one-time machine steps.
+
+Bun loads `.env` automatically from the `agent-gateway/` directory — all env vars
+(`PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH`, `GITHUB_TOKEN`, `AGENT_GATEWAY_*`,
 `RESEARCH_GATEWAY_*`) live there, listed in `README.md`. That auto-load is
 cwd-based, so the **MCP process** (spawned with the calling session's cwd)
 imports `server/lib/load-env.ts` first thing in `mcp.ts` to read the same
@@ -37,7 +47,7 @@ drift) stay intact — `scripts/deploy.sh`. Those refusals come from
 runs it directly): a refusal exits 1 with no rollback since the old server was never
 touched; any later reload failure rolls back like a failed verify. Detail below.
 
-**sideclaw runs exclusively via LaunchAgent. Never start it standalone.**
+**agent-gateway runs exclusively via LaunchAgent. Never start it standalone.**
 
 - `make dev` and `make start` are intentionally broken — they exit with an error.
 - Do NOT run `bun run dev`, `bun run start`, `bun server/index.ts`, or anything that starts a server directly.
@@ -48,8 +58,8 @@ make reload          # After code changes: self-initiated drain (POST /api/shutd
 make install-agent   # One-time: install + start LaunchAgent
 make uninstall-agent # Remove LaunchAgent
 
-tail -f ~/Library/Logs/sideclaw.log   # stdout
-tail -f ~/Library/Logs/sideclaw.err   # stderr
+tail -f ~/Library/Logs/agent-gateway.log   # stdout
+tail -f ~/Library/Logs/agent-gateway.err   # stderr
 ```
 
 The LaunchAgent starts automatically on login and restarts on crash.
@@ -57,18 +67,18 @@ The LaunchAgent starts automatically on login and restarts on crash.
 **Logs live in `~/Library/Logs`, never `/tmp`** — a KeepAlive agent opens its
 stdio once at spawn, and macOS's periodic cleanup sweeps untouched `/tmp`
 files after 3+ days, leaving the process writing into an unlinked inode
-(sideclaw lost a post-mortem to exactly this once). The paths live in
-`com.jkrumm.sideclaw-server.plist`; `make install-agent` copies that file
+(agent-gateway lost a post-mortem to exactly this once). The paths live in
+`com.jkrumm.agent-gateway.plist`; `make install-agent` copies that file
 verbatim over the live one, so change the tracked file, never the live one.
 
-**The label is `com.jkrumm.sideclaw-server` and the program is a wrapper
-script (`scripts/sideclaw-start.sh`), not `bun` directly — both are macOS
+**The label is `com.jkrumm.agent-gateway` and the program is a wrapper
+script (`scripts/agent-gateway-start.sh`), not `bun` directly — both are macOS
 Background Task Management workarounds, not style.** Reverting either brings
-back "sideclaw doesn't come up after a power cut" (measured across three
+back "agent-gateway doesn't come up after a power cut" (measured across three
 reboots 2026-08-06). Verify after any plist change:
 
 ```bash
-log show --last 2m --info | grep -A3 sideclaw-server.plist | grep effectiveItemDisposition
+log show --last 2m --info | grep -A3 agent-gateway.plist | grep effectiveItemDisposition
 # want: result=[enabled, allowed, ...]
 ```
 
@@ -81,12 +91,12 @@ Full forensic story (why BTM denies this specific label/executable):
   → `ok == true` and `degradedRoutes` empty. Exit 0 = live and healthy.
 - Health URL: `http://127.0.0.1:7705/health` (queue health:
   `http://127.0.0.1:7705/api/jobs/health`; loopback only, no tailnet door).
-- Kuma monitor: none for sideclaw itself — the mini heartbeat (dotfiles
+- Kuma monitor: none for agent-gateway itself — the mini heartbeat (dotfiles
   devhost-health) reads `/api/jobs/health`.
-- OTel `service.name`: none — sideclaw emits no OTel; structured logs are NDJSON
-  in `~/Library/Logs/sideclaw.jsonl` (`.claude/rules/logs.md`, `docs/logging.md`).
-- `make logs` — last 100 lines of `sideclaw.err` and `sideclaw.log`, last 50 of
-  `sideclaw.jsonl`, then exits.
+- OTel `service.name`: none — agent-gateway emits no OTel; structured logs are NDJSON
+  in `~/Library/Logs/agent-gateway.jsonl` (`.claude/rules/logs.md`, `docs/logging.md`).
+- `make logs` — last 100 lines of `agent-gateway.err` and `agent-gateway.log`, last 50 of
+  `agent-gateway.jsonl`, then exits.
 
 ## Gotchas
 
@@ -100,13 +110,13 @@ Full forensic story (why BTM denies this specific label/executable):
 - **Logs live in `~/Library/Logs`, never `/tmp`** (§Deploy).
 - **No tailnet door, deliberately** — the job API has no auth; keep the
   `exclude sideclaw` in `~/.config/caddy-tailnet.ports` (§Architecture).
-- **Label `com.jkrumm.sideclaw-server` + the `scripts/sideclaw-start.sh` wrapper are
+- **Label `com.jkrumm.agent-gateway` + the `scripts/agent-gateway-start.sh` wrapper are
   macOS BTM workarounds** — don't "simplify" them (§Deploy).
 - **Edit the tracked plist, never the live one** — `make install-agent` overwrites it.
 
 ## MCP Server
 
-sideclaw exposes workflow tools (`check`, `review`, `dispatch`, `overview`,
+agent-gateway exposes workflow tools (`check`, `review`, `dispatch`, `overview`,
 `narrative`, `triage`, `otel`) plus the synchronous multimodal tools (`read_image`,
 `read_drawing`, `excalidraw_diagram`) plus the job-polling tools
 (`job_status`, `job_wait`) as an MCP server — a **separate process** from the
@@ -132,16 +142,16 @@ Skill-prompt and handler-logic edits need only `make reload`.
 
 ### CLI — the same jobs, without an MCP client
 
-`bin/sideclaw.ts` (`make install-cli` → `~/.local/bin/sideclaw`) is a plain
+`bin/agw.ts` (`make install-cli` → `~/.local/bin/agw`) is a plain
 HTTP client of the routes below — **no MCP layer**, so OpenCode, Codex, a
 shell, a Makefile or cron can drive the same work Claude Code drives through
 MCP:
 
 ```bash
-sideclaw dispatch --repo warden --tier implement --workspace in-place 'the brief'
-sideclaw check --repo sideclaw          # submit + wait, progress on stderr
-sideclaw review --pr 42 --json          # stdout carries ONLY the result JSON
-sideclaw jobs --running · status|wait|cancel <jobId> · routing · policy · health
+agw dispatch --repo warden --tier implement --workspace in-place 'the brief'
+agw check --repo agent-gateway          # submit + wait, progress on stderr
+agw review --pr 42 --json          # stdout carries ONLY the result JSON
+agw jobs --running · status|wait|cancel <jobId> · routing · policy · health
 ```
 
 `--no-wait` prints the jobId and exits; `--json` makes stdout machine-readable
@@ -161,7 +171,7 @@ Instead:
 1. The MCP tool **submits a job** to the always-on HTTP server
    (`POST /api/jobs`) and returns `{ jobId, status }` immediately.
 2. The HTTP server (LaunchAgent, durable) runs the job in the background and
-   persists state to **bun:sqlite** (`~/.local/share/sideclaw/jobs.db`), not
+   persists state to **bun:sqlite** (`~/.local/share/agent-gateway/jobs.db`), not
    `/tmp` for the same sweep reason as the logs (`server/jobs/store.ts`). The
    server binds **`127.0.0.1:7705` only** — every consumer (herdr pane,
    Hermes, the MCP child, `fetch_usage.py`, devhost-health) is local and the
@@ -216,7 +226,7 @@ out first so that bootstrap reliably takes, waits for the old PID to
 actually exit before copying the plist and bootstrapping, and now fails
 loudly — rather than reporting success unconditionally — if the new
 instance never comes up on `:7705`) does. A **global concurrency
-cap** (`SIDECLAW_JOB_CONCURRENCY`, default 3) queues excess submissions as
+cap** (`AGENT_GATEWAY_JOB_CONCURRENCY`, default 3) queues excess submissions as
 `pending` so parallel agents can't trip the IU unified endpoint's rate
 limits — while draining, that queue backs up too, which `GET
 /api/jobs/health`'s `draining: true` flag distinguishes from a wedged queue.
@@ -230,7 +240,7 @@ too, so per the MCP-schema-change rule above, an already-connected client needs
 an `/mcp` reconnect (or session restart) before it can poll a cancelled job
 without its Zod validation silently stripping the field.
 
-Job lifecycle events log to `~/Library/Logs/sideclaw.jsonl` (`job.create` /
+Job lifecycle events log to `~/Library/Logs/agent-gateway.jsonl` (`job.create` /
 `job.start` / `job.done` / `job.fail` / `job.cancelled` / `job.recover` /
 `job.requeue` / `job.shutdown_abandoned`). Inspect the queue:
 `curl -s localhost:7705/api/jobs | jq`.
@@ -262,7 +272,7 @@ agent overview rendered by Hermes, an Argo dashboard, a brain page and a
 herdr pane. `?color=1`/`?ansi=1` and `?cols=N` (40–200, default 110) support
 the herdr phone-width pane. `humanQueue` (top-level) surfaces pending
 `ask-human.sh` requests, never fed into the LLM prompt. `state` (`needs_you >
-working > stale > idle > done > unknown`, `SIDECLAW_AGENT_STALE_HOURS`
+working > stale > idle > done > unknown`, `AGENT_GATEWAY_AGENT_STALE_HOURS`
 default 24) is the only field consumers should branch on. Full merge/tail-read
 mechanics: `docs/agent-overview-internals.md`.
 
@@ -304,17 +314,17 @@ Per-angle review routes `review_angle_{senior_dev,typescript,frontend,qa}`:
 `senior-dev`, `typescript` and `qa` default to the cheap OpenCode route (the
 Wave-4 measured A/B), `frontend` and every angle without its own key keep the
 `review` route. Override via
-`SIDECLAW_MODEL_`/`SIDECLAW_HARNESS_`/`SIDECLAW_VARIANT_REVIEW_ANGLE_<NAME>` (an
+`AGENT_GATEWAY_MODEL_`/`AGENT_GATEWAY_HARNESS_`/`AGENT_GATEWAY_VARIANT_REVIEW_ANGLE_<NAME>` (an
 opencode angle needs both the MODEL and HARNESS overrides; pinning one back to
-`review` needs the model override plus `SIDECLAW_BACKEND_=max`) — see
+`review` needs the model override plus `AGENT_GATEWAY_BACKEND_=max`) — see
 `docs/routing-and-quota.md` §Review-angle A/B (Wave 4).
 
 A third OpenCode route, `dispatch_implement_escalation`, serves attempt-3+ retries of an
 implement episode (model in `GET /api/routing`); it carries no Max fallback, so the caller
 retries instead.
 
-Live table: **`GET /api/routing`**. Overrides: `SIDECLAW_MODEL_<TOOL>=<id>`,
-`SIDECLAW_BACKEND_<TOOL>=iu|max`, `SIDECLAW_THINKING_TOKENS_<TOOL>=<n>` (read
+Live table: **`GET /api/routing`**. Overrides: `AGENT_GATEWAY_MODEL_<TOOL>=<id>`,
+`AGENT_GATEWAY_BACKEND_<TOOL>=iu|max`, `AGENT_GATEWAY_THINKING_TOKENS_<TOOL>=<n>` (read
 once at module load → `make reload`). Full rationale — the tiers, the
 reactive fallback, why the proactive quota-ceiling pre-check was removed
 2026-09-08 and must not return: `brain/wiki/engineering/model-routing.md`.
@@ -357,9 +367,9 @@ harness back to `claude`, and an opencode-only id (the OpenAI-route models) with
 carries two providers over the same IU OpenAI base — `iu-chat`
 (`@ai-sdk/openai-compatible`) and `iu-responses` (`@ai-sdk/openai`, GPT ids
 only) — generated from the registry.
-Overrides: `SIDECLAW_HARNESS_<TOOL>=claude|opencode`, `SIDECLAW_VARIANT_<TOOL>=<v>`
-(a bare `SIDECLAW_HARNESS_DISPATCH=claude` is refused on its own — pair it
-with a `SIDECLAW_MODEL_DISPATCH` override naming a Claude id). A fallback
+Overrides: `AGENT_GATEWAY_HARNESS_<TOOL>=claude|opencode`, `AGENT_GATEWAY_VARIANT_<TOOL>=<v>`
+(a bare `AGENT_GATEWAY_HARNESS_DISPATCH=claude` is refused on its own — pair it
+with a `AGENT_GATEWAY_MODEL_DISPATCH` override naming a Claude id). A fallback
 attempt (the `iu`→`max` reverse lane) always runs `claude -p` regardless of
 the primary's harness — Max only ever serves a Claude id. Implementation:
 `server/mcp/opencode-runner.ts` (argv/config/env builders + the NDJSON event
@@ -394,7 +404,7 @@ Two constraints carried over regardless of backend:
 
 ### Triage — single-shot, no worker session
 
-`triage` (`server/jobs/handlers/triage.ts`, MCP tool + `sideclaw triage
+`triage` (`server/jobs/handlers/triage.ts`, MCP tool + `agw triage
 --prompt-file F --schema-file F`) is one tool-less completion, not a session:
 `singleShotJson` (`server/lib/single-shot.ts`) calls `textComplete` over the IU
 OpenAI transport on route `triage` (`transport: "iu-openai"`, the cheap IU model,
@@ -457,7 +467,7 @@ pinned to the fetched tip and the existing open PR is updated (`pr_updated`), no
 Every implement push first rebases onto a freshly fetched default branch (fetch must
 succeed); a conflict aborts, bundles the commits into the salvage dir and returns
 `conflict` — the caller re-dispatches, nothing is hand-resolved. **`update_pr {cwd, pr}`**
-(job tool, MCP tool, `sideclaw update-pr --pr N`) is the same rebase + checks + lease push
+(job tool, MCP tool, `agw update-pr --pr N`) is the same rebase + checks + lease push
 for an open same-repo `dispatch/*` PR targeting the default branch → `{status:
 updated|up_to_date|conflict, headSha, checks}`; checks are skipped when nothing moved and a
 red result is still pushed (the merge train reads `checks`). **One implement-class episode
@@ -471,13 +481,13 @@ pin moves with it.
 **`sensitive`** opens `investigate` for secret-bearing repos (`dotfiles-private`,
 `homelab-private`) — refused outright at any other tier, before a worktree
 exists, since a filed issue or pushed branch has no safe artifact path there.
-sideclaw derives sensitivity itself from the repo policy below and ORs it with
+agent-gateway derives sensitivity itself from the repo policy below and ORs it with
 whatever the caller still declares — a caller may opt a policy-neutral repo
 into the scan, but can no longer opt a policy-marked one out of it by omitting
 the field. The verdict is scanned (`assertSensitiveTierAllowed` +
 `applySensitiveScan`, `dispatch.ts`) before it leaves the machine; a match
 withholds `summary`/`verdict`/`evidence` behind a notice and keeps the full
-text in an owner-only `~/.local/state/sideclaw/private-verdicts/<jobId>.md`
+text in an owner-only `~/.local/state/agent-gateway/private-verdicts/<jobId>.md`
 (mode `0600`) instead. `readOnly: true` removes Edit/Write but **not**
 `Bash`, and the brief is attacker-influenced — this scan is the actual
 boundary for a sensitive episode, not the permission profile.
@@ -489,10 +499,10 @@ boundary for a sensitive episode, not the permission profile.
   repo directly under a configured root, at or under that repo's tier
   ceiling. Only `dotfiles-private`/`homelab-private` (sensitive) and
   `brain` default below `implement`; every other repo (`hermes-agent` included),
-  including `sideclaw`, `warden` and `dotfiles` themselves, is
-  `implement`-reachable by default. `SIDECLAW_DISPATCH_CEILINGS`/`_SENSITIVE`
+  including `agent-gateway`, `warden` and `dotfiles` themselves, is
+  `implement`-reachable by default. `AGENT_GATEWAY_DISPATCH_CEILINGS`/`_SENSITIVE`
   can only narrow, never widen, any repo's rule (marking a repo sensitive
-  clamps its ceiling with it). **`SIDECLAW_DISPATCH_ROOTS` is the exception
+  clamps its ceiling with it). **`AGENT_GATEWAY_DISPATCH_ROOTS` is the exception
   — it REPLACES the roots rather than narrowing them**, so a new tree there
   is dispatch-reachable at the permissive default. Checked in both
   `server/routes/jobs.ts` (at submit) and `runDispatch` (belt and suspenders
@@ -556,7 +566,7 @@ picked by a same-range bake-off, rationale in `routing.ts`; per-token, off Max; 
 since it's an external CLI, not a `runSession` worker). Fails soft to a
 one-line skip/fail block the synthesizer reads like an unavailable
 fallow/CodeRabbit — never a gate, never thrown into the review. Disable with
-`SIDECLAW_REVIEW_OCR=0`. The IU key is handed to the third-party `ocr` binary
+`AGENT_GATEWAY_REVIEW_OCR=0`. The IU key is handed to the third-party `ocr` binary
 via env — accepted because its agent tools are read-only (file read/find/
 search via `git`, no shell tool) and it reads LLM config only from env/
 `~/.opencodereview`, never the repo; a repo's own `.opencodereview/rule.json`
@@ -585,8 +595,8 @@ the 60s SDK timeout. Billed IU per-token, zero Max.
   derived from the Anthropic base (`/anthropic` → `/openai/v1`).
 - Model defaults to a fast vision model (see `GET /api/routing`) — a non-EU vendor, fine for
   git-committed/non-sensitive content, not PII — overridable via
-  `SIDECLAW_MODEL_READ_IMAGE`/`SIDECLAW_MODEL_READ_DRAWING` like every other
-  routed tool (`server/lib/routing.ts`); a `SIDECLAW_BACKEND_*` override is
+  `AGENT_GATEWAY_MODEL_READ_IMAGE`/`AGENT_GATEWAY_MODEL_READ_DRAWING` like every other
+  routed tool (`server/lib/routing.ts`); a `AGENT_GATEWAY_BACKEND_*` override is
   refused instead, since these run over the fixed `iu-openai` transport.
 - `read_image` — vision read of any image (SVGs rasterized first via headless
   Chrome, `server/lib/chrome.ts`). Sampled at the provider's default
@@ -606,11 +616,11 @@ the 60s SDK timeout. Billed IU per-token, zero Max.
 ```bash
 # Register at user scope — handled by `make setup` in ~/SourceRoot/dotfiles.
 # Manual fallback:
-claude mcp add --scope user sideclaw -- bun run "$HOME/SourceRoot/sideclaw/server/mcp.ts"
+claude mcp add --scope user agent-gateway -- bun run "$HOME/SourceRoot/agent-gateway/server/mcp.ts"
 
 # Structured logs (both HTTP + MCP processes write here)
-tail -f ~/Library/Logs/sideclaw.jsonl | jq .
-tail -f ~/Library/Logs/sideclaw.jsonl | jq 'select(.source == "mcp")'
+tail -f ~/Library/Logs/agent-gateway.jsonl | jq .
+tail -f ~/Library/Logs/agent-gateway.jsonl | jq 'select(.source == "mcp")'
 ```
 
 Inner sessions spawned by MCP tools use `claude -p` via `session-runner.ts`,

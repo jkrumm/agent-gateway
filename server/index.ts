@@ -1,3 +1,5 @@
+import "./lib/env-compat.ts";
+import { warnLegacyEnv } from "./lib/env-compat.ts";
 import { Elysia } from "elysia";
 import { appLogger as logger, cleanupLogFile } from "./logger.ts";
 import { usageRoutes } from "./routes/usage";
@@ -37,6 +39,7 @@ import {
 // since every job (check/review/dispatch/overview/narrative) actually runs its worker sessions
 // in THIS process, not the MCP one.
 setProcessKind("app");
+warnLegacyEnv(logger);
 logRoutingOverrides(logger);
 logStaleQuotaEnvVars(logger);
 logDispatchPolicy(logger);
@@ -89,7 +92,7 @@ const app = new Elysia()
 // "no episode of this process is in flight yet", which the previous unawaited fire-and-forget
 // no longer guaranteed once job promotion could win the race. A dispatch episode killed with
 // the process never runs its teardown, and what it leaves behind is not confined to
-// sideclaw's own state dir — the worktree is registered, and its branch created, inside the
+// agent-gateway's own state dir — the worktree is registered, and its branch created, inside the
 // LIVE repo.
 //
 // `protectedWorktreePaths()` is read BEFORE `initJobStore()` below runs its `recover()` —
@@ -123,12 +126,12 @@ const PORT = parseInt(process.env.PORT ?? "7705");
 // per session, fetch_usage.py's POST, devhost-health — and nothing here carries auth of
 // its own, so a tailnet-reachable bind would be an unauthenticated job submitter one ACL
 // grant away. The tailnet door is Caddy's `sideclaw.mini.jkrumm.com` block, on purpose.
-const HOSTNAME = process.env.SIDECLAW_HOST ?? "127.0.0.1";
+const HOSTNAME = process.env.AGENT_GATEWAY_HOST ?? "127.0.0.1";
 app.listen({ hostname: HOSTNAME, port: PORT });
 
 logger.info(
   { event: "app.startup", host: HOSTNAME, port: PORT },
-  `sideclaw running on ${HOSTNAME}:${PORT}`,
+  `agent-gateway running on ${HOSTNAME}:${PORT}`,
 );
 
 // One drain state machine, two triggers, each with its own window (see lib/shutdown.ts's

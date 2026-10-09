@@ -485,13 +485,13 @@ async function fetchReviewHead(
   onRefCreated: () => void,
 ): Promise<string> {
   const remoteRef = ref.pr != null ? `pull/${ref.pr}/head` : `refs/heads/${ref.branch}`;
-  const localRef = `refs/sideclaw-review/${jobKey}`;
+  const localRef = `refs/agent-gateway-review/${jobKey}`;
   const fetched = await shell(`git fetch --quiet origin ${remoteRef}:${localRef}`, cwd, 120_000);
   if (!fetched.ok) {
     const what = ref.pr != null ? `PR #${ref.pr}` : `branch ${ref.branch}`;
     throw new Error(`could not fetch ${what} from origin: ${fetched.stdout.trim() || "no output"}`);
   }
-  // The fetch above is what actually creates `refs/sideclaw-review/<jobKey>` in the CALLER's
+  // The fetch above is what actually creates `refs/agent-gateway-review/<jobKey>` in the CALLER's
   // live repo. Everything after this point — the rev-parse below, `resolveReviewBase`,
   // `createReadWorktree` — can still throw, but the ref already exists by now and needs
   // cleanup regardless. Told to the caller here, at the exact moment it becomes true, rather
@@ -510,7 +510,7 @@ async function fetchReviewHead(
  *  that already ran. Called unconditionally in ref mode, whether or not the fetch itself
  *  succeeded, since a partial fetch can still have written the ref before a later step threw. */
 async function cleanupReviewFetchRef(cwd: string, jobKey: string): Promise<void> {
-  await shell(`git update-ref -d refs/sideclaw-review/${jobKey}`, cwd);
+  await shell(`git update-ref -d refs/agent-gateway-review/${jobKey}`, cwd);
 }
 
 /** Resolve the repo's authoritative default-branch OID — the diff base for a `pr`/`branch`
@@ -893,7 +893,7 @@ export async function runReview(
   const jobKey = jobId ?? randomUUID();
   let worktree: DispatchWorktree | undefined;
   // Tracked independently of `worktree`, not inferred from it — the fetch ref
-  // (`refs/sideclaw-review/<jobKey>`) can exist in the caller's live repo well before
+  // (`refs/agent-gateway-review/<jobKey>`) can exist in the caller's live repo well before
   // `worktree` is ever assigned (`resolveReviewBase`/`createReadWorktree` both run after the
   // fetch and can each throw), so gating cleanup on `worktree` used to leak it permanently on
   // exactly that path. Set the instant the fetch actually lands the ref, by
@@ -1091,7 +1091,7 @@ export async function runReview(
     // direct fetch to the IU OpenAI transport — different model family, no
     // session-runner, no claude -p, no contention with ANGLE_CONCURRENCY.
     const adversaryPath = join(SKILL_DIR, "adversary.md");
-    const adversaryEnabled = process.env.SIDECLAW_REVIEW_ADVERSARY !== "false";
+    const adversaryEnabled = process.env.AGENT_GATEWAY_REVIEW_ADVERSARY !== "false";
     const adversaryPromise: Promise<AngleResult | null> = adversaryEnabled
       ? runAdversaryAngle({
           diff: diffResult.stdout,

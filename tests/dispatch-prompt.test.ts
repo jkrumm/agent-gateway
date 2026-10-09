@@ -354,7 +354,7 @@ describe("WORKER_OUTPUT", () => {
   });
 
   test("the worker cannot set the handler's own markers", () => {
-    // `degraded` separates "sideclaw failed" from a genuine needs-human verdict. A field the
+    // `degraded` separates "agent-gateway failed" from a genuine needs-human verdict. A field the
     // worker can write is not a marker — it is a suggestion, and an injected brief could use
     // it to disguise a real failure or fake one.
     for (const tier of TIER_NAMES) {
@@ -563,19 +563,19 @@ describe("applySensitiveScan", () => {
   });
 
   describe("filesystem permissions, created from scratch", () => {
-    const savedRoot = process.env.SIDECLAW_PRIVATE_VERDICTS_ROOT;
+    const savedRoot = process.env.AGENT_GATEWAY_PRIVATE_VERDICTS_ROOT;
 
     afterEach(() => {
-      if (savedRoot === undefined) delete process.env.SIDECLAW_PRIVATE_VERDICTS_ROOT;
-      else process.env.SIDECLAW_PRIVATE_VERDICTS_ROOT = savedRoot;
+      if (savedRoot === undefined) delete process.env.AGENT_GATEWAY_PRIVATE_VERDICTS_ROOT;
+      else process.env.AGENT_GATEWAY_PRIVATE_VERDICTS_ROOT = savedRoot;
     });
 
     test("directory 0700, file 0600, neither pre-existing", () => {
       const freshRoot = join(
-        mkdtempSync(join(tmpdir(), "sideclaw-test-pv-fresh-")),
+        mkdtempSync(join(tmpdir(), "agent-gateway-test-pv-fresh-")),
         "private-verdicts",
       );
-      process.env.SIDECLAW_PRIVATE_VERDICTS_ROOT = freshRoot;
+      process.env.AGENT_GATEWAY_PRIVATE_VERDICTS_ROOT = freshRoot;
       const jobId = "job-fresh";
       const out = applySensitiveScan(
         { ...CLEAN_VERDICT, verdict: `${CLEAN_VERDICT.verdict} op://mini/github/token` },

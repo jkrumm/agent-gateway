@@ -63,7 +63,7 @@ const GITHUB_TOKEN_REF = "op://mini/github/token";
 /**
  * Patterns that must never reach a GitHub issue or pull request body.
  *
- * This is new blast radius that no earlier sideclaw tool had: `check` and `review` return
+ * This is new blast radius that no earlier agent-gateway tool had: `check` and `review` return
  * text to one caller, whereas an artifact is durable, indexed and — for most repos in the
  * allowlist — world-readable. The text being published is authored by a session whose
  * context holds an untrusted brief AND whatever it read inside the repo, and the worker's
@@ -121,16 +121,16 @@ function assertNoSecrets(text: string, what: string): void {
   }
 }
 
-/** Base of every sideclaw state directory that must outlive a process restart and must never
+/** Base of every agent-gateway state directory that must outlive a process restart and must never
  *  live in `/tmp` (macOS sweeps untouched `/tmp` files after 3+ days — the same reasoning as
  *  the logs). Worktrees, salvage bundles and verdicts withheld by the sensitive-dispatch
  *  secret scan (`writeWithheldVerdict`, below) all live under this one root. */
-function sideclawStateRoot(): string {
-  return join(homedir(), ".local", "state", "sideclaw");
+function agentGatewayStateRoot(): string {
+  return join(homedir(), ".local", "state", "agent-gateway");
 }
 
 /**
- * Worktrees live outside every repo, under sideclaw's own state dir. Inside the repo they
+ * Worktrees live outside every repo, under agent-gateway's own state dir. Inside the repo they
  * would show up in the live checkout's `git status` as an untracked directory, which is
  * precisely the "the live checkout is untouched" property the isolation exists to provide.
  *
@@ -141,7 +141,7 @@ function sideclawStateRoot(): string {
  * worktree. The env var is never set in production.
  */
 function worktreeRoot(): string {
-  return process.env.SIDECLAW_WORKTREE_ROOT ?? join(sideclawStateRoot(), "worktrees");
+  return process.env.AGENT_GATEWAY_WORKTREE_ROOT ?? join(agentGatewayStateRoot(), "worktrees");
 }
 
 /**
@@ -265,7 +265,7 @@ let cachedToken: string | undefined;
  * so preferring it means one credential covers the whole operation instead of the branch and
  * the pull request arriving under different identities.
  *
- * `GITHUB_TOKEN` from sideclaw's `.env` is a documented fallback, not the primary. It is a
+ * `GITHUB_TOKEN` from agent-gateway's `.env` is a documented fallback, not the primary. It is a
  * `gho_` OAuth token, which is the same class this fleet retired from the git credential
  * path on 2026-07-26 for expiring silently — a token that stops working without saying so is
  * a bad thing to depend on for an unattended episode, and the ordering here is what keeps it
@@ -464,7 +464,7 @@ export async function resolveRepoIdentity(cwd: string): Promise<RepoIdentity> {
 /**
  * GitLab artifact calls go through `glab` rather than raw REST: glab is already
  * authenticated on this host, so no second credential path is introduced — the token REST
- * would need exists only inside glab's own config, and reading it from sideclaw would be
+ * would need exists only inside glab's own config, and reading it from agent-gateway would be
  * exactly the credential reach this file otherwise avoids. `--hostname gitlab.com` is
  * pinned because `parseGitlabRemote` only accepts gitlab.com, so glab's cwd-based host
  * sniffing (it reads the git remote of the directory it runs in) never gets a vote.
@@ -1313,11 +1313,11 @@ async function discardWorktree(cwd: string, path: string, branch: string): Promi
 
 /** Salvage bundles live outside every repo, alongside the worktree root but never inside it —
  *  same reasoning as `worktreeRoot()`: read per call so the test suite can point it at a temp
- *  dir without touching the real one. `~/.local/state/sideclaw/salvage/`, never `/tmp` — macOS
+ *  dir without touching the real one. `~/.local/state/agent-gateway/salvage/`, never `/tmp` — macOS
  *  sweeps untouched `/tmp` files after 3+ days (`.claude/rules/logs.md`), which is exactly the
  *  wrong lifetime for the one copy of a crashed episode's work. */
 function salvageRoot(): string {
-  return process.env.SIDECLAW_SALVAGE_ROOT ?? join(sideclawStateRoot(), "salvage");
+  return process.env.AGENT_GATEWAY_SALVAGE_ROOT ?? join(agentGatewayStateRoot(), "salvage");
 }
 
 /**
@@ -1327,7 +1327,8 @@ function salvageRoot(): string {
  */
 export function privateVerdictsRoot(): string {
   return (
-    process.env.SIDECLAW_PRIVATE_VERDICTS_ROOT ?? join(sideclawStateRoot(), "private-verdicts")
+    process.env.AGENT_GATEWAY_PRIVATE_VERDICTS_ROOT ??
+    join(agentGatewayStateRoot(), "private-verdicts")
   );
 }
 
@@ -1336,7 +1337,7 @@ export function privateVerdictsRoot(): string {
  * matched the secret scanner, before the sanitized stand-in replaces it in what the caller
  * receives.
  *
- * This is the one place sideclaw deliberately writes text that may carry a live credential to
+ * This is the one place agent-gateway deliberately writes text that may carry a live credential to
  * disk, so filesystem permissions are the actual boundary here, not a convention: the
  * directory is created `0700` and the file `0600` — owner-only, every time, since `mkdirSync`
  * only applies `mode` to directories it creates and this call always creates a fresh,
@@ -1624,7 +1625,7 @@ export function opencodeRepoConfigPresent(root: string): string[] {
  * a per-run config written to a temp file and pointed at by `OPENCODE_CONFIG` would have
  * LOST to a malicious repo config, not won. `OPENCODE_CONFIG_CONTENT` (the JSON itself, as
  * an env value — opencode-runner.ts's `buildOpencodeEnv`) is the one that wins over the repo
- * file, which is why sideclaw passes the config that way and never via `OPENCODE_CONFIG` at
+ * file, which is why agent-gateway passes the config that way and never via `OPENCODE_CONFIG` at
  * all. This strip is still real defense in depth on top of that, not redundant with it: it
  * also removes `.opencode/`, whose plugin code executes regardless of which config wins.
  *

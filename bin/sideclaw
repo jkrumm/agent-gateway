@@ -1,0 +1,5 @@
+#!/bin/sh
+# Deprecated name for `agw` (the sideclaw → agent-gateway rename, 2026-10-09). Kept for one
+# deprecation window so existing callers keep working; delete once nothing calls `sideclaw`.
+echo "sideclaw: deprecated, use 'agw'" >&2
+exec "$(dirname "$(readlink -f "$0")")/agw.ts" "$@"

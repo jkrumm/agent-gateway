@@ -7,9 +7,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-process.env.SIDECLAW_IU_USAGE_LOG = join(
+process.env.AGENT_GATEWAY_IU_USAGE_LOG = join(
   tmpdir(),
-  `sideclaw-review-router-test-${Date.now()}.jsonl`,
+  `agent-gateway-review-router-test-${Date.now()}.jsonl`,
 );
 process.env.IU_API_KEY = "test-key";
 process.env.IU_BASE_URL = "https://iu.example.com/anthropic";

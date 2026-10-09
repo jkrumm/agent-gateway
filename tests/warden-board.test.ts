@@ -28,7 +28,7 @@ function rawItem(overrides: Record<string, unknown> = {}): Record<string, unknow
     state: "needs_decision",
     state_deadline: "2026-09-18T00:00:00+00:00",
     max_tier: "implement",
-    title: "watchdog: sideclaw dispatch stuck",
+    title: "watchdog: agent-gateway dispatch stuck",
     note: null,
     pr_url: null,
     dispatch_job: "j-abc",
@@ -108,7 +108,7 @@ describe("fetchWardenBoard — ok", () => {
       origin: "alert",
       repo: "warden",
       state: "needs_decision",
-      title: "watchdog: sideclaw dispatch stuck",
+      title: "watchdog: agent-gateway dispatch stuck",
       note: null,
       prUrl: null,
       updatedAt: "2026-09-11T00:00:00+00:00",
@@ -169,7 +169,7 @@ describe("fetchWardenBoard — ok", () => {
     });
     expect(lines).toHaveLength(2);
     expect(lines[1]).toContain("needs_decision —");
-    expect(lines[1]).toContain("watchdog: sideclaw dispatch stuck");
+    expect(lines[1]).toContain("watchdog: agent-gateway dispatch stuck");
   });
 
   test("inFlightJob prefers validation_job, then implement_job, then dispatch_job", async () => {

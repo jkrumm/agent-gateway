@@ -191,8 +191,8 @@ export function ocrSummaryToUsage(summary: OcrSummary | undefined): {
 const OCR_SESSIONS_ROOT = join(homedir(), ".opencodereview", "sessions");
 
 /** ocr's session-log directory slug for a repo path: the absolute path with every `/` turned
- *  into `-`, then the resulting leading `-` dropped (e.g. `/Users/jkrumm/SourceRoot/sideclaw`
- *  -> `Users-jkrumm-SourceRoot-sideclaw`). In ref/PR/branch mode `--repo` is the WORKTREE
+ *  into `-`, then the resulting leading `-` dropped (e.g. `/Users/jkrumm/SourceRoot/agent-gateway`
+ *  -> `Users-jkrumm-SourceRoot-agent-gateway`). In ref/PR/branch mode `--repo` is the WORKTREE
  *  path, not the original repo — callers must pass the same path they gave `ocr --repo`. */
 export function ocrSessionSlug(repoPath: string): string {
   return repoPath.replaceAll("/", "-").replace(/^-/, "");
@@ -221,7 +221,7 @@ function numField(v: unknown): number {
 /** Pure fold over one ocr session-log file's lines (already split on `\n`) — sums every
  *  `{"type":"llm_response"}` line's `usage`. Tolerant of blank lines, unrelated event types
  *  and unparseable/malformed JSON (skipped, never throws) — this reads a 3rd-party log after
- *  a failure, not a shape sideclaw controls. */
+ *  a failure, not a shape agent-gateway controls. */
 export function sumOcrSessionUsage(lines: string[]): OcrSessionUsageSum {
   const sum = { ...ZERO_OCR_SESSION_USAGE };
   for (const line of lines) {
@@ -430,7 +430,7 @@ export interface RunOcrReviewResult {
 
 /** Run `ocr review` as one more phase-1 review input, alongside fallow/CodeRabbit — NEVER
  *  throws, so a caller can always treat the resolved `{ block, ran }` as ready for the
- *  synthesis prompt. Skipped (logged) when `SIDECLAW_REVIEW_OCR=0`, `ocr` is not on PATH,
+ *  synthesis prompt. Skipped (logged) when `AGENT_GATEWAY_REVIEW_OCR=0`, `ocr` is not on PATH,
  *  the scope has no OCR-shaped mode (`ocrModeArgs` → `null`), or IU credentials cannot be
  *  resolved. */
 export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrReviewResult> {
@@ -465,12 +465,12 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
   };
 
   try {
-    if (process.env.SIDECLAW_REVIEW_OCR === "0") {
+    if (process.env.AGENT_GATEWAY_REVIEW_OCR === "0") {
       logger.info(
         { event: "review.ocr", tool: "review_ocr", project: opts.cwd },
-        "ocr skipped — SIDECLAW_REVIEW_OCR=0",
+        "ocr skipped — AGENT_GATEWAY_REVIEW_OCR=0",
       );
-      return { block: skippedBlock("SIDECLAW_REVIEW_OCR=0"), ran: false };
+      return { block: skippedBlock("AGENT_GATEWAY_REVIEW_OCR=0"), ran: false };
     }
 
     const ocrBin = Bun.which("ocr");
@@ -514,7 +514,7 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
     // their own 0700 directory rather than sitting next to every other process's scratch
     // files. `mkdtemp`'s own POSIX `mkdtemp(3)` already creates at 0700; the `chmod` is
     // belt-and-braces, not a correction.
-    tmpDir = await mkdtemp(join(tmpdir(), "sideclaw-ocr-"));
+    tmpDir = await mkdtemp(join(tmpdir(), "agent-gateway-ocr-"));
     await chmod(tmpDir, 0o700);
     const outFile = join(tmpDir, "result.json");
     const bgFile = opts.context ? join(tmpDir, "background.md") : undefined;

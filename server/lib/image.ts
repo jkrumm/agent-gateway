@@ -77,8 +77,8 @@ export async function rasterizeSvg(svgPath: string): Promise<string> {
   const { width, height } = capDimensions(svgDimensions(svg));
 
   const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const htmlPath = join(tmpdir(), `sideclaw-raster-${stamp}.html`);
-  const pngPath = join(tmpdir(), `sideclaw-raster-${stamp}.png`);
+  const htmlPath = join(tmpdir(), `agent-gateway-raster-${stamp}.html`);
+  const pngPath = join(tmpdir(), `agent-gateway-raster-${stamp}.png`);
 
   const html =
     `<!doctype html><html><head><meta charset="utf-8">` +

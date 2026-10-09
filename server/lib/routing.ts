@@ -35,30 +35,30 @@
 // IU OpenAI transport call consuming only `.model`. `transport: "external-iu"` marks `review_ocr`: an external CLI (`ocr`,
 // alibaba/open-code-review) that talks to IU's Anthropic transport itself
 // (`server/lib/ocr.ts` sets `OCR_LLM_URL`/`OCR_LLM_TOKEN` from `getIuConfig()`), so it too
-// only ever consumes `.model` — there is no `runSession`/backend switch for a CLI sideclaw
+// only ever consumes `.model` — there is no `runSession`/backend switch for a CLI agent-gateway
 // doesn't control the auth wiring of. Both transports' `backend`/`fallback` are informational
-// defaults only; a `SIDECLAW_BACKEND_<TOOL>` override on either is refused rather than
+// defaults only; a `AGENT_GATEWAY_BACKEND_<TOOL>` override on either is refused rather than
 // silently accepted and displayed with no effect.
 //
 // Env overrides, read once at module load (a flip needs `make reload`; the MCP process
-// loads sideclaw/.env itself — see server/lib/load-env.ts):
-//   SIDECLAW_MODEL_<TOOL>=<id>             e.g. SIDECLAW_MODEL_CHECK=claude-haiku-4-5
-//   SIDECLAW_BACKEND_<TOOL>=iu|max         e.g. SIDECLAW_BACKEND_REVIEW=iu
-//   SIDECLAW_THINKING_TOKENS_<TOOL>=<n>    e.g. SIDECLAW_THINKING_TOKENS_CHECK=4096
-//   SIDECLAW_HARNESS_<TOOL>=claude|opencode e.g. SIDECLAW_HARNESS_DISPATCH=claude, PAIRED
-//     with SIDECLAW_MODEL_DISPATCH=claude-sonnet-5[1m] — dispatch's default model
+// loads agent-gateway/.env itself — see server/lib/load-env.ts):
+//   AGENT_GATEWAY_MODEL_<TOOL>=<id>             e.g. AGENT_GATEWAY_MODEL_CHECK=claude-haiku-4-5
+//   AGENT_GATEWAY_BACKEND_<TOOL>=iu|max         e.g. AGENT_GATEWAY_BACKEND_REVIEW=iu
+//   AGENT_GATEWAY_THINKING_TOKENS_<TOOL>=<n>    e.g. AGENT_GATEWAY_THINKING_TOKENS_CHECK=4096
+//   AGENT_GATEWAY_HARNESS_<TOOL>=claude|opencode e.g. AGENT_GATEWAY_HARNESS_DISPATCH=claude, PAIRED
+//     with AGENT_GATEWAY_MODEL_DISPATCH=claude-sonnet-5[1m] — dispatch's default model
 //     (deepseek-v4.1-flash) is only reachable via the opencode harness, so a bare
-//     SIDECLAW_HARNESS_DISPATCH=claude with no matching model override is refused (see the
+//     AGENT_GATEWAY_HARNESS_DISPATCH=claude with no matching model override is refused (see the
 //     cross-field validation in buildRoutingTable below)
-//   SIDECLAW_VARIANT_<TOOL>=<v>            e.g. SIDECLAW_VARIANT_DISPATCH=max
+//   AGENT_GATEWAY_VARIANT_<TOOL>=<v>            e.g. AGENT_GATEWAY_VARIANT_DISPATCH=max
 // <TOOL> is the route key upper-cased. EVERY model id — default, env override or per-job
 // override — is validated against the registry (`server/lib/models.ts`): an unregistered or
 // UNVERIFIED id is refused (default stays, reported in `overrides` with `refused`); the
 // registry's `harnesses`/`backends` also decide which (model, harness, backend) combinations
 // are reachable. A `max` override on a non-Max-servable id is refused
 // back to `iu` (logged via `overrides`) — Max never serves a gateway model. A
-// `SIDECLAW_THINKING_TOKENS_<TOOL>` that isn't a positive integer is refused the same way.
-// A `SIDECLAW_HARNESS_<TOOL>` value other than `claude`/`opencode` is refused, same as an
+// `AGENT_GATEWAY_THINKING_TOKENS_<TOOL>` that isn't a positive integer is refused the same way.
+// A `AGENT_GATEWAY_HARNESS_<TOOL>` value other than `claude`/`opencode` is refused, same as an
 // unknown backend name. Both harness/variant overrides are refused on a non-`session`
 // transport route (iu-openai, external-iu), same reasoning as the backend/thinking-token
 // overrides above — there is no `runSession` call for either to affect. AFTER every
@@ -67,8 +67,8 @@
 // (every Claude id) normalizes harness to `claude` (implied, not refused); a model with no
 // `claude` harness (deepseek-v4.1-flash, GPT ids) landing on harness `claude` is refused back
 // to the tool's own defaults (no code path through `claude -p` at all). A
-// `SIDECLAW_THINKING_TOKENS_<TOOL>` on a route whose (possibly just-normalized) harness is
-// `opencode`, or a `SIDECLAW_VARIANT_<TOOL>` on one whose harness is `claude`, is refused —
+// `AGENT_GATEWAY_THINKING_TOKENS_<TOOL>` on a route whose (possibly just-normalized) harness is
+// `opencode`, or a `AGENT_GATEWAY_VARIANT_<TOOL>` on one whose harness is `claude`, is refused —
 // each knob only exists on the OTHER harness.
 // The effective override list (applied + refused) is logged once at startup via
 // `logRoutingOverrides`.
@@ -99,7 +99,7 @@ export const ROUTED_TOOLS = [
   "review",
   // Per-angle keys for the worker angle sessions that may be re-pointed independently of
   // `review` (synthesis, architect, security and the rest stay on `review`). Suffix = the angle
-  // id with `-` → `_` (see `reviewAngleRouteKey`), so env names stay SIDECLAW_MODEL_REVIEW_ANGLE_<SUFFIX>.
+  // id with `-` → `_` (see `reviewAngleRouteKey`), so env names stay AGENT_GATEWAY_MODEL_REVIEW_ANGLE_<SUFFIX>.
   "review_angle_senior_dev",
   "review_angle_typescript",
   "review_angle_frontend",
@@ -378,7 +378,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
     const base = DEFAULT_ROUTES[tool];
     let { model, backend, thinkingTokens, harness, variant } = base;
     const key = tool.toUpperCase();
-    const modelOverride = env[`SIDECLAW_MODEL_${key}`]?.trim();
+    const modelOverride = env[`AGENT_GATEWAY_MODEL_${key}`]?.trim();
     if (modelOverride) {
       const check = validateModel(modelOverride);
       if (check.ok) {
@@ -388,7 +388,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
         overrides.push({ tool, field: "model", value: modelOverride, refused: check.reason });
       }
     }
-    const backendOverride = env[`SIDECLAW_BACKEND_${key}`]?.trim();
+    const backendOverride = env[`AGENT_GATEWAY_BACKEND_${key}`]?.trim();
     if (backendOverride) {
       if (base.transport !== "session") {
         overrides.push({
@@ -430,7 +430,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
         implied: `forced by the ${model} model override — max only serves Claude ids`,
       });
     }
-    const harnessOverride = env[`SIDECLAW_HARNESS_${key}`]?.trim();
+    const harnessOverride = env[`AGENT_GATEWAY_HARNESS_${key}`]?.trim();
     if (harnessOverride) {
       if (base.transport !== "session") {
         overrides.push({
@@ -501,7 +501,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
           value: culpritValue,
           refused:
             `${model} is reachable only via the ${entry.harnesses.join("/")} harness (${harness} ` +
-            `cannot run it) — pair SIDECLAW_HARNESS_${key}=claude with a SIDECLAW_MODEL_${key} ` +
+            `cannot run it) — pair AGENT_GATEWAY_HARNESS_${key}=claude with a AGENT_GATEWAY_MODEL_${key} ` +
             `override naming a Claude id instead`,
         });
         model = base.model;
@@ -520,7 +520,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
       }
     }
     // `variant` is an opencode-only knob: a route whose harness resolved to `claude` (a
-    // default that never had one, or an explicit SIDECLAW_HARNESS_<TOOL>=claude override
+    // default that never had one, or an explicit AGENT_GATEWAY_HARNESS_<TOOL>=claude override
     // paired with a Claude model) must not carry a stale one. Cleared silently, matching
     // the harness-normalization branch above, which drops it as a side effect too.
     if (harness !== "opencode") {
@@ -539,7 +539,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
         variant = undefined;
       }
     }
-    const thinkingOverride = env[`SIDECLAW_THINKING_TOKENS_${key}`]?.trim();
+    const thinkingOverride = env[`AGENT_GATEWAY_THINKING_TOKENS_${key}`]?.trim();
     if (thinkingOverride) {
       if (base.transport !== "session") {
         overrides.push({
@@ -556,7 +556,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
           tool,
           field: "thinkingTokens",
           value: thinkingOverride,
-          refused: `${tool} runs on the opencode harness — reasoning depth is controlled by SIDECLAW_VARIANT_${key} instead, not a thinking-token budget`,
+          refused: `${tool} runs on the opencode harness — reasoning depth is controlled by AGENT_GATEWAY_VARIANT_${key} instead, not a thinking-token budget`,
         });
       } else {
         const parsed = Number(thinkingOverride);
@@ -573,7 +573,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
         }
       }
     }
-    const variantOverride = env[`SIDECLAW_VARIANT_${key}`]?.trim();
+    const variantOverride = env[`AGENT_GATEWAY_VARIANT_${key}`]?.trim();
     if (variantOverride) {
       if (base.transport !== "session") {
         overrides.push({
@@ -813,18 +813,18 @@ export function logRoutingOverrides(
 
 // ── Stale quota env vars ────────────────────────────────────────────────────────────
 //
-// SIDECLAW_MAX_QUOTA_CEILING, SIDECLAW_MAX_WEEKLY_CEILING and
-// SIDECLAW_QUOTA_FILE_MAX_AGE_S fed the proactive Max-quota pre-check removed
+// AGENT_GATEWAY_MAX_QUOTA_CEILING, AGENT_GATEWAY_MAX_WEEKLY_CEILING and
+// AGENT_GATEWAY_QUOTA_FILE_MAX_AGE_S fed the proactive Max-quota pre-check removed
 // 2026-09-08 (see session-runner.ts's `resolveBackend` doc comment and
 // docs/routing-and-quota.md) — a real `.env` still setting one of them now gets a
 // silent no-op. `logRoutingOverrides` already surfaces a mistyped
-// `SIDECLAW_MODEL_*`/`SIDECLAW_BACKEND_*` var the same way; this applies the same
+// `AGENT_GATEWAY_MODEL_*`/`AGENT_GATEWAY_BACKEND_*` var the same way; this applies the same
 // "warn once at startup" pattern to these three so the owner learns the fallback is
 // now purely reactive instead of finding out mid-outage.
 const STALE_QUOTA_ENV_VARS = [
-  "SIDECLAW_MAX_QUOTA_CEILING",
-  "SIDECLAW_MAX_WEEKLY_CEILING",
-  "SIDECLAW_QUOTA_FILE_MAX_AGE_S",
+  "AGENT_GATEWAY_MAX_QUOTA_CEILING",
+  "AGENT_GATEWAY_MAX_WEEKLY_CEILING",
+  "AGENT_GATEWAY_QUOTA_FILE_MAX_AGE_S",
 ] as const;
 
 /** Log once at startup (`warn`) if any of the three retired quota env vars are still set.

@@ -26,10 +26,11 @@ import {
 // EXISTS rather than a drop-and-recreate — outside /tmp, since macOS's periodic
 // daily cleanup sweeps files there untouched for 3+ days, and WAL mode only
 // bumps the base file's mtime on checkpoint, not per-write. Lives in
-// ~/.local/share/sideclaw/.
+// ~/.local/share/agent-gateway/.
 
 const DB_PATH =
-  process.env.SIDECLAW_JOBS_DB ?? join(homedir(), ".local", "share", "sideclaw", "jobs.db");
+  process.env.AGENT_GATEWAY_JOBS_DB ??
+  join(homedir(), ".local", "share", "agent-gateway", "jobs.db");
 mkdirSync(dirname(DB_PATH), { recursive: true });
 
 // Global ceiling on concurrently-running jobs. Kept low: workers hit the IU
@@ -37,7 +38,7 @@ mkdirSync(dirname(DB_PATH), { recursive: true });
 // ANGLE_CONCURRENCY (3) inner sessions per job. Excess submissions wait as
 // `pending` and promote as slots free — this is admission control that stops
 // an agent firing N parallel jobs from tripping the endpoint's rate limits.
-const MAX_CONCURRENT = parseInt(process.env.SIDECLAW_JOB_CONCURRENCY ?? "3", 10);
+const MAX_CONCURRENT = parseInt(process.env.AGENT_GATEWAY_JOB_CONCURRENCY ?? "3", 10);
 
 // Retention: keep terminal jobs queryable for a while after they finish, then GC.
 const PRUNE_TTL_MS = 24 * 60 * 60 * 1000;

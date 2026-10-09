@@ -1,4 +1,4 @@
-# sideclaw Structured Logs — ~/Library/Logs/sideclaw.jsonl
+# agent-gateway Structured Logs — ~/Library/Logs/agent-gateway.jsonl
 
 NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and the MCP server
 (`source: "mcp"`) write to the same file. Level is a string (not a numeric code).
@@ -52,8 +52,8 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 | `job.cancelled`            | app     | Job reached `cancelled` — immediately for a `pending` cancel, or once a `running` job's SIGTERMed worker throws (carries `jobId`, `tool`, `durationMs`, `error: "cancelled by request"`); never counted in `failedLastHour`                        |
 | `job.recover`              | app     | Startup reconciliation (carries `interrupted`, `requeued`)                                                                                            |
 | `mcp.tool.submit`          | mcp     | Thin MCP tool submitted a job to the HTTP server (carries `tool`, `jobId`, `status`)                                                                  |
-| `routing.overrides`        | mcp/app | Logged once at startup when `SIDECLAW_MODEL_*`/`SIDECLAW_BACKEND_*` overrides are in effect — **warn** if any was refused, info otherwise (carries `overrides`, the full applied/refused list from `GET /api/routing`) |
-| `routing.stale_env`        | mcp/app | **warn.** Logged once at startup if `SIDECLAW_MAX_QUOTA_CEILING`/`SIDECLAW_MAX_WEEKLY_CEILING`/`SIDECLAW_QUOTA_FILE_MAX_AGE_S` is still set in `.env` — these fed the proactive Max-quota pre-check removed 2026-09-08 and are now a silent no-op (carries `vars`, the subset that's set) |
+| `routing.overrides`        | mcp/app | Logged once at startup when `AGENT_GATEWAY_MODEL_*`/`AGENT_GATEWAY_BACKEND_*` overrides are in effect — **warn** if any was refused, info otherwise (carries `overrides`, the full applied/refused list from `GET /api/routing`) |
+| `routing.stale_env`        | mcp/app | **warn.** Logged once at startup if `AGENT_GATEWAY_MAX_QUOTA_CEILING`/`AGENT_GATEWAY_MAX_WEEKLY_CEILING`/`AGENT_GATEWAY_QUOTA_FILE_MAX_AGE_S` is still set in `.env` — these fed the proactive Max-quota pre-check removed 2026-09-08 and are now a silent no-op (carries `vars`, the subset that's set) |
 | `backend.select`           | mcp/app | Worker auth backend resolved for a session launch (carries `tool`, `model`, `backend`, `jobId`, `reason`: `"non-claude-model"` \| `"ok"`)  |
 | `backend.fallback`         | mcp/app | Reactive once-only retry from `max` onto `iu` after a quota-flavored failure (carries `tool`, `model`, `backend: "iu"`, `jobId`, `reason: "rate-limited"`)     |
 | `backend.fallback` (`iu-unavailable`) | mcp/app | Reactive once-only retry from `iu` onto `max` after an IU transport failure or missing IU credentials (carries `tool`, `model` — the fallback model, e.g. Haiku for check — `backend: "max"`, `jobId`)  |
@@ -74,35 +74,35 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 
 ```bash
 # Live tail (pretty)
-tail -f ~/Library/Logs/sideclaw.jsonl | jq .
+tail -f ~/Library/Logs/agent-gateway.jsonl | jq .
 
 # MCP logs only
-tail -f ~/Library/Logs/sideclaw.jsonl | jq 'select(.source == "mcp")'
+tail -f ~/Library/Logs/agent-gateway.jsonl | jq 'select(.source == "mcp")'
 
 # All MCP tool results
-jq 'select(.event == "mcp.tool.end")' ~/Library/Logs/sideclaw.jsonl
+jq 'select(.event == "mcp.tool.end")' ~/Library/Logs/agent-gateway.jsonl
 
 # Failed tool runs
-jq 'select(.event == "mcp.tool.end" and .passed == false)' ~/Library/Logs/sideclaw.jsonl
+jq 'select(.event == "mcp.tool.end" and .passed == false)' ~/Library/Logs/agent-gateway.jsonl
 
 # Session cost by project
 jq -s 'group_by(.project) | map({project: .[0].project, totalCostUsd: [.[].costUsd // 0] | add, runs: length})' \
-  <(jq 'select(.event == "session.end")' ~/Library/Logs/sideclaw.jsonl)
+  <(jq 'select(.event == "session.end")' ~/Library/Logs/agent-gateway.jsonl)
 
 # Recent errors (last 50)
-jq 'select(.level == "error")' ~/Library/Logs/sideclaw.jsonl | tail -50 | jq .
+jq 'select(.level == "error")' ~/Library/Logs/agent-gateway.jsonl | tail -50 | jq .
 
 # Slow HTTP requests (>500ms)
-jq 'select(.event == "app.request" and .durationMs > 500)' ~/Library/Logs/sideclaw.jsonl
+jq 'select(.event == "app.request" and .durationMs > 500)' ~/Library/Logs/agent-gateway.jsonl
 
 # Job duration by tool (p50/p95/max) — no jobId join needed once job.done/job.fail carry it
 jq -s 'group_by(.tool) | map({tool: .[0].tool, n: length, durations: (map(.durationMs) | sort)})' \
-  <(jq 'select(.event == "job.done" or .event == "job.fail")' ~/Library/Logs/sideclaw.jsonl)
+  <(jq 'select(.event == "job.done" or .event == "job.fail")' ~/Library/Logs/agent-gateway.jsonl)
 
 # Model usage breakdown
 jq -s 'group_by(.model) | map({model: .[0].model, count: length})' \
-  <(jq 'select(.event == "session.end")' ~/Library/Logs/sideclaw.jsonl)
+  <(jq 'select(.event == "session.end")' ~/Library/Logs/agent-gateway.jsonl)
 
 # Today's entries
-jq --arg d "$(date -u +%Y-%m-%d)" 'select(.time | startswith($d))' ~/Library/Logs/sideclaw.jsonl
+jq --arg d "$(date -u +%Y-%m-%d)" 'select(.time | startswith($d))' ~/Library/Logs/agent-gateway.jsonl
 ```

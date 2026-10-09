@@ -1,10 +1,10 @@
 ---
-description: sideclaw git workflow — direct-to-master, no PR, no release process
+description: agent-gateway git workflow — direct-to-master, no PR, no release process
 ---
 
 # Git Workflow
 
-sideclaw is a personal infra tool (config-as-code). No PR flow, no release process.
+agent-gateway is a personal infra tool (config-as-code). No PR flow, no release process.
 
 ## Ship flow
 

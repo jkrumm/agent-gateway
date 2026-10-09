@@ -20,13 +20,13 @@ Three routes — `adversary`, `read_image`, `read_drawing` — never reach
 (`server/lib/iu-openai.ts`) and consume only `.model`. Their `backend`/
 `fallback` fields are informational defaults only (always `iu`, never
 overridable). `GET /api/routing` marks them `transport: "iu-openai"` (every
-other route is `transport: "session"`), and a `SIDECLAW_BACKEND_<TOOL>`
+other route is `transport: "session"`), and a `AGENT_GATEWAY_BACKEND_<TOOL>`
 override on one of the three is refused rather than silently accepted and
 displayed with no effect.
 
-Overrides: `SIDECLAW_MODEL_<TOOL>=<id>`, `SIDECLAW_BACKEND_<TOOL>=iu|max`
+Overrides: `AGENT_GATEWAY_MODEL_<TOOL>=<id>`, `AGENT_GATEWAY_BACKEND_<TOOL>=iu|max`
 (`<TOOL>` = route key upper-cased), read once at module load → `make reload`;
-`SIDECLAW_WORKER_FALLBACK=none` pins every tool to its primary. A job's
+`AGENT_GATEWAY_WORKER_FALLBACK=none` pins every tool to its primary. A job's
 `model` param (`overview`, `narrative`, `dispatch`) is applied with
 `withModel` — a Claude override also becomes the fallback model, a gateway
 override forces `iu`. The effective override list (applied + refused) is
@@ -34,14 +34,14 @@ logged once at startup by each entrypoint (`logRoutingOverrides` —
 `info`, or `warn` if it contains a refusal) so a typo'd `.env` entry is
 visible without curling `/api/routing`. The same entrypoints also call
 `logStaleQuotaEnvVars`, a `warn` if a real `.env` still sets one of the three
-retired quota env vars below (`SIDECLAW_MAX_QUOTA_CEILING`,
-`SIDECLAW_MAX_WEEKLY_CEILING`, `SIDECLAW_QUOTA_FILE_MAX_AGE_S`) — they are a
+retired quota env vars below (`AGENT_GATEWAY_MAX_QUOTA_CEILING`,
+`AGENT_GATEWAY_MAX_WEEKLY_CEILING`, `AGENT_GATEWAY_QUOTA_FILE_MAX_AGE_S`) — they are a
 silent no-op otherwise.
 
 Every session writes a `session_env` line to `~/.claude/logs/<date>.jsonl`
 with `base_url` (real on `iu`, explicit `null` on `max`), `model` and
 `backend`, plus an attribution record to
-`~/.local/share/usage-tracker/sideclaw-sessions.jsonl` carrying the same —
+`~/.local/share/usage-tracker/agent-gateway-sessions.jsonl` carrying the same —
 usage-tracker classifies by `base_url` present → `iu`, `null`/missing →
 `max`, and bills the run to the model actually used.
 
@@ -135,8 +135,8 @@ latched so the fallback attempt itself is never switched again:
   route) — opencode has no `MAX_THINKING_TOKENS` equivalent, only `--variant`
   (`"high"` investigate/author, `"max"` implement, same reasoning tier split
   AGENT_IMPLEMENT used to encode). Overridable per tool via
-  `SIDECLAW_THINKING_TOKENS_<TOOL>` (claude-harness routes) or
-  `SIDECLAW_HARNESS_<TOOL>`/`SIDECLAW_VARIANT_<TOOL>` (any route), same env
+  `AGENT_GATEWAY_THINKING_TOKENS_<TOOL>` (claude-harness routes) or
+  `AGENT_GATEWAY_HARNESS_<TOOL>`/`AGENT_GATEWAY_VARIANT_<TOOL>` (any route), same env
   pattern as the model/backend overrides above. Full harness rationale:
   `AGENTS.md`'s Worker routing section.
 
@@ -165,13 +165,13 @@ cheap OpenCode route (`ANGLE_OC` in `routing.ts`: deepseek-v4.1-flash on `iu` vi
 the opencode harness, `variant: "high"`, with the `review` route's Sonnet on Max
 as the reverse lane). `frontend` and every angle without a key of its own stay
 on the `review` route. The env names follow the usual rule (route key
-upper-cased): `SIDECLAW_MODEL_REVIEW_ANGLE_TYPESCRIPT`,
-`SIDECLAW_HARNESS_REVIEW_ANGLE_TYPESCRIPT`, `SIDECLAW_VARIANT_...`, etc. A model
-that only the opencode harness can run needs its `SIDECLAW_HARNESS_...=opencode`
+upper-cased): `AGENT_GATEWAY_MODEL_REVIEW_ANGLE_TYPESCRIPT`,
+`AGENT_GATEWAY_HARNESS_REVIEW_ANGLE_TYPESCRIPT`, `AGENT_GATEWAY_VARIANT_...`, etc. A model
+that only the opencode harness can run needs its `AGENT_GATEWAY_HARNESS_...=opencode`
 override alongside, otherwise the model override is refused and the angle stays
 on its default. Pinning an `ANGLE_OC` angle back onto the review route takes a
-Claude model override plus `SIDECLAW_BACKEND_...=max` (the harness normalizes
-back to `claude` on its own; a bare `SIDECLAW_HARNESS_...=claude` with the
+Claude model override plus `AGENT_GATEWAY_BACKEND_...=max` (the harness normalizes
+back to `claude` on its own; a bare `AGENT_GATEWAY_HARNESS_...=claude` with the
 default opencode-only model is refused). A job's `model` param still applies to
 every angle session via `withModel`, on top of whatever the angle's own route
 resolved to.
@@ -202,7 +202,7 @@ review angle were closed 2026-10-05:
    depend on skills — verified, `server/skills/review/*` references no skill — so the logged
    ignore is acceptable as-is (no code needed).
 
-**Method.** Seven real diffs (sideclaw `39b4cf9`, `71377b5`; warden `afd348d`,
+**Method.** Seven real diffs (agent-gateway `39b4cf9`, `71377b5`; warden `afd348d`,
 `fdb5886`; weatherorb `5de4e2d`, `4ea52bf`, `9bcf51b`; 2026-10-05) were replayed
 one angle session at a time by `scripts/ab-review-angles.ts` (since deleted; in git history before the UI/scripts cleanup). The baseline is the
 `review` route (Sonnet on Max); the cheap arm is deepseek-v4.1-flash on the
@@ -289,7 +289,7 @@ applies here too, and it is the model that stalled an 84-minute dispatch episode
 2026-09-15. No separate CLASSIFY-tier measurement was run: this is the same id AGENT
 already carries, at a lower thinking budget, on strictly easier work. `GLM_FLASH` stays
 exported as a named id, but it is unverified in the registry, so a
-`SIDECLAW_MODEL_<TOOL>=glm-5.3-flash` override is now refused.
+`AGENT_GATEWAY_MODEL_<TOOL>=glm-5.3-flash` override is now refused.
 2026-10-06: moved to Haiku over IU (`claude-haiku-4-5`, same Haiku-on-Max reverse lane). From
 2026-10-04 IU rejected DeepSeek-V4-Flash over `claude -p` (`[claude-code:unrecognized_model]`,
 then a Requesty 400 "Invalid request"), so every check/overview job fell to Max mid-stream,
@@ -300,7 +300,7 @@ a `check` of warden (`make check`, ~138s bare) passed on Haiku/IU in 220s with n
 ### AGENT
 
 AGENT: dispatch ONLY. 2026-09-11: owner decision moved dispatch off a
-`SIDECLAW_MODEL_DISPATCH` `.env` override onto glm-5.3-flash over IU (same model
+`AGENT_GATEWAY_MODEL_DISPATCH` `.env` override onto glm-5.3-flash over IU (same model
 CLASSIFY already trusted), on ccbench scoring it 10/10 on the agentic coding suite.
 2026-09-21: moved again, to DeepSeek-V4-Flash, on evidence measured 2026-09-20 by
 modelpick ccbench plus a warden POC (Anthropic leg, corrected context env). The
@@ -314,7 +314,7 @@ preference: it ties Flash on every refreshed external index (AA coding index 68.
 produced one 5-minute idle stall in that run (the CLI auto-backgrounded a long Bash
 call, then the model waited silently) — exactly the shape this lane's idle watchdog
 turns into a verdict-less kill. The POC ran the same six read-only "decide this open
-PR" briefs through warden→sideclaw on both: 12/12 done, no stalls, Flash 0.7–2.9 min
+PR" briefs through warden→agent-gateway on both: 12/12 done, no stalls, Flash 0.7–2.9 min
 per episode vs Pro's 1.0–6.0, and Flash's verdicts matched an independent Sonnet
 review more often — Pro waved through two PRs that review had flagged. Honest
 caveat: on the external indices glm-5.3-flash still leads both DeepSeek V4 ids (AA
@@ -336,9 +336,9 @@ below. History kept as comment text since the constants themselves are now dead 
 AGENT_IMPLEMENT: dispatch's implement tier only — investigate/author stayed on AGENT.
 2026-09-22: split off on the owner's explicit instruction, mirroring what was then
 warden's own `AUTO_IMPLEMENT_MODEL` (default DeepSeek-V4-Pro, warden/scripts/triage.py;
-since removed — warden now sends no model key and sideclaw routes each tier), which
+since removed — warden now sends no model key and agent-gateway routes each tier), which
 at the time ran implement-tier episodes on Pro via a per-job model override — this made
-it sideclaw's own default too instead of relying on every caller to remember the
+it agent-gateway's own default too instead of relying on every caller to remember the
 override. Tension noted honestly, not papered over: the 2026-09-21 measurement in the
 AGENT comment above rejected Pro for this exact seat on evidence (ties Flash on the
 external indices, ~3x slower and ~7x the cost in ccbench, one 5-minute idle stall, and
@@ -396,7 +396,7 @@ angle, and otel. The `senior-dev`, `typescript` and `qa` angles moved off JUDGE 
 rule and the synthesis/router were never in its scope. Excluded from AGENT, for different
 reasons, both dated 2026-09-11:
 
-- review: measured the same day with `SIDECLAW_MODEL_REVIEW=glm-5.3-flash`, a
+- review: measured the same day with `AGENT_GATEWAY_MODEL_REVIEW=glm-5.3-flash`, a
   ~1000-line diff's senior-dev angle looped a single grep/sed for 17 minutes at
   80,000+ turns and never produced a synthesis — cancelled, route reverted. Multi-
   angle review over a large diff is a different workload shape from the 10-task
@@ -404,7 +404,7 @@ reasons, both dated 2026-09-11:
   tier has actually been measured failing. A non-Claude model here would also drop
   the Max fallback entirely (Max only serves Claude ids), leaving a failing review
   with nowhere to go.
-- otel: sideclaw's one synchronous exception — it runs inline and returns to the
+- otel: agent-gateway's one synchronous exception — it runs inline and returns to the
   caller instead of going through the job queue, so a worker that loops there
   blocks a human's interactive session, not a background ledger item. Never
   measured on a cheap model; the owner's rule is that attended/interactive work
@@ -449,7 +449,7 @@ review_ocr: the `ocr` CLI (server/lib/ocr.ts) only ever consumes `.model` — it
 `runSession` worker, so there is no Max lane for it to fall back to (Max serves the
 Claude Code CLI's own auth path, not an arbitrary external binary's), same reasoning as
 adversary/VISION below. deepseek-v4.1-flash with ocr's `--effort low` (ocr.ts) since
-2026-09-25, from a same-range bake-off (sideclaw 819bcc7..4898afb, 1.8k lines, every
+2026-09-25, from a same-range bake-off (agent-gateway 819bcc7..4898afb, 1.8k lines, every
 finding checked by hand). Wall time in ocr is LLM rounds × ~5s per round (the same for
 every model), not tok/s: at the default effort (2 review passes) v4.1-flash explored for
 117 rounds / 6m30s. With `--effort low` it ran 3× at 2m31s-3m09s with 4-7 findings,

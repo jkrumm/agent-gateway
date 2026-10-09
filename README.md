@@ -1,7 +1,7 @@
-# sideclaw
+# agent-gateway
 
 Job-queue daemon for agent work on the Mac mini: an always-on HTTP server (`:7705`,
-loopback only, LaunchAgent `com.jkrumm.sideclaw-server`) that hosts a durable job queue,
+loopback only, LaunchAgent `com.jkrumm.agent-gateway`) that hosts a durable job queue,
 plus an MCP stdio server (`server/mcp.ts`) that every Claude Code session spawns to submit
 work to it. Tools: `check`, `review`, `dispatch`, `overview`, `narrative`, `otel`,
 `read_image`, `read_drawing`, `excalidraw_diagram`, `job_status`/`job_wait`. Each long tool
@@ -23,9 +23,9 @@ Only a real signal (reboot, logout, or the fallback above) is bound by that 60s 
 
 Never start the server by hand (`bun server/index.ts`) — the LaunchAgent owns the port.
 The MCP server is registered at user scope by dotfiles' `make setup`
-(`claude mcp add --scope user sideclaw -- bun run ~/SourceRoot/sideclaw/server/mcp.ts`).
+(`claude mcp add --scope user agent-gateway -- bun run ~/SourceRoot/agent-gateway/server/mcp.ts`).
 A tool **schema** change needs an MCP reconnect (`/mcp`), not just `make reload`.
-A **plist** change (`com.jkrumm.sideclaw-server.plist`) needs `make install-agent`
+A **plist** change (`com.jkrumm.agent-gateway.plist`) needs `make install-agent`
 (`launchctl bootstrap`) — `make reload` only signals the already-loaded job definition and
 refuses if it detects the tracked plist has drifted from the installed one.
 
@@ -44,21 +44,21 @@ refuses if it detects the tracked plist has drifted from the installed one.
 | `GET /api/dispatch-schema` | JSON schema the `dispatch` job's worker output must validate against, per tier |
 | `POST /api/shutdown[?force=1]` | self-initiated graceful shutdown — what `make reload` calls instead of signaling the process; responds immediately with `{ running }`, drains asynchronously |
 
-Logs: `~/Library/Logs/sideclaw.jsonl` (structured, both processes), `sideclaw.{log,err}` (stdio).
+Logs: `~/Library/Logs/agent-gateway.jsonl` (structured, both processes), `agent-gateway.{log,err}` (stdio).
 
 ## `.env` keys
 
 | Key | Purpose |
 |-|-|
-| `PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH` | repo roots `dispatch` may run in (default of `SIDECLAW_DISPATCH_ROOTS`) |
+| `PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH` | repo roots `dispatch` may run in (default of `AGENT_GATEWAY_DISPATCH_ROOTS`) |
 | `GITHUB_TOKEN` | fallback GitHub credential for `dispatch` artifacts (primary is `secrets-run read op://mini/github/token`) |
 | `RESEARCH_GATEWAY_URL`, `RESEARCH_GATEWAY_TOKEN` | lets review angle workers validate external claims |
-| `SIDECLAW_MODEL_<TOOL>`, `SIDECLAW_BACKEND_<TOOL>` | per-tool routing override (`iu` \| `max`); a gateway id never lands on `max`, and a backend override on `adversary`/`read_image`/`read_drawing` (fixed `iu-openai` transport) is refused |
-| `SIDECLAW_HARNESS_<TOOL>` (`claude` \| `opencode`), `SIDECLAW_VARIANT_<TOOL>` | per-tool harness/reasoning-effort override — `dispatch`/`dispatch_implement` default to `opencode` over IU's OpenAI route (model: `GET /api/routing`), refused on a fixed-transport tool same as the model/backend overrides |
-| `SIDECLAW_WORKER_FALLBACK=none` | disable both fallback directions |
-| `SIDECLAW_REVIEW_OCR=0` | disable the OpenCodeReview (`ocr` CLI) phase-1 review input |
-| `SIDECLAW_JOB_CONCURRENCY` (3) | running-job cap |
-| `SIDECLAW_AGENT_STALE_HOURS` (24) | agent snapshot stale threshold |
+| `AGENT_GATEWAY_MODEL_<TOOL>`, `AGENT_GATEWAY_BACKEND_<TOOL>` | per-tool routing override (`iu` \| `max`); a gateway id never lands on `max`, and a backend override on `adversary`/`read_image`/`read_drawing` (fixed `iu-openai` transport) is refused |
+| `AGENT_GATEWAY_HARNESS_<TOOL>` (`claude` \| `opencode`), `AGENT_GATEWAY_VARIANT_<TOOL>` | per-tool harness/reasoning-effort override — `dispatch`/`dispatch_implement` default to `opencode` over IU's OpenAI route (model: `GET /api/routing`), refused on a fixed-transport tool same as the model/backend overrides |
+| `AGENT_GATEWAY_WORKER_FALLBACK=none` | disable both fallback directions |
+| `AGENT_GATEWAY_REVIEW_OCR=0` | disable the OpenCodeReview (`ocr` CLI) phase-1 review input |
+| `AGENT_GATEWAY_JOB_CONCURRENCY` (3) | running-job cap |
+| `AGENT_GATEWAY_AGENT_STALE_HOURS` (24) | agent snapshot stale threshold |
 | `ARGO_URL` | Argo API base for the overview push (default `https://argo.jkrumm.com/api`) |
 
 The HTTP server gets `.env` from Bun's cwd auto-load; the MCP process reads the same file
@@ -68,7 +68,7 @@ through `server/lib/load-env.ts`. Every routing/backend flag is read at module l
 ## Routing
 
 `server/lib/routing.ts` is the single per-tool table. Live: `GET /api/routing`.
-Overrides: `SIDECLAW_MODEL_<TOOL>`/`SIDECLAW_BACKEND_<TOOL>`. Full rationale:
+Overrides: `AGENT_GATEWAY_MODEL_<TOOL>`/`AGENT_GATEWAY_BACKEND_<TOOL>`. Full rationale:
 `brain/wiki/engineering/model-routing.md`.
 
 ## Develop

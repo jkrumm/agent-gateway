@@ -13,9 +13,9 @@ import { join } from "path";
 
 // ~/Library/Logs, never /tmp: macOS sweeps /tmp files untouched for 3+ days and a
 // long-lived process keeps writing into the unlinked inode with nothing reporting
-// it. Override with SIDECLAW_LOG_FILE (tests, scratch runs).
+// it. Override with AGENT_GATEWAY_LOG_FILE (tests, scratch runs).
 export const LOG_FILE =
-  process.env.SIDECLAW_LOG_FILE ?? join(homedir(), "Library", "Logs", "sideclaw.jsonl");
+  process.env.AGENT_GATEWAY_LOG_FILE ?? join(homedir(), "Library", "Logs", "agent-gateway.jsonl");
 const MB = 1024 * 1024;
 
 export function createLogger(source: "app" | "mcp"): pino.Logger {

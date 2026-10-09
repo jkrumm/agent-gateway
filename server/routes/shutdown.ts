@@ -22,12 +22,12 @@ import { triggerShutdown } from "../lib/shutdown.ts";
 // "POST" })` with no preflight and no way for this server to refuse it, because the browser never
 // asks first. Before `POST /api/shutdown` existed, triggering a forced abort needed OS signal
 // privileges; now it needs one `fetch` call from a tab the user happens to have open. Requiring a
-// header outside the CORS-safelisted set (`x-sideclaw-shutdown`) forces the browser to send a preflight OPTIONS request first
+// header outside the CORS-safelisted set (`x-agent-gateway-shutdown`) forces the browser to send a preflight OPTIONS request first
 // — which this server never answers with an `Access-Control-Allow-*` response, so the actual POST
 // never fires. A same-origin caller (`curl` in the Makefile) sets the header trivially. This is
 // NOT authentication — it closes exactly one vector (a background browser tab), not the one this
 // route was never meant to close (any local process with this UID, which could already signal it).
-const SHUTDOWN_HEADER = "x-sideclaw-shutdown";
+const SHUTDOWN_HEADER = "x-agent-gateway-shutdown";
 
 export const shutdownRoutes = new Elysia({ prefix: "/api" }).post(
   "/shutdown",
@@ -53,7 +53,7 @@ export const shutdownRoutes = new Elysia({ prefix: "/api" }).post(
   },
   {
     // Query, not a JSON body — `make reload`'s curl call needs no `-d`/Content-Type to trigger
-    // this, just an optional `?force=1` (and the `X-Sideclaw-Shutdown` header, see above).
+    // this, just an optional `?force=1` (and the `X-Agent-Gateway-Shutdown` header, see above).
     query: t.Object({ force: t.Optional(t.String()) }),
   },
 );

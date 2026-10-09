@@ -9,7 +9,7 @@
 // both the job route and the job handler call before anything else runs.
 //
 // `sensitive` used to be a field the CALLER declared (`sensitive: z.boolean().default(false)`
-// on `DISPATCH_INPUT`) and sideclaw never verified — an unauthenticated submitter could omit
+// on `DISPATCH_INPUT`) and agent-gateway never verified — an unauthenticated submitter could omit
 // it and run `tier: "implement"` inside a secret-bearing repo. `resolveDispatchTarget`
 // derives `sensitive` from this policy instead; the handler ORs it with whatever the caller
 // still declares, so a caller MAY opt a repo the policy does not mark into the scan, but can
@@ -23,7 +23,7 @@
 // full argument (the `GIT_DENY_CREDENTIALS_ENV` header comment) — the same "raises the cost
 // of an accident, does not contain an adversary" framing applies here.
 //
-// Also NOT: a config file. sideclaw deliberately has none — the `const` default + env
+// Also NOT: a config file. agent-gateway deliberately has none — the `const` default + env
 // override shape is the house pattern (routing.ts), not a one-off.
 
 import { existsSync, realpathSync } from "node:fs";
@@ -81,7 +81,7 @@ function tierRank(tier: string): number {
  *  Named so a caller can see the fallback without re-deriving it. */
 export const DEFAULT_RULE: RepoRule = { ceiling: "implement", sensitive: false };
 
-// Overridable, but only in the stricter direction. sideclaw is the only dispatch policy —
+// Overridable, but only in the stricter direction. agent-gateway is the only dispatch policy —
 // the gates are quality, not trust (own repos). Only secret-bearing repos are sensitive and
 // brain stays read-only.
 const DEFAULT_RULES: Record<string, RepoRule> = Object.freeze({
@@ -103,14 +103,14 @@ export interface DispatchPolicy {
   overrides: PolicyOverride[];
 }
 
-/** `SIDECLAW_DISPATCH_ROOTS` — comma-separated absolute paths, default `WORKSPACE_ROOTS`. A
+/** `AGENT_GATEWAY_DISPATCH_ROOTS` — comma-separated absolute paths, default `WORKSPACE_ROOTS`. A
  *  non-absolute entry is refused (and logged) individually; the rest still apply. If every
  *  entry is refused, the default roots are kept rather than left empty. */
 function buildRoots(
   env: Record<string, string | undefined>,
   overrides: PolicyOverride[],
 ): string[] {
-  const raw = env.SIDECLAW_DISPATCH_ROOTS?.trim();
+  const raw = env.AGENT_GATEWAY_DISPATCH_ROOTS?.trim();
   if (!raw) return WORKSPACE_ROOTS;
 
   const entries = raw
@@ -121,7 +121,7 @@ function buildRoots(
   for (const entry of entries) {
     if (!isAbsolute(entry)) {
       overrides.push({
-        key: "SIDECLAW_DISPATCH_ROOTS",
+        key: "AGENT_GATEWAY_DISPATCH_ROOTS",
         value: entry,
         applied: false,
         reason: `not an absolute path: ${entry}`,
@@ -129,11 +129,11 @@ function buildRoots(
       continue;
     }
     applied.push(entry);
-    overrides.push({ key: "SIDECLAW_DISPATCH_ROOTS", value: entry, applied: true });
+    overrides.push({ key: "AGENT_GATEWAY_DISPATCH_ROOTS", value: entry, applied: true });
   }
   if (applied.length === 0) {
     overrides.push({
-      key: "SIDECLAW_DISPATCH_ROOTS",
+      key: "AGENT_GATEWAY_DISPATCH_ROOTS",
       value: raw,
       applied: false,
       reason: "no absolute paths remained after filtering — kept the default roots",
@@ -143,7 +143,7 @@ function buildRoots(
   return applied;
 }
 
-/** `SIDECLAW_DISPATCH_CEILINGS=repo:tier,repo:tier` — applied ONLY when it lowers the
+/** `AGENT_GATEWAY_DISPATCH_CEILINGS=repo:tier,repo:tier` — applied ONLY when it lowers the
  *  effective ceiling for that repo. Raising (or leaving it unchanged) is refused and logged;
  *  so is an unknown tier name. This is the whole security value of the env surface — an
  *  override can only ever narrow what dispatch is allowed to do to a repo, never widen it. */
@@ -152,7 +152,7 @@ function applyCeilingOverrides(
   rules: Record<string, RepoRule>,
   overrides: PolicyOverride[],
 ): void {
-  const raw = env.SIDECLAW_DISPATCH_CEILINGS?.trim();
+  const raw = env.AGENT_GATEWAY_DISPATCH_CEILINGS?.trim();
   if (!raw) return;
 
   const entries = raw
@@ -161,7 +161,7 @@ function applyCeilingOverrides(
     .filter((s) => s.length > 0);
   for (const entry of entries) {
     const [repoRaw, tierRaw] = entry.split(":").map((s) => s?.trim());
-    const key = "SIDECLAW_DISPATCH_CEILINGS";
+    const key = "AGENT_GATEWAY_DISPATCH_CEILINGS";
     if (!repoRaw || !tierRaw) {
       overrides.push({
         key,
@@ -193,17 +193,17 @@ function applyCeilingOverrides(
   }
 }
 
-/** `SIDECLAW_DISPATCH_SENSITIVE=repo,repo` — adds only. There is no syntax to un-mark a repo
+/** `AGENT_GATEWAY_DISPATCH_SENSITIVE=repo,repo` — adds only. There is no syntax to un-mark a repo
  *  sensitive; an entry naming an already-sensitive repo is a no-op recorded as applied. */
 function applySensitiveOverrides(
   env: Record<string, string | undefined>,
   rules: Record<string, RepoRule>,
   overrides: PolicyOverride[],
 ): void {
-  const raw = env.SIDECLAW_DISPATCH_SENSITIVE?.trim();
+  const raw = env.AGENT_GATEWAY_DISPATCH_SENSITIVE?.trim();
   if (!raw) return;
 
-  const key = "SIDECLAW_DISPATCH_SENSITIVE";
+  const key = "AGENT_GATEWAY_DISPATCH_SENSITIVE";
   const entries = raw
     .split(",")
     .map((s) => s.trim())

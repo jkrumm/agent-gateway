@@ -21,7 +21,7 @@
 //     here launchd IS the one waiting, and its `ExitTimeOut` is hard-capped at 60s regardless
 //     of what the plist says — measured on this host 2026-09-08: raising the tracked plist's
 //     `ExitTimeOut` to 2700 changed nothing (`launchctl print
-//     gui/<uid>/com.jkrumm.sideclaw-server` still reported `exit timeout = 60`), and a control
+//     gui/<uid>/com.jkrumm.agent-gateway` still reported `exit timeout = 60`), and a control
 //     probe at 120 confirmed the same ceiling. A window here that doesn't stay comfortably
 //     under that cap gets SIGKILLed mid-drain — no app-level flush, no
 //     `terminateActiveSessions()`, an orphaned `claude -p` worker left writing into its

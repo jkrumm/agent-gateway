@@ -18,8 +18,8 @@ afterEach(() => {
 });
 
 function dbPath(): string {
-  const p = process.env.SIDECLAW_JOBS_DB;
-  if (!p) throw new Error("SIDECLAW_JOBS_DB not set — tests/setup.ts should have set it");
+  const p = process.env.AGENT_GATEWAY_JOBS_DB;
+  if (!p) throw new Error("AGENT_GATEWAY_JOBS_DB not set — tests/setup.ts should have set it");
   return p;
 }
 
@@ -50,7 +50,7 @@ const NEVER_EXECUTE = () => new Promise<unknown>(() => {});
 
 describe("recover() — dispatch resume", () => {
   test("a session id AND an on-disk worktree → pending, resume markers preserved", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "sideclaw-dispatch-recover-"));
+    const tmp = mkdtempSync(join(tmpdir(), "agent-gateway-dispatch-recover-"));
     try {
       const created = createJob("dispatch", {});
       seedRunningDispatch(created.id, {
@@ -107,7 +107,7 @@ describe("recover() — dispatch resume", () => {
   });
 
   test("over the attempt cap → interrupted, resumable or not", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "sideclaw-dispatch-recover-"));
+    const tmp = mkdtempSync(join(tmpdir(), "agent-gateway-dispatch-recover-"));
     try {
       const created = createJob("dispatch", {});
       seedRunningDispatch(created.id, {

@@ -145,7 +145,7 @@ describe("readTranscriptTailFile", () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "sideclaw-agents-test-"));
+    dir = mkdtempSync(join(tmpdir(), "agent-gateway-agents-test-"));
   });
 
   afterEach(() => {
@@ -1021,7 +1021,7 @@ describe("parseHumanQueueRequest", () => {
 describe("readHumanQueue", () => {
   let dir: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "sideclaw-hq-"));
+    dir = mkdtempSync(join(tmpdir(), "agent-gateway-hq-"));
   });
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
@@ -1151,7 +1151,7 @@ function wardenItem(overrides: Partial<WardenItem> = {}): WardenItem {
     origin: "alert",
     repo: "warden",
     state: "needs_decision",
-    title: "watchdog: sideclaw dispatch stuck",
+    title: "watchdog: agent-gateway dispatch stuck",
     note: null,
     prUrl: null,
     updatedAt: "2026-09-10T23:00:00.000Z",

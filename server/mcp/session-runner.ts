@@ -86,7 +86,7 @@ export function runnerLogger(): typeof appLogger {
  *  session to its route's primary backend. Read once at module load — a flip needs
  *  `make reload`. */
 const WORKER_FALLBACK: "iu" | "none" =
-  process.env.SIDECLAW_WORKER_FALLBACK === "none" ? "none" : "iu";
+  process.env.AGENT_GATEWAY_WORKER_FALLBACK === "none" ? "none" : "iu";
 
 const CLAUDE_LOG_DIR = join(homedir(), ".claude", "logs");
 
@@ -141,7 +141,7 @@ export function sessionEnvRecord(
  * for why null is written rather than skipped). Idempotent — safe if the hook also
  * fires. Never throws.
  *
- * `lane` (`usageLane(tool)`, e.g. `"sideclaw:dispatch"`) and `harness` are the only
+ * `lane` (`usageLane(tool)`, e.g. `"agent-gateway:dispatch"`) and `harness` are the only
  * per-worker signal that survives to usage-tracker at all: every worker runs with
  * `disableAllHooks: true` (WORKER_SETTINGS), so dotfiles' own SessionStart hook never
  * fires inside one — this sidecar record is the sole source, not a mirror of a redundant
@@ -162,7 +162,7 @@ export function writeSessionEnv(
     const line =
       JSON.stringify({
         ts: now,
-        src: "sideclaw",
+        src: "agent-gateway",
         event: "session_env",
         level: "info",
         data: sessionEnvRecord(sessionId, baseUrl, model, backend, tool, harness),
@@ -176,14 +176,14 @@ export function writeSessionEnv(
 // Per-session attribution log. Each runSession invocation appends one record
 // describing tool / cwd / time window — usage-tracker joins individual worker
 // requests to it by ts ∈ [tsStart, tsEnd], so token rows get tagged with which
-// sideclaw tool (check/review/…) caused them.
+// agent-gateway tool (check/review/…) caused them.
 // Format: NDJSON, one record per session, written on completion.
 const ATTRIBUTION_LOG = join(
   homedir(),
   ".local",
   "share",
   "usage-tracker",
-  "sideclaw-sessions.jsonl",
+  "agent-gateway-sessions.jsonl",
 );
 
 /** Exported so `opencode-runner.ts` appends to the SAME attribution log/sink under its own
@@ -268,8 +268,8 @@ export interface SessionOptions<T = unknown> {
   extraEnv?: Record<string, string>;
   /**
    * Tool name for usage attribution — e.g. "check", "review".
-   * Written to the sideclaw-sessions.jsonl attribution log so
-   * usage-tracker can tag worker requests back to the sideclaw tool that caused
+   * Written to the agent-gateway-sessions.jsonl attribution log so
+   * usage-tracker can tag worker requests back to the agent-gateway tool that caused
    * them. Optional but every job handler should set it.
    */
   tool?: string;
@@ -724,7 +724,7 @@ export function buildSessionArgs(input: SessionArgsInput): string[] {
 }
 
 export interface WorkerEnvInput {
-  /** Routed tool name, tags `USAGE_LANE` as `sideclaw:<tool>` — `"unknown"` when absent. */
+  /** Routed tool name, tags `USAGE_LANE` as `agent-gateway:<tool>` — `"unknown"` when absent. */
   tool?: string;
   backend: Backend;
   model: string;
@@ -743,19 +743,19 @@ export interface WorkerEnvInput {
 }
 
 /**
- * The `USAGE_LANE` value for a routed tool — `sideclaw:<tool>`, coarsened to the part
+ * The `USAGE_LANE` value for a routed tool — `agent-gateway:<tool>`, coarsened to the part
  * before the first `:` in `tool` itself. `review`'s sub-steps (`review:router`,
  * `review:angle`, `review:adversary`, `review:synthesis`) pass their own sub-tool label
  * through `SessionOptions.tool` for logging/attribution, but usage-tracker's `sub_tool`
  * column is a flat string with no sub-lane concept (`report.ts`'s grouping is a plain
  * `coalesce`, nothing wildcard-aware) — one lane per Max-lane worker keeps
- * `stats --by sub_tool` a single `sideclaw:review` row instead of four fragments. Single
+ * `stats --by sub_tool` a single `agent-gateway:review` row instead of four fragments. Single
  * chokepoint so every spawn path (all of them already route through `buildWorkerEnv`)
  * gets this for free rather than each call site coarsening its own `tool` string.
  */
 export function usageLane(tool: string | undefined): string {
   const base = (tool ?? "unknown").split(":")[0];
-  return `sideclaw:${base}`;
+  return `agent-gateway:${base}`;
 }
 
 /** The worker's full spawn env. Split out of `runSessionAttempt` so `USAGE_LANE` and the
@@ -1711,7 +1711,7 @@ async function runSessionAttempt<T = unknown>(
   // output-extraction fallback can recover it instead of failing the whole job.
   let lastAssistantText = "";
   // Worker's real transcript session id (from the stream's system/init event, not
-  // sideclaw's own `sessionUuid`). Used to tag the session_env sidecar so
+  // agent-gateway's own `sessionUuid`). Used to tag the session_env sidecar so
   // usage-tracker joins it to the right transcript.
   let workerSessionId: string | undefined;
   // Structured signal for quota classification (see `isQuotaError`'s doc comment):
@@ -2191,7 +2191,7 @@ async function runSessionAttempt<T = unknown>(
  *  caller's own risk, not this one's.
  *
  *  Two narrower, once-only lane switches sit ahead of that retry, both gated on the
- *  route's declared `fallback` (and the global `SIDECLAW_WORKER_FALLBACK=none` off
+ *  route's declared `fallback` (and the global `AGENT_GATEWAY_WORKER_FALLBACK=none` off
  *  switch) and both latched by `usedFallback` so a failure on the fallback attempt
  *  itself is never switched again:
  *
@@ -2243,7 +2243,7 @@ export interface NextAttemptInput {
   readOnly?: boolean;
   /** A lane switch already happened in this session — never a second one. */
   usedFallback: boolean;
-  /** The route's fallback after the global `SIDECLAW_WORKER_FALLBACK=none` gate. */
+  /** The route's fallback after the global `AGENT_GATEWAY_WORKER_FALLBACK=none` gate. */
   fallback: RouteFallback | null;
   /** The route's (override-applied) primary model — the same-model fallback runs it. */
   routeModel: string;

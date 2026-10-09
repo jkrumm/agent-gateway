@@ -12,19 +12,19 @@ import { IDLE_TIMEOUT_MS } from "./idle-timeout.ts";
 // fetches, billed IU per-token, zero Max quota.
 //
 // Because they bypass session-runner, nothing writes their usage to the normal
-// sideclaw-sessions attribution log. `recordIuUsage()` writes a separate NDJSON
+// agent-gateway-sessions attribution log. `recordIuUsage()` writes a separate NDJSON
 // sink instead, which the usage-tracker's `sideclaw-iu` collector ingests.
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
 /** NDJSON usage sink consumed by the usage-tracker's `sideclaw-iu` collector. Resolved fresh
- *  on every call (not cached at module load) — a test that sets `SIDECLAW_IU_USAGE_LOG` AFTER
+ *  on every call (not cached at module load) — a test that sets `AGENT_GATEWAY_IU_USAGE_LOG` AFTER
  *  this module has already been imported (e.g. transitively, via `server/lib/ocr.ts`, from an
  *  earlier test file in the same bun test process) would otherwise leak rows into the real
  *  sink because a module-level constant had already baked in the default path. */
 function usageSinkPath(): string {
   return (
-    process.env.SIDECLAW_IU_USAGE_LOG ??
+    process.env.AGENT_GATEWAY_IU_USAGE_LOG ??
     join(homedir(), ".local", "share", "usage-tracker", "sideclaw-iu.jsonl")
   );
 }

@@ -11,8 +11,8 @@ set -uo pipefail
 
 REFUSED=3
 
-tracked="com.jkrumm.sideclaw-server.plist"
-installed="$HOME/Library/LaunchAgents/com.jkrumm.sideclaw-server.plist"
+tracked="com.jkrumm.agent-gateway.plist"
+installed="$HOME/Library/LaunchAgents/com.jkrumm.agent-gateway.plist"
 if [ -f "$installed" ]; then
   tracked_json=$(plutil -convert json -o - "$tracked" 2>/dev/null)
   installed_json=$(plutil -convert json -o - "$installed" 2>/dev/null)
@@ -23,7 +23,7 @@ if [ -f "$installed" ]; then
 fi
 
 tracked_exit=$(grep -A1 '<key>ExitTimeOut</key>' "$tracked" | grep -o '[0-9]\+')
-live_exit=$(launchctl print "gui/$(id -u)/com.jkrumm.sideclaw-server" 2>/dev/null | awk -F'= ' '/exit timeout = /{print $2; exit}')
+live_exit=$(launchctl print "gui/$(id -u)/com.jkrumm.agent-gateway" 2>/dev/null | awk -F'= ' '/exit timeout = /{print $2; exit}')
 if [ -n "$tracked_exit" ] && [ -n "$live_exit" ] && [ "$tracked_exit" != "$live_exit" ]; then
   echo "refusing to reload: launchd's LIVE ExitTimeOut (${live_exit}s) does not match the tracked plist (${tracked_exit}s) — 'launchctl bootstrap' never took (the file compare above cannot see this: see the comment above the Makefile's reload target). Run 'make install-agent' first, then 'make reload'."
   exit "$REFUSED"

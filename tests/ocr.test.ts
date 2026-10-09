@@ -268,13 +268,15 @@ describe("ocrProtocolFor / ocrTransportFor", () => {
 
 describe("ocrSessionSlug", () => {
   test("turns every path separator into a dash and drops the leading one", () => {
-    expect(ocrSessionSlug("/Users/jkrumm/SourceRoot/sideclaw")).toBe(
-      "Users-jkrumm-SourceRoot-sideclaw",
+    expect(ocrSessionSlug("/Users/jkrumm/SourceRoot/agent-gateway")).toBe(
+      "Users-jkrumm-SourceRoot-agent-gateway",
     );
   });
 
   test("a worktree path slugs the same way", () => {
-    expect(ocrSessionSlug("/tmp/sideclaw-worktrees/abc123")).toBe("tmp-sideclaw-worktrees-abc123");
+    expect(ocrSessionSlug("/tmp/agent-gateway-worktrees/abc123")).toBe(
+      "tmp-agent-gateway-worktrees-abc123",
+    );
   });
 });
 

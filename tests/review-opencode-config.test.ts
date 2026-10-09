@@ -31,7 +31,7 @@ import { Fixture, git, makeFixture } from "./git-fixture.ts";
 describe("opencodeRepoConfigPresent", () => {
   const dirs: string[] = [];
   function tempRoot(): string {
-    const d = mkdtempSync(join(tmpdir(), "sideclaw-ocfg-"));
+    const d = mkdtempSync(join(tmpdir(), "agent-gateway-ocfg-"));
     dirs.push(d);
     return d;
   }
@@ -118,10 +118,10 @@ function installSessionStub(): void {
 }
 
 beforeEach(async () => {
-  for (const k of ["SIDECLAW_REVIEW_OCR", "SIDECLAW_REVIEW_ADVERSARY"])
+  for (const k of ["AGENT_GATEWAY_REVIEW_OCR", "AGENT_GATEWAY_REVIEW_ADVERSARY"])
     savedEnv[k] = process.env[k];
-  process.env.SIDECLAW_REVIEW_OCR = "0";
-  process.env.SIDECLAW_REVIEW_ADVERSARY = "false";
+  process.env.AGENT_GATEWAY_REVIEW_OCR = "0";
+  process.env.AGENT_GATEWAY_REVIEW_ADVERSARY = "false";
   seen = [];
   fx = await makeFixture();
   installSessionStub();
@@ -213,7 +213,7 @@ describe("runReview ref mode — opencode config stripped from the throwaway wor
 
     expect(await fx.linkedWorktrees()).toEqual([]);
     const refs = await git(
-      ["for-each-ref", "--format=%(refname)", "refs/sideclaw-review"],
+      ["for-each-ref", "--format=%(refname)", "refs/agent-gateway-review"],
       fx.repo,
     );
     expect(refs.trim()).toBe("");

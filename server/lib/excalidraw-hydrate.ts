@@ -293,7 +293,7 @@ export async function hydrateExcalidrawSkeleton(input: HydrateInput): Promise<Hy
   const { cleanSkeleton, viewport, deletedIds } = prefilterSkeleton(skeleton);
 
   const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const userDataDir = join(tmpdir(), `sideclaw-excalidraw-hydrate-${stamp}`);
+  const userDataDir = join(tmpdir(), `agent-gateway-excalidraw-hydrate-${stamp}`);
   await mkdir(userDataDir, { recursive: true });
 
   let proc: ReturnType<typeof Bun.spawn> | undefined;

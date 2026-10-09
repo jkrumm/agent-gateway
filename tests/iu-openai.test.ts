@@ -4,7 +4,7 @@
 // shape the rest of the repo uses (`(async (...) => Response) as typeof fetch`), just at the
 // global rather than a parameter.
 //
-// SIDECLAW_IU_USAGE_LOG/IU_API_KEY/IU_BASE_URL are set before the first import below so
+// AGENT_GATEWAY_IU_USAGE_LOG/IU_API_KEY/IU_BASE_URL are set before the first import below so
 // recordIuUsage's NDJSON sink never touches the real ~/.local/share path and getIuConfig
 // never falls through to the Keychain.
 
@@ -13,13 +13,16 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-process.env.SIDECLAW_IU_USAGE_LOG = join(tmpdir(), `sideclaw-iu-openai-test-${Date.now()}.jsonl`);
+process.env.AGENT_GATEWAY_IU_USAGE_LOG = join(
+  tmpdir(),
+  `sideclaw-iu-openai-test-${Date.now()}.jsonl`,
+);
 process.env.IU_API_KEY = "test-key";
 process.env.IU_BASE_URL = "https://iu.example.com/anthropic";
 
 const { textComplete, visionRead, recordIuUsage } = await import("../server/lib/iu-openai.ts");
 
-const originalUsageLog = process.env.SIDECLAW_IU_USAGE_LOG;
+const originalUsageLog = process.env.AGENT_GATEWAY_IU_USAGE_LOG;
 
 /** A fresh temp sink path for a test that needs to read back exactly one row, rather than
  *  sharing the file-level sink every other test in this suite appends to. */
@@ -61,7 +64,7 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  if (originalUsageLog !== undefined) process.env.SIDECLAW_IU_USAGE_LOG = originalUsageLog;
+  if (originalUsageLog !== undefined) process.env.AGENT_GATEWAY_IU_USAGE_LOG = originalUsageLog;
 });
 
 /** A usage-only chunk, the shape the SSE stream carries just before `[DONE]`
@@ -153,7 +156,7 @@ describe("normalizeUsage — via textComplete's parsed usage", () => {
 describe("recordIuUsage — row shape", () => {
   test("writes cache_read_tokens/cache_write_tokens/cost_usd/outcome with the documented defaults", async () => {
     const sink = uniqueSink();
-    process.env.SIDECLAW_IU_USAGE_LOG = sink;
+    process.env.AGENT_GATEWAY_IU_USAGE_LOG = sink;
     await recordIuUsage({
       tool: "test_tool",
       model: "test-model",
@@ -177,7 +180,7 @@ describe("recordIuUsage — row shape", () => {
 
   test("explicit cacheReadTokens/cacheWriteTokens/costUsd/outcome override usage-derived values", async () => {
     const sink = uniqueSink();
-    process.env.SIDECLAW_IU_USAGE_LOG = sink;
+    process.env.AGENT_GATEWAY_IU_USAGE_LOG = sink;
     await recordIuUsage({
       tool: "review_ocr",
       model: "deepseek-v4.1-flash",
@@ -205,7 +208,7 @@ describe("recordIuUsage — row shape", () => {
 
   test("no usage at all still writes a well-formed zeroed row", async () => {
     const sink = uniqueSink();
-    process.env.SIDECLAW_IU_USAGE_LOG = sink;
+    process.env.AGENT_GATEWAY_IU_USAGE_LOG = sink;
     await recordIuUsage({ tool: "test_tool", model: "test-model", latencyMs: 1 });
     const row = await readLastRow(sink);
     expect(row.input_tokens).toBe(0);
@@ -220,7 +223,7 @@ describe("recordIuUsage — row shape", () => {
 describe("textComplete — empty-text failure path", () => {
   test("records usage with outcome: error before throwing, not silently dropping the spend", async () => {
     const sink = uniqueSink();
-    process.env.SIDECLAW_IU_USAGE_LOG = sink;
+    process.env.AGENT_GATEWAY_IU_USAGE_LOG = sink;
     stubFetch(sseResponse(""));
     await expect(textComplete({ prompt: "hello", model: "gpt-5.6-terra" })).rejects.toThrow(
       "Text completion returned no content.",
@@ -235,7 +238,7 @@ describe("textComplete — empty-text failure path", () => {
 describe("visionRead — empty-text failure path", () => {
   test("records usage with outcome: error before throwing", async () => {
     const sink = uniqueSink();
-    process.env.SIDECLAW_IU_USAGE_LOG = sink;
+    process.env.AGENT_GATEWAY_IU_USAGE_LOG = sink;
     stubFetch(sseResponse(""));
     await expect(
       visionRead({ imageBase64: "Zm9v", prompt: "describe this", model: "gemini-3.5-flash" }),

@@ -1,6 +1,6 @@
 // FIRST: the MCP process is spawned with the calling session's cwd, so Bun never auto-loaded
-// sideclaw/.env here — otel and the routing/backend flags ran unconfigured. Order matters.
-import "./lib/load-env.ts";
+// agent-gateway/.env here — otel and the routing/backend flags ran unconfigured. Order matters.
+import { warnLegacyEnv } from "./lib/env-compat.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerCheckTool } from "./mcp/tools/check.ts";
@@ -23,11 +23,12 @@ import { logRoutingOverrides, logStaleQuotaEnvVars } from "./lib/routing.ts";
 // set it explicitly here anyway — this is the one process that default exists to describe, and
 // an explicit call survives a future change to that default.
 setProcessKind("mcp");
+warnLegacyEnv(logger);
 logRoutingOverrides(logger);
 logStaleQuotaEnvVars(logger);
 
 const server = new McpServer({
-  name: "sideclaw",
+  name: "agent-gateway",
   version: "0.1.0",
 });
 
@@ -47,4 +48,4 @@ registerUpdatePrTool(server);
 const transport = new StdioServerTransport();
 await server.connect(transport);
 
-logger.info({ event: "mcp.startup" }, "sideclaw mcp server ready");
+logger.info({ event: "mcp.startup" }, "agent-gateway mcp server ready");

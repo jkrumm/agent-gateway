@@ -2,16 +2,16 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- `-server`, not the historical `com.jkrumm.sideclaw`, and the suffix is
-       load-bearing rather than cosmetic. Background Task Management stores a
-       disposition per IDENTIFIER, and this machine's entry for
-       `8.com.jkrumm.sideclaw` is denied. Measured 2026-08-06: removing the
-       plist entirely, re-adding it, and re-adding it under a different filename
-       all re-registered as [enabled, disallowed] — the denial outlives the
-       file. A label BTM has never seen registers allowed. Renaming back
-       resurrects the boot failure. -->
+  <!-- A label BTM has never seen, deliberately: never reuse `com.jkrumm.sideclaw`.
+       Background Task Management stores a disposition per IDENTIFIER, and this
+       machine's entry for `8.com.jkrumm.sideclaw` is denied. Measured 2026-08-06:
+       removing the plist entirely, re-adding it, and re-adding it under a
+       different filename all re-registered as [enabled, disallowed] — the denial
+       outlives the file. A label BTM has never seen registers allowed; this one
+       (2026-10-09 rename from `com.jkrumm.sideclaw-server`) must be re-verified
+       after the first boot (AGENTS.md § Deploy). -->
   <key>Label</key>
-  <string>com.jkrumm.sideclaw-server</string>
+  <string>com.jkrumm.agent-gateway</string>
 
   <!-- A wrapper script, NOT /opt/homebrew/bin/bun directly. macOS Background
        Task Management resolves a launch item's effective disposition from its
@@ -21,14 +21,14 @@
        job to a late (or absent) KeepAlive spawn. Measured 2026-08-06 — three
        reboots produced one no-start and two ~3-minute-late starts, against ~18s
        for every allowed agent. The same probe via a shell script resolved to
-       [enabled, allowed]. Full argument in scripts/sideclaw-start.sh. -->
+       [enabled, allowed]. Full argument in scripts/agent-gateway-start.sh. -->
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/jkrumm/SourceRoot/sideclaw/scripts/sideclaw-start.sh</string>
+    <string>/Users/jkrumm/SourceRoot/agent-gateway/scripts/agent-gateway-start.sh</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/jkrumm/SourceRoot/sideclaw</string>
+  <string>/Users/jkrumm/SourceRoot/agent-gateway</string>
 
   <!-- Bun auto-loads .env from WorkingDirectory — no need to repeat vars here -->
 
@@ -50,7 +50,7 @@
 
   <!-- Hard-capped by launchd at 60s regardless of what's written here — measured on this host
        2026-09-08: raising this value to 2700 changed nothing (`launchctl print
-       gui/<uid>/com.jkrumm.sideclaw-server` still reported `exit timeout = 60`), and a control
+       gui/<uid>/com.jkrumm.agent-gateway` still reported `exit timeout = 60`), and a control
        probe at 120 confirmed the same ceiling. So 60 is not a chosen drain budget — it's
        launchd's actual measured maximum, and this key now says exactly that rather than a
        number that implied more headroom than launchd will ever grant. A signal-initiated
@@ -75,14 +75,14 @@
        untouched for 3+ days, and a KeepAlive agent opens its stdio ONCE at
        spawn — so after a sweep the process keeps writing into an UNLINKED
        inode. Measured on this machine 2026-07-31: `lsof -p 895` showed
-       /private/tmp/sideclaw.log and .err held open while `ls /tmp/sideclaw.log`
+       /private/tmp/agent-gateway.log and .err held open while `ls /tmp/agent-gateway.log`
        returned No such file. Every line since the sweep was unrecoverable, and
-       sideclaw had no post-mortem at all. Same pattern devhost-health and
+       agent-gateway had no post-mortem at all. Same pattern devhost-health and
        linewatch-collector already use. -->
   <key>StandardOutPath</key>
-  <string>/Users/jkrumm/Library/Logs/sideclaw.log</string>
+  <string>/Users/jkrumm/Library/Logs/agent-gateway.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/jkrumm/Library/Logs/sideclaw.err</string>
+  <string>/Users/jkrumm/Library/Logs/agent-gateway.err</string>
 </dict>
 </plist>

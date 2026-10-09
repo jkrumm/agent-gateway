@@ -5,7 +5,7 @@
 // the ordinary REQUEUE_ON_RECOVER path and silently resume a job an operator asked to stop.
 //
 // Seeds the row via a second bun:sqlite connection to the same test DB file
-// (tests/setup.ts points SIDECLAW_JOBS_DB at one shared temp file for the whole run) — store.ts
+// (tests/setup.ts points AGENT_GATEWAY_JOBS_DB at one shared temp file for the whole run) — store.ts
 // exposes no "insert an arbitrary row" API, and this is the most direct way to reproduce
 // exactly the on-disk state a real restart leaves.
 
@@ -18,8 +18,8 @@ afterEach(() => {
 });
 
 function dbPath(): string {
-  const p = process.env.SIDECLAW_JOBS_DB;
-  if (!p) throw new Error("SIDECLAW_JOBS_DB not set — tests/setup.ts should have set it");
+  const p = process.env.AGENT_GATEWAY_JOBS_DB;
+  if (!p) throw new Error("AGENT_GATEWAY_JOBS_DB not set — tests/setup.ts should have set it");
   return p;
 }
 

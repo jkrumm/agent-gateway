@@ -19,11 +19,11 @@ import {
 } from "../server/lib/shutdown.ts";
 
 function readExitTimeOutSeconds(): number {
-  const plistPath = join(import.meta.dir, "..", "com.jkrumm.sideclaw-server.plist");
+  const plistPath = join(import.meta.dir, "..", "com.jkrumm.agent-gateway.plist");
   const xml = readFileSync(plistPath, "utf-8");
   const match = xml.match(/<key>ExitTimeOut<\/key>\s*<integer>(\d+)<\/integer>/);
   const seconds = match?.[1];
-  if (!seconds) throw new Error("com.jkrumm.sideclaw-server.plist has no ExitTimeOut key");
+  if (!seconds) throw new Error("com.jkrumm.agent-gateway.plist has no ExitTimeOut key");
   return parseInt(seconds, 10);
 }
 
@@ -36,7 +36,7 @@ describe("signal-initiated drain window", () => {
   });
 });
 
-describe("com.jkrumm.sideclaw-server.plist ExitTimeOut", () => {
+describe("com.jkrumm.agent-gateway.plist ExitTimeOut", () => {
   test("is set to exactly launchd's measured cap — a higher value is silently capped, not honored", () => {
     const exitTimeoutMs = readExitTimeOutSeconds() * 1000;
     expect(exitTimeoutMs).toBe(LAUNCHD_HARD_EXIT_TIMEOUT_MS);

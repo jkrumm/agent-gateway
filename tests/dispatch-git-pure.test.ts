@@ -84,7 +84,7 @@ const BENIGN_LINES: readonly string[] = [
   "The monitor at 100.63.255.1 is a public address, not a tailnet one.",
   "100.128.0.1 sits just above the carrier-grade NAT block, so it is public.",
   "Internal services answer on 192.168.1.10 and 10.0.0.5.",
-  "See https://github.com/jkrumm/sideclaw/pull/12 for the earlier attempt.",
+  "See https://github.com/jkrumm/agent-gateway/pull/12 for the earlier attempt.",
   "Bearer token handling is described in docs/auth.md.",
   "Reverted in commit 3b4581a9f2c1d0e4b7a6958372615f0d2c1b9e84.",
   "+const MAX_CHANGED_LINES = 2000;",
@@ -94,7 +94,7 @@ const BENIGN_LINES: readonly string[] = [
   "Failure mode: `Resource not accessible by personal access token`.",
   "xoxb is the prefix of a Slack bot token.",
   "Run `make reload` and poll /api/jobs until running == 0.",
-  "The worktree is created under ~/.local/state/sideclaw/worktrees.",
+  "The worktree is created under ~/.local/state/agent-gateway/worktrees.",
   "Authorization is checked in server/routes/auth.ts, line 120.",
 ];
 
@@ -265,13 +265,13 @@ describe("slugify — fuzz", () => {
 
 describe("parseGithubRemote", () => {
   const accepted: ReadonlyArray<[string, string, string]> = [
-    ["https://github.com/jkrumm/sideclaw.git", "jkrumm", "sideclaw"],
-    ["https://github.com/jkrumm/sideclaw", "jkrumm", "sideclaw"],
-    ["https://github.com/jkrumm/sideclaw/", "jkrumm", "sideclaw"],
-    ["https://github.com/jkrumm/sideclaw.git/", "jkrumm", "sideclaw"],
-    ["git@github.com:jkrumm/sideclaw.git", "jkrumm", "sideclaw"],
-    ["git@github.com:jkrumm/sideclaw", "jkrumm", "sideclaw"],
-    ["ssh://git@github.com/jkrumm/sideclaw.git", "jkrumm", "sideclaw"],
+    ["https://github.com/jkrumm/agent-gateway.git", "jkrumm", "agent-gateway"],
+    ["https://github.com/jkrumm/agent-gateway", "jkrumm", "agent-gateway"],
+    ["https://github.com/jkrumm/agent-gateway/", "jkrumm", "agent-gateway"],
+    ["https://github.com/jkrumm/agent-gateway.git/", "jkrumm", "agent-gateway"],
+    ["git@github.com:jkrumm/agent-gateway.git", "jkrumm", "agent-gateway"],
+    ["git@github.com:jkrumm/agent-gateway", "jkrumm", "agent-gateway"],
+    ["ssh://git@github.com/jkrumm/agent-gateway.git", "jkrumm", "agent-gateway"],
     ["https://github.com/some-org/repo.with.dots", "some-org", "repo.with.dots"],
   ];
   for (const [url, owner, repo] of accepted) {
@@ -281,12 +281,12 @@ describe("parseGithubRemote", () => {
   }
 
   const rejected = [
-    "https://github.com.evil.example/jkrumm/sideclaw.git",
+    "https://github.com.evil.example/jkrumm/agent-gateway.git",
     "https://github.com/jkrumm",
     "https://github.com/",
     "/var/folders/tmp/origin.git",
     "file:///var/folders/tmp/origin.git",
-    "http://github.com/jkrumm/sideclaw.git",
+    "http://github.com/jkrumm/agent-gateway.git",
     "",
   ];
   for (const url of rejected) {
@@ -302,12 +302,12 @@ describe("parseGitlabRemote", () => {
   // GitLab projects may sit in a NESTED namespace — the lazy namespace group keeps the
   // full path in `owner`, so `owner/repo` is always the project path the API expects.
   const accepted: ReadonlyArray<[string, string, string]> = [
-    ["https://gitlab.com/jkrumm/sideclaw.git", "jkrumm", "sideclaw"],
-    ["https://gitlab.com/jkrumm/sideclaw", "jkrumm", "sideclaw"],
-    ["https://gitlab.com/jkrumm/sideclaw/", "jkrumm", "sideclaw"],
-    ["git@gitlab.com:jkrumm/sideclaw.git", "jkrumm", "sideclaw"],
-    ["git@gitlab.com:jkrumm/sideclaw", "jkrumm", "sideclaw"],
-    ["ssh://git@gitlab.com/jkrumm/sideclaw.git", "jkrumm", "sideclaw"],
+    ["https://gitlab.com/jkrumm/agent-gateway.git", "jkrumm", "agent-gateway"],
+    ["https://gitlab.com/jkrumm/agent-gateway", "jkrumm", "agent-gateway"],
+    ["https://gitlab.com/jkrumm/agent-gateway/", "jkrumm", "agent-gateway"],
+    ["git@gitlab.com:jkrumm/agent-gateway.git", "jkrumm", "agent-gateway"],
+    ["git@gitlab.com:jkrumm/agent-gateway", "jkrumm", "agent-gateway"],
+    ["ssh://git@gitlab.com/jkrumm/agent-gateway.git", "jkrumm", "agent-gateway"],
     ["https://gitlab.com/group/sub/repo.with.dots.git", "group/sub", "repo.with.dots"],
   ];
   for (const [url, owner, repo] of accepted) {
@@ -317,14 +317,14 @@ describe("parseGitlabRemote", () => {
   }
 
   const rejected = [
-    "https://github.com/jkrumm/sideclaw.git",
-    "https://gitlab.example.com/jkrumm/sideclaw.git",
-    "https://gitlab.com.evil.example/jkrumm/sideclaw.git",
+    "https://github.com/jkrumm/agent-gateway.git",
+    "https://gitlab.example.com/jkrumm/agent-gateway.git",
+    "https://gitlab.com.evil.example/jkrumm/agent-gateway.git",
     "https://gitlab.com/jkrumm",
     "https://gitlab.com/",
     "/var/folders/tmp/origin.git",
     "file:///var/folders/tmp/origin.git",
-    "http://gitlab.com/jkrumm/sideclaw.git",
+    "http://gitlab.com/jkrumm/agent-gateway.git",
     "",
   ];
   for (const url of rejected) {

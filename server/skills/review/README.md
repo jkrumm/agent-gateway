@@ -14,7 +14,7 @@ Phase 1 — Data Gathering (parallel shell, ~2s)
 Phase 1b (parallel sidecar, started right after Phase 1, ~3-7 min) — OpenCodeReview
 └── `ocr review` (alibaba/open-code-review CLI) on the `review_ocr` route's model over IU —
     awaited only just before synthesis, so its wall time overlaps the router +
-    angle phases instead of sitting in front of them. `SIDECLAW_REVIEW_OCR=0`
+    angle phases instead of sitting in front of them. `AGENT_GATEWAY_REVIEW_OCR=0`
     disables it.
 
 Phase 1.5 — Angle Routing (one triage call on the `review_router` route (IU), ~10-20s)
@@ -99,7 +99,7 @@ External tools run in parallel with agents:
   remote only when the scope has no explicit base to hand it — see `fallowBaseFor`)
 - **CodeRabbit CLI** — additional static analysis (if installed)
 - **OpenCodeReview (`ocr`)** — cross-file consistency, config drift, precise line-anchored
-  findings (if installed on PATH; `SIDECLAW_REVIEW_OCR=0` disables)
+  findings (if installed on PATH; `AGENT_GATEWAY_REVIEW_OCR=0` disables)
 
 ## Output Schema
 
@@ -205,7 +205,7 @@ without counting a token twice.
 Wall time: ~60–120s (router adds ~10-20s; phase 2 dominates and is parallel up to
 `ANGLE_CONCURRENCY`; the adversary runs in parallel with phase 2, still inside
 phase 2's window). Passing an explicit `angles` list skips
-the router. Set `SIDECLAW_REVIEW_ADVERSARY=false` to disable the adversary.
+the router. Set `AGENT_GATEWAY_REVIEW_ADVERSARY=false` to disable the adversary.
 
 ### Why the adversary is non-negotiable by default
 
@@ -221,7 +221,7 @@ bias that same-family multi-reviewer pipelines otherwise carry.
 Called via the `review` MCP tool:
 
 ```
-mcp__sideclaw__review({
+mcp__agent-gateway__review({
   cwd: "/path/to/repo",
   scope: "uncommitted",        // or "head", "HEAD~3", "path/to/file.ts"
   context: "add retry logic",  // optional — helps catch goal mismatches

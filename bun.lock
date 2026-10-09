@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "sideclaw",
+      "name": "agent-gateway",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.30.0",
         "@octokit/rest": "^22.0.1",

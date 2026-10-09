@@ -1,6 +1,6 @@
 // The dispatch repo policy (server/lib/dispatch-policy.ts) is the boundary that closes the
 // bypass described in the module's own header: POST /api/jobs had no repo allowlist and no
-// tier ceiling, and `sensitive` was a caller-declared field sideclaw never verified. These
+// tier ceiling, and `sensitive` was a caller-declared field agent-gateway never verified. These
 // pin the default rule table, the "env can only narrow, never widen" override contract, and
 // that resolveDispatchTarget never throws.
 
@@ -64,8 +64,8 @@ describe("resolveDispatchTarget — accepts within ceiling", () => {
     expect(r).toEqual({ ok: true, repo: "hermes-agent", root: ROOT, sensitive: false });
   });
 
-  test("sideclaw / warden / dotfiles at implement — no longer pinned, the permissive default applies", () => {
-    for (const repo of ["sideclaw", "warden", "dotfiles"]) {
+  test("agent-gateway / warden / dotfiles at implement — no longer pinned, the permissive default applies", () => {
+    for (const repo of ["agent-gateway", "warden", "dotfiles"]) {
       const r = resolveDispatchTarget({ cwd: join(ROOT, repo), tier: "implement" }, DEFAULT_POLICY);
       expect(r).toEqual({ ok: true, repo, root: ROOT, sensitive: false });
     }
@@ -189,7 +189,7 @@ describe("resolveDispatchTarget — symlink resolution", () => {
   const rootPath = join(scratch, "root");
   mkdirSync(rootPath, { recursive: true });
   const root = realpathSync(rootPath);
-  const policy = buildDispatchPolicy({ SIDECLAW_DISPATCH_ROOTS: root });
+  const policy = buildDispatchPolicy({ AGENT_GATEWAY_DISPATCH_ROOTS: root });
 
   test("the resolved repo name comes from the realpath, not the symlink name", () => {
     const realRepo = join(root, "real-repo");
@@ -213,17 +213,17 @@ describe("resolveDispatchTarget — symlink resolution", () => {
 describe("buildDispatchPolicy env overrides — ceilings", () => {
   test("lowering a ceiling is applied", () => {
     const { rules, overrides } = buildDispatchPolicy({
-      SIDECLAW_DISPATCH_CEILINGS: "vps:investigate",
+      AGENT_GATEWAY_DISPATCH_CEILINGS: "vps:investigate",
     });
     expect(rules.vps).toEqual({ ceiling: "investigate", sensitive: false });
     expect(overrides).toEqual([
-      { key: "SIDECLAW_DISPATCH_CEILINGS", value: "vps:investigate", applied: true },
+      { key: "AGENT_GATEWAY_DISPATCH_CEILINGS", value: "vps:investigate", applied: true },
     ]);
   });
 
   test("raising a ceiling is refused with a reason, default stays", () => {
     const { rules, overrides } = buildDispatchPolicy({
-      SIDECLAW_DISPATCH_CEILINGS: "brain:implement",
+      AGENT_GATEWAY_DISPATCH_CEILINGS: "brain:implement",
     });
     expect(rules.brain).toEqual({ ceiling: "investigate", sensitive: false });
     expect(overrides).toHaveLength(1);
@@ -231,24 +231,26 @@ describe("buildDispatchPolicy env overrides — ceilings", () => {
     expect(overrides[0]?.reason).toContain("does not lower");
   });
 
-  test("narrowing sideclaw's ceiling via env is applied — no longer pinned", () => {
+  test("narrowing agent-gateway's ceiling via env is applied — no longer pinned", () => {
     const { rules, overrides } = buildDispatchPolicy({
-      SIDECLAW_DISPATCH_CEILINGS: "sideclaw:investigate",
+      AGENT_GATEWAY_DISPATCH_CEILINGS: "agent-gateway:investigate",
     });
-    expect(rules.sideclaw).toEqual({ ceiling: "investigate", sensitive: false });
+    expect(rules["agent-gateway"]).toEqual({ ceiling: "investigate", sensitive: false });
     expect(overrides[0]?.applied).toBe(true);
   });
 
   test("narrowing warden's ceiling via env is applied — no longer pinned", () => {
     const { rules, overrides } = buildDispatchPolicy({
-      SIDECLAW_DISPATCH_CEILINGS: "warden:author",
+      AGENT_GATEWAY_DISPATCH_CEILINGS: "warden:author",
     });
     expect(rules.warden).toEqual({ ceiling: "author", sensitive: false });
     expect(overrides[0]?.applied).toBe(true);
   });
 
   test("an unknown tier in the ceiling string is refused", () => {
-    const { rules, overrides } = buildDispatchPolicy({ SIDECLAW_DISPATCH_CEILINGS: "vps:bogus" });
+    const { rules, overrides } = buildDispatchPolicy({
+      AGENT_GATEWAY_DISPATCH_CEILINGS: "vps:bogus",
+    });
     expect(rules.vps).toBeUndefined();
     expect(overrides[0]?.applied).toBe(false);
     expect(overrides[0]?.reason).toContain("unknown tier");
@@ -260,28 +262,30 @@ describe("buildDispatchPolicy env overrides — sensitive", () => {
     // The ceiling moves too — `sensitive` means "investigate only" everywhere else in this
     // estate, and leaving the two independent let an `implement` submission reach a job row
     // before assertSensitiveTierAllowed refused it. Stricter than the original expectation.
-    const { rules, overrides } = buildDispatchPolicy({ SIDECLAW_DISPATCH_SENSITIVE: "vps" });
+    const { rules, overrides } = buildDispatchPolicy({ AGENT_GATEWAY_DISPATCH_SENSITIVE: "vps" });
     expect(rules.vps).toEqual({ ceiling: "investigate", sensitive: true });
     expect(overrides).toEqual([
-      { key: "SIDECLAW_DISPATCH_SENSITIVE", value: "vps", applied: true },
+      { key: "AGENT_GATEWAY_DISPATCH_SENSITIVE", value: "vps", applied: true },
     ]);
   });
 
   test("an already-sensitive repo is a no-op recorded as applied", () => {
     const { rules, overrides } = buildDispatchPolicy({
-      SIDECLAW_DISPATCH_SENSITIVE: "dotfiles-private",
+      AGENT_GATEWAY_DISPATCH_SENSITIVE: "dotfiles-private",
     });
     expect(rules["dotfiles-private"]).toEqual({ ceiling: "investigate", sensitive: true });
     expect(overrides).toEqual([
-      { key: "SIDECLAW_DISPATCH_SENSITIVE", value: "dotfiles-private", applied: true },
+      { key: "AGENT_GATEWAY_DISPATCH_SENSITIVE", value: "dotfiles-private", applied: true },
     ]);
   });
 
-  test("marking sideclaw sensitive is applied — no longer pinned", () => {
-    const { rules, overrides } = buildDispatchPolicy({ SIDECLAW_DISPATCH_SENSITIVE: "sideclaw" });
-    expect(rules.sideclaw).toEqual({ ceiling: "investigate", sensitive: true });
+  test("marking agent-gateway sensitive is applied — no longer pinned", () => {
+    const { rules, overrides } = buildDispatchPolicy({
+      AGENT_GATEWAY_DISPATCH_SENSITIVE: "agent-gateway",
+    });
+    expect(rules["agent-gateway"]).toEqual({ ceiling: "investigate", sensitive: true });
     expect(overrides).toEqual([
-      { key: "SIDECLAW_DISPATCH_SENSITIVE", value: "sideclaw", applied: true },
+      { key: "AGENT_GATEWAY_DISPATCH_SENSITIVE", value: "agent-gateway", applied: true },
     ]);
   });
 });
@@ -289,24 +293,24 @@ describe("buildDispatchPolicy env overrides — sensitive", () => {
 describe("buildDispatchPolicy env overrides — roots", () => {
   test("a relative path is refused while absolute siblings still apply", () => {
     const { roots, overrides } = buildDispatchPolicy({
-      SIDECLAW_DISPATCH_ROOTS: "relative/path,/abs/one,/abs/two",
+      AGENT_GATEWAY_DISPATCH_ROOTS: "relative/path,/abs/one,/abs/two",
     });
     expect(roots).toEqual(["/abs/one", "/abs/two"]);
     expect(overrides).toEqual([
       {
-        key: "SIDECLAW_DISPATCH_ROOTS",
+        key: "AGENT_GATEWAY_DISPATCH_ROOTS",
         value: "relative/path",
         applied: false,
         reason: "not an absolute path: relative/path",
       },
-      { key: "SIDECLAW_DISPATCH_ROOTS", value: "/abs/one", applied: true },
-      { key: "SIDECLAW_DISPATCH_ROOTS", value: "/abs/two", applied: true },
+      { key: "AGENT_GATEWAY_DISPATCH_ROOTS", value: "/abs/one", applied: true },
+      { key: "AGENT_GATEWAY_DISPATCH_ROOTS", value: "/abs/two", applied: true },
     ]);
   });
 
   test("every entry relative falls back to the default roots", () => {
     const { roots, overrides } = buildDispatchPolicy({
-      SIDECLAW_DISPATCH_ROOTS: "relative/one,relative/two",
+      AGENT_GATEWAY_DISPATCH_ROOTS: "relative/one,relative/two",
     });
     expect(roots).toEqual(WORKSPACE_ROOTS);
     expect(overrides.some((o) => !o.applied)).toBe(true);
@@ -324,14 +328,14 @@ describe("logDispatchPolicy", () => {
   test("one record per applied override on info, one per refused override on warn", () => {
     const log = fakeLogger();
     const overrides = [
-      { key: "SIDECLAW_DISPATCH_CEILINGS", value: "vps:investigate", applied: true },
+      { key: "AGENT_GATEWAY_DISPATCH_CEILINGS", value: "vps:investigate", applied: true },
       {
-        key: "SIDECLAW_DISPATCH_CEILINGS",
+        key: "AGENT_GATEWAY_DISPATCH_CEILINGS",
         value: "dotfiles:implement",
         applied: false,
         reason: "does not lower dotfiles's ceiling",
       },
-      { key: "SIDECLAW_DISPATCH_SENSITIVE", value: "vps", applied: true },
+      { key: "AGENT_GATEWAY_DISPATCH_SENSITIVE", value: "vps", applied: true },
     ];
     logDispatchPolicy(log, overrides);
     expect(log.calls.info).toHaveLength(2);
@@ -345,13 +349,13 @@ describe("logDispatchPolicy", () => {
 // kind that stay invisible until the day DEFAULT_RULE stops being permissive.
 
 describe("the rule lookup cannot be missed by spelling", () => {
-  const tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "sideclaw-policy-case-")));
+  const tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "agent-gateway-policy-case-")));
   // A repo whose on-disk name is lowercase (the real shape — every ruled repo on this box is
   // lowercase, verified) and one whose on-disk name carries capitals (the shape that would
   // silently stop matching a lowercase rule key).
   mkdirSync(join(tmpRoot, "homelab-private"));
   mkdirSync(join(tmpRoot, "Dotfiles-Private"));
-  const policy = buildDispatchPolicy({ SIDECLAW_DISPATCH_ROOTS: tmpRoot });
+  const policy = buildDispatchPolicy({ AGENT_GATEWAY_DISPATCH_ROOTS: tmpRoot });
 
   afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
 
@@ -390,9 +394,9 @@ describe("the rule lookup cannot be missed by spelling", () => {
 });
 
 describe("a repo named after a prototype property is not a rule", () => {
-  const tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "sideclaw-policy-proto-")));
+  const tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "agent-gateway-policy-proto-")));
   for (const name of ["constructor", "toString", "hasOwnProperty"]) mkdirSync(join(tmpRoot, name));
-  const policy = buildDispatchPolicy({ SIDECLAW_DISPATCH_ROOTS: tmpRoot });
+  const policy = buildDispatchPolicy({ AGENT_GATEWAY_DISPATCH_ROOTS: tmpRoot });
 
   afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
 
@@ -412,8 +416,8 @@ describe("a repo named after a prototype property is not a rule", () => {
 
   test("and __proto__ as a ceiling override name cannot poison the table", () => {
     const poisoned = buildDispatchPolicy({
-      SIDECLAW_DISPATCH_ROOTS: tmpRoot,
-      SIDECLAW_DISPATCH_CEILINGS: "__proto__:investigate",
+      AGENT_GATEWAY_DISPATCH_ROOTS: tmpRoot,
+      AGENT_GATEWAY_DISPATCH_CEILINGS: "__proto__:investigate",
     });
     // Whatever that entry did to its own table, an UNRELATED repo must still read DEFAULT_RULE.
     const r = resolveDispatchTarget(
@@ -426,28 +430,30 @@ describe("a repo named after a prototype property is not a rule", () => {
 });
 
 describe("an env override is normalized, not taken literally", () => {
-  const tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "sideclaw-policy-envcase-")));
+  const tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "agent-gateway-policy-envcase-")));
   mkdirSync(join(tmpRoot, "some-repo"));
   afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
 
   test("a ceiling override spelled in mixed case still binds to the repo", () => {
     const policy = buildDispatchPolicy({
-      SIDECLAW_DISPATCH_ROOTS: tmpRoot,
-      SIDECLAW_DISPATCH_CEILINGS: "Some-Repo:investigate",
+      AGENT_GATEWAY_DISPATCH_ROOTS: tmpRoot,
+      AGENT_GATEWAY_DISPATCH_CEILINGS: "Some-Repo:investigate",
     });
     expect(policy.overrides.find((o) => o.value === "Some-Repo:investigate")?.applied).toBe(true);
     const r = resolveDispatchTarget({ cwd: join(tmpRoot, "some-repo"), tier: "author" }, policy);
     expect(r.ok).toBe(false);
   });
 
-  test("a mixed-case sideclaw ceiling override normalizes and is refused only for raising it", () => {
-    // sideclaw's default ceiling is already `implement` (DEFAULT_RULE, no longer pinned), so
+  test("a mixed-case agent-gateway ceiling override normalizes and is refused only for raising it", () => {
+    // agent-gateway's default ceiling is already `implement` (DEFAULT_RULE, no longer pinned), so
     // naming it at `implement` is a no-op raise, refused on that basis rather than a pin.
-    const policy = buildDispatchPolicy({ SIDECLAW_DISPATCH_CEILINGS: "SideClaw:implement" });
-    const o = policy.overrides.find((x) => x.value === "SideClaw:implement");
+    const policy = buildDispatchPolicy({
+      AGENT_GATEWAY_DISPATCH_CEILINGS: "Agent-Gateway:implement",
+    });
+    const o = policy.overrides.find((x) => x.value === "Agent-Gateway:implement");
     expect(o?.applied).toBe(false);
     expect(o?.reason).toContain("does not lower");
-    expect(policy.rules.sideclaw).toBeUndefined();
+    expect(policy.rules["agent-gateway"]).toBeUndefined();
   });
 });
 
@@ -459,7 +465,9 @@ describe("an override named after a prototype key cannot reshape the table", () 
   // the key is now an ordinary own property with no setter to trigger.
   for (const evil of ["__proto__", "constructor", "prototype"]) {
     test(`'${evil}' as a ceiling override is an ordinary key, not a prototype write`, () => {
-      const policy = buildDispatchPolicy({ SIDECLAW_DISPATCH_CEILINGS: `${evil}:investigate` });
+      const policy = buildDispatchPolicy({
+        AGENT_GATEWAY_DISPATCH_CEILINGS: `${evil}:investigate`,
+      });
       const o = policy.overrides.find((x) => x.value === `${evil}:investigate`);
       // It is reported applied, and it must actually BE applied — reported-but-vanished is
       // the exact failure this pins.
@@ -472,7 +480,7 @@ describe("an override named after a prototype key cannot reshape the table", () 
     });
 
     test(`'${evil}' as a sensitive override is an ordinary key too`, () => {
-      const policy = buildDispatchPolicy({ SIDECLAW_DISPATCH_SENSITIVE: evil });
+      const policy = buildDispatchPolicy({ AGENT_GATEWAY_DISPATCH_SENSITIVE: evil });
       expect(policy.overrides.find((x) => x.value === evil)?.applied).toBe(true);
       expect(Object.hasOwn(policy.rules, evil)).toBe(true);
       expect(policy.rules[evil]?.sensitive).toBe(true);
@@ -485,12 +493,12 @@ describe("marking a repo sensitive clamps its ceiling", () => {
   test("a policy-neutral repo marked sensitive drops to investigate", () => {
     // Otherwise the route's ceiling-only pre-check admits an `implement` submission, spends a
     // job row and a queue slot, and the refusal only lands later inside runDispatch.
-    const policy = buildDispatchPolicy({ SIDECLAW_DISPATCH_SENSITIVE: "some-repo" });
+    const policy = buildDispatchPolicy({ AGENT_GATEWAY_DISPATCH_SENSITIVE: "some-repo" });
     expect(policy.rules["some-repo"]).toEqual({ ceiling: "investigate", sensitive: true });
   });
 
   test("a repo already at investigate is unchanged apart from the flag", () => {
-    const policy = buildDispatchPolicy({ SIDECLAW_DISPATCH_SENSITIVE: "brain" });
+    const policy = buildDispatchPolicy({ AGENT_GATEWAY_DISPATCH_SENSITIVE: "brain" });
     expect(policy.rules.brain).toEqual({ ceiling: "investigate", sensitive: true });
   });
 });
@@ -524,7 +532,7 @@ describe("POST /api/jobs refuses at submit, before a job row exists", () => {
     // Against the SINGLETON policy, whose roots are the temp root tests/setup.ts seeds — so
     // the ruled repo has to exist under THAT root, not under the real ~/SourceRoot, or this
     // would refuse for being outside every root and never reach the ceiling check at all.
-    const testRoot = (process.env.SIDECLAW_DISPATCH_ROOTS ?? "").split(",")[0]?.trim() ?? "";
+    const testRoot = (process.env.AGENT_GATEWAY_DISPATCH_ROOTS ?? "").split(",")[0]?.trim() ?? "";
     expect(testRoot).not.toBe("");
     const ruled = join(testRoot, "brain");
     mkdirSync(ruled, { recursive: true });

@@ -90,11 +90,11 @@ export const AGENT_OUTPUT = z.object({
     .string()
     .describe(
       "Stable identifier: the Claude sessionId for herdr/claude-sourced agents, the " +
-        "sideclaw job id for dispatch-sourced entries.",
+        "agent-gateway job id for dispatch-sourced entries.",
     ),
   source: AGENT_SOURCE.describe(
     "Which collector produced this entry: a herdr pane, Claude's own agent registry " +
-      "(no herdr pane — usually a `claude --bg` daemon), or a sideclaw dispatch job.",
+      "(no herdr pane — usually a `claude --bg` daemon), or an agent-gateway dispatch job.",
   ),
   sessionId: z.string().nullable().describe("Claude Code session id. Null for dispatch entries."),
   paneId: z
@@ -220,7 +220,9 @@ export const AGENTS_SNAPSHOT_OUTPUT = z.object({
   generatedAt: z.number().describe("Epoch ms this snapshot was produced."),
   staleAfterHours: z
     .number()
-    .describe("Threshold (SIDECLAW_AGENT_STALE_HOURS, default 24) used to derive state stale."),
+    .describe(
+      "Threshold (AGENT_GATEWAY_AGENT_STALE_HOURS, default 24) used to derive state stale.",
+    ),
   summary: AGENTS_SUMMARY_OUTPUT,
   projects: z
     .array(PROJECT_OUTPUT)
@@ -1195,7 +1197,7 @@ export function collectDispatchJobs(records: JobRecord[], now: number): Dispatch
 const DEFAULT_STALE_HOURS = 24;
 
 export function staleAfterHours(): number {
-  const raw = process.env.SIDECLAW_AGENT_STALE_HOURS;
+  const raw = process.env.AGENT_GATEWAY_AGENT_STALE_HOURS;
   const parsed = raw ? parseInt(raw, 10) : NaN;
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_STALE_HOURS;
 }
@@ -1209,7 +1211,7 @@ export function staleAfterHours(): number {
 
 /** Override the stale-agent threshold used to derive each agent's `state` — the `overview`
  *  job's `staleAfterHours` input param. Omitted (the `GET /api/agents` path): read from
- *  `SIDECLAW_AGENT_STALE_HOURS` via `staleAfterHours()`, unchanged from before this param
+ *  `AGENT_GATEWAY_AGENT_STALE_HOURS` via `staleAfterHours()`, unchanged from before this param
  *  existed. */
 export async function buildSnapshot(staleHoursOverride?: number): Promise<AgentsSnapshot> {
   const now = Date.now();

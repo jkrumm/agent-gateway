@@ -171,21 +171,21 @@ function workerEnv(overrides: Partial<Parameters<typeof buildWorkerEnv>[0]> = {}
 }
 
 describe("buildWorkerEnv — USAGE_LANE", () => {
-  test("pins sideclaw:<tool> for a defined tool", () => {
-    expect(workerEnv({ tool: "review" }).USAGE_LANE).toBe("sideclaw:review");
+  test("pins agent-gateway:<tool> for a defined tool", () => {
+    expect(workerEnv({ tool: "review" }).USAGE_LANE).toBe("agent-gateway:review");
   });
 
-  test("defaults to sideclaw:unknown when no tool is given", () => {
-    expect(workerEnv({ tool: undefined }).USAGE_LANE).toBe("sideclaw:unknown");
+  test("defaults to agent-gateway:unknown when no tool is given", () => {
+    expect(workerEnv({ tool: undefined }).USAGE_LANE).toBe("agent-gateway:unknown");
   });
 
-  test("coarsens a review sub-step tool to sideclaw:review", () => {
+  test("coarsens a review sub-step tool to agent-gateway:review", () => {
     // usage-tracker's sub_tool column has no sub-lane concept — review:router,
     // review:angle, review:adversary and review:synthesis must all collapse to one lane.
-    expect(workerEnv({ tool: "review:router" }).USAGE_LANE).toBe("sideclaw:review");
-    expect(workerEnv({ tool: "review:angle" }).USAGE_LANE).toBe("sideclaw:review");
-    expect(workerEnv({ tool: "review:adversary" }).USAGE_LANE).toBe("sideclaw:review");
-    expect(workerEnv({ tool: "review:synthesis" }).USAGE_LANE).toBe("sideclaw:review");
+    expect(workerEnv({ tool: "review:router" }).USAGE_LANE).toBe("agent-gateway:review");
+    expect(workerEnv({ tool: "review:angle" }).USAGE_LANE).toBe("agent-gateway:review");
+    expect(workerEnv({ tool: "review:adversary" }).USAGE_LANE).toBe("agent-gateway:review");
+    expect(workerEnv({ tool: "review:synthesis" }).USAGE_LANE).toBe("agent-gateway:review");
   });
 
   test("survives the sensitive-env scrub that follows", () => {
@@ -200,7 +200,7 @@ describe("buildWorkerEnv — USAGE_LANE", () => {
         HOME: "/Users/example",
       },
     });
-    expect(env.USAGE_LANE).toBe("sideclaw:dispatch");
+    expect(env.USAGE_LANE).toBe("agent-gateway:dispatch");
     expect(env.GITHUB_TOKEN).toBeUndefined();
     expect(env.SOME_API_KEY).toBeUndefined();
     expect(env.SESSION_ID).toBeUndefined();

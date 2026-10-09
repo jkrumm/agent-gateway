@@ -23,7 +23,7 @@ const CLAUDE_BIN = existsSync(join(HOME, ".local/bin/claude"))
   : "claude";
 
 // No stdout chunk for this long means "wedged", not "slow" — mirrors IDLE_TIMEOUT_MS in
-// server/mcp/session-runner.ts. Reuse that export directly if calling from within sideclaw
+// server/mcp/session-runner.ts. Reuse that export directly if calling from within agent-gateway
 // rather than redeclaring the number.
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const IDLE_CHECK_INTERVAL_MS = 5_000;
@@ -223,12 +223,12 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 const server = new McpServer({
-  name: "sideclaw",
+  name: "agent-gateway",
   version: "1.0.0",
 });
 
 // ALL logging via console.error — console.log corrupts MCP stdio
-console.error("[sideclaw-mcp] Starting...");
+console.error("[agent-gateway-mcp] Starting...");
 
 server.tool(
   "check",
@@ -254,9 +254,9 @@ const transport = new StdioServerTransport();
 await server.connect(transport);
 ```
 
-Register: `claude mcp add --scope user sideclaw -- bun run /path/to/sideclaw/server/mcp.ts`
+Register: `claude mcp add --scope user agw -- bun run /path/to/agent-gateway/server/mcp.ts`
 
-Tools appear in Claude Code as `mcp__sideclaw__check`.
+Tools appear in Claude Code as `mcp__agent-gateway__check`.
 
 ## Context Injection Pattern (for HITL)
 

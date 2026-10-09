@@ -1,13 +1,14 @@
 #!/usr/bin/env bun
-// Harness-agnostic command-line front end to the sideclaw HTTP job API
+// Harness-agnostic command-line front end to the agent-gateway HTTP job API
 // (server/routes/). A plain HTTP client — no dependency on the MCP layer — so
 // any tool (OpenCode, Codex, a shell, cron) can submit and wait on jobs without
-// a Claude Code MCP client. Talks to `SIDECLAW_URL ?? http://127.0.0.1:7705`.
+// a Claude Code MCP client. Talks to `AGENT_GATEWAY_URL ?? http://127.0.0.1:7705`.
 //
 // The argv → request-body mapping and the exit-code mapping are exported pure
 // functions so tests/cli.test.ts can pin them without spawning a server; the
 // only I/O here is fetch, the git-root probe, and `--context @file` reads.
 
+import "../server/lib/env-compat.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { isTerminal, type JobStatus } from "../server/jobs/types";
@@ -210,7 +211,7 @@ export function parseArgs(argv: string[]): Parsed {
 
   const name = rest[0];
   if (help) return { command: { kind: "help", topic: name }, options };
-  if (name === undefined) throw new CliUsageError("no command given (see 'sideclaw --help')");
+  if (name === undefined) throw new CliUsageError("no command given (see 'agw --help')");
   if (name === "help") return { command: { kind: "help", topic: rest[1] }, options };
 
   switch (name) {
@@ -258,9 +259,9 @@ function parseFlags(
       const eq = arg.indexOf("=");
       const flag = eq === -1 ? arg : arg.slice(0, eq);
       const def = spec[flag];
-      if (def === undefined) throw new CliUsageError(`sideclaw ${command}: unknown flag ${flag}`);
+      if (def === undefined) throw new CliUsageError(`agw ${command}: unknown flag ${flag}`);
       if (def === "boolean") {
-        if (eq !== -1) throw new CliUsageError(`sideclaw ${command}: flag ${flag} takes no value`);
+        if (eq !== -1) throw new CliUsageError(`agw ${command}: flag ${flag} takes no value`);
         flags.set(flag, true);
       } else {
         let value: string;
@@ -269,7 +270,7 @@ function parseFlags(
         } else {
           const next = args[i + 1];
           if (next === undefined) {
-            throw new CliUsageError(`sideclaw ${command}: flag ${flag} requires a value`);
+            throw new CliUsageError(`agw ${command}: flag ${flag} requires a value`);
           }
           value = next;
           i++;
@@ -277,7 +278,7 @@ function parseFlags(
         flags.set(flag, value);
       }
     } else if (arg.startsWith("-") && arg !== "-") {
-      throw new CliUsageError(`sideclaw ${command}: unknown flag ${arg}`);
+      throw new CliUsageError(`agw ${command}: unknown flag ${arg}`);
     } else {
       positionals.push(arg);
     }
@@ -301,13 +302,13 @@ function parseRepo(value: string | undefined): RepoSpec {
 
 function oneJobId(args: string[], command: string): string {
   if (args.length !== 1 || (args[0] ?? "") === "") {
-    throw new CliUsageError(`sideclaw ${command} requires exactly one <jobId>`);
+    throw new CliUsageError(`agw ${command} requires exactly one <jobId>`);
   }
   return args[0] as string;
 }
 
 function noArgs(args: string[], command: string): void {
-  if (args.length > 0) throw new CliUsageError(`sideclaw ${command} takes no arguments`);
+  if (args.length > 0) throw new CliUsageError(`agw ${command} takes no arguments`);
 }
 
 function parseDispatch(args: string[]): DispatchCommand {
@@ -325,7 +326,7 @@ function parseDispatch(args: string[]): DispatchCommand {
     "dispatch",
   );
   const brief = positionals.join(" ").trim();
-  if (brief.length === 0) throw new CliUsageError("sideclaw dispatch requires a <brief>");
+  if (brief.length === 0) throw new CliUsageError("agw dispatch requires a <brief>");
 
   const command: DispatchCommand = {
     kind: "dispatch",
@@ -338,7 +339,7 @@ function parseDispatch(args: string[]): DispatchCommand {
   if (tier !== undefined) {
     if (!(DISPATCH_TIERS as readonly string[]).includes(tier)) {
       throw new CliUsageError(
-        `sideclaw dispatch: --tier must be one of ${DISPATCH_TIERS.join("|")}, got: ${tier}`,
+        `agw dispatch: --tier must be one of ${DISPATCH_TIERS.join("|")}, got: ${tier}`,
       );
     }
     command.tier = tier as DispatchTier;
@@ -348,7 +349,7 @@ function parseDispatch(args: string[]): DispatchCommand {
   if (workspace !== undefined) {
     if (!(DISPATCH_WORKSPACES as readonly string[]).includes(workspace)) {
       throw new CliUsageError(
-        `sideclaw dispatch: --workspace must be one of ${DISPATCH_WORKSPACES.join("|")}, got: ${workspace}`,
+        `agw dispatch: --workspace must be one of ${DISPATCH_WORKSPACES.join("|")}, got: ${workspace}`,
       );
     }
     command.workspace = workspace as DispatchWorkspace;
@@ -376,7 +377,7 @@ function parseCheck(args: string[]): CheckCommand {
     "check",
   );
   if (positionals.length > 0)
-    throw new CliUsageError("sideclaw check takes no positional arguments");
+    throw new CliUsageError("agw check takes no positional arguments");
 
   const command: CheckCommand = { kind: "check", repo: parseRepo(flagValue(flags, "--repo")) };
   const commands = flagValue(flags, "--commands");
@@ -397,7 +398,7 @@ function parseReview(args: string[]): ReviewCommand {
     "review",
   );
   if (positionals.length > 0)
-    throw new CliUsageError("sideclaw review takes no positional arguments");
+    throw new CliUsageError("agw review takes no positional arguments");
 
   const scope = flagValue(flags, "--scope");
   const prRaw = flagValue(flags, "--pr");
@@ -406,7 +407,7 @@ function parseReview(args: string[]): ReviewCommand {
     Boolean,
   ).length;
   if (given > 1) {
-    throw new CliUsageError("sideclaw review: --scope, --pr and --branch are mutually exclusive");
+    throw new CliUsageError("agw review: --scope, --pr and --branch are mutually exclusive");
   }
 
   const command: ReviewCommand = { kind: "review", repo: parseRepo(flagValue(flags, "--repo")) };
@@ -423,9 +424,9 @@ function parseUpdatePr(args: string[]): UpdatePrCommand {
     "update-pr",
   );
   if (positionals.length > 0)
-    throw new CliUsageError("sideclaw update-pr takes no positional arguments");
+    throw new CliUsageError("agw update-pr takes no positional arguments");
   const prRaw = flagValue(flags, "--pr");
-  if (prRaw === undefined) throw new CliUsageError("sideclaw update-pr requires --pr <number>");
+  if (prRaw === undefined) throw new CliUsageError("agw update-pr requires --pr <number>");
   return {
     kind: "update-pr",
     repo: parseRepo(flagValue(flags, "--repo")),
@@ -440,12 +441,12 @@ function parseTriage(args: string[]): TriageCommand {
     "triage",
   );
   if (positionals.length > 0)
-    throw new CliUsageError("sideclaw triage takes no positional arguments");
+    throw new CliUsageError("agw triage takes no positional arguments");
   const promptFile = flagValue(flags, "--prompt-file");
   const schemaFile = flagValue(flags, "--schema-file");
   if (promptFile === undefined || schemaFile === undefined) {
     throw new CliUsageError(
-      "sideclaw triage requires --prompt-file <file> and --schema-file <file>",
+      "agw triage requires --prompt-file <file> and --schema-file <file>",
     );
   }
   return { kind: "triage", promptFile, schemaFile };
@@ -454,7 +455,7 @@ function parseTriage(args: string[]): TriageCommand {
 function parseJobs(args: string[]): JobsCommand {
   const { flags, positionals } = parseFlags(args, { "--running": "boolean" }, "jobs");
   if (positionals.length > 0)
-    throw new CliUsageError("sideclaw jobs takes no positional arguments");
+    throw new CliUsageError("agw jobs takes no positional arguments");
   return { kind: "jobs", running: flags.has("--running") };
 }
 
@@ -687,7 +688,7 @@ async function request(
     // let it propagate so the caller can tell the two apart.
     if (err instanceof Error && err.name === "AbortError") throw err;
     throw new CliUnreachableError(
-      `sideclaw server unreachable at ${base} — it runs as a LaunchAgent; start it with 'make install-agent' in ~/SourceRoot/sideclaw`,
+      `agent-gateway server unreachable at ${base} — it runs as a LaunchAgent; start it with 'make install-agent' in ~/SourceRoot/agent-gateway`,
     );
   }
   const text = await res.text();
@@ -820,17 +821,17 @@ export interface CliContext {
 /** Run the CLI against an injected fetch/gitRoot — the seam tests use to avoid a
  *  live server. Returns the process exit code. */
 export async function run(argv: string[], ctx: CliContext, io: CliIo): Promise<number> {
-  const base = (ctx.env.SIDECLAW_URL ?? DEFAULT_URL).replace(/\/+$/, "");
+  const base = (ctx.env.AGENT_GATEWAY_URL ?? DEFAULT_URL).replace(/\/+$/, "");
   try {
     const { command, options } = parseArgs(argv);
     return await execute(command, options, ctx, io, base);
   } catch (err) {
     if (err instanceof CliError) {
-      io.err(`sideclaw: ${err.message}\n`);
-      if (err.code === 2) io.err("Try 'sideclaw --help'.\n");
+      io.err(`agent-gateway: ${err.message}\n`);
+      if (err.code === 2) io.err("Try 'agw --help'.\n");
       return err.code;
     }
-    io.err(`sideclaw: ${err instanceof Error ? err.message : String(err)}\n`);
+    io.err(`agent-gateway: ${err instanceof Error ? err.message : String(err)}\n`);
     return 1;
   }
 }
@@ -941,7 +942,7 @@ async function resolveCwd(ctx: CliContext, base: string, command: JobCommand): P
 }
 
 function timeoutMessage(jobId: string, timeoutSec: number): string {
-  return `sideclaw: timed out after ${timeoutSec}s — job ${jobId} still running\n`;
+  return `agent-gateway: timed out after ${timeoutSec}s — job ${jobId} still running\n`;
 }
 
 async function waitForJob(
@@ -979,14 +980,14 @@ async function waitForJob(
       // malformed body) means retrying would just fail the same way.
       if (err instanceof CliUnreachableError && pollFailures < MAX_POLL_RETRIES) {
         pollFailures++;
-        if (pollFailures === 1) io.err(`sideclaw: poll failed (${err.message}) — retrying…\n`);
+        if (pollFailures === 1) io.err(`agent-gateway: poll failed (${err.message}) — retrying…\n`);
         await wait(Math.min(POLL_RETRY_BASE_MS * 2 ** (pollFailures - 1), POLL_RETRY_CAP_MS));
         continue;
       }
       throw err;
     }
     if (pollFailures > 0) {
-      io.err(`sideclaw: poll recovered after ${pollFailures} failed attempt(s)\n`);
+      io.err(`agent-gateway: poll recovered after ${pollFailures} failed attempt(s)\n`);
       pollFailures = 0;
     }
 
@@ -1008,7 +1009,7 @@ async function waitForJob(
     }
     if (isTerminal(job.status)) {
       if (job.status !== "done" && job.error !== null) {
-        io.err(`sideclaw: job ${job.id} ${job.status}: ${job.error}\n`);
+        io.err(`agent-gateway: job ${job.id} ${job.status}: ${job.error}\n`);
       }
       if (options.json) io.out(`${JSON.stringify(job.result, null, 2)}\n`);
       else io.out(`${renderResult(job.result)}\n`);
@@ -1081,21 +1082,21 @@ function renderPolicy(data: unknown): string {
 
 // ── Help ─────────────────────────────────────────────────────────────────────────
 
-const USAGE = `sideclaw — plain HTTP client for the sideclaw job server
+const USAGE = `agent-gateway — plain HTTP client for the agent-gateway job server
 
 Usage:
-  sideclaw dispatch [flags] <brief...>        hand one episode to a repo
-  sideclaw check [--repo R] [--commands "a,b"]   run validation in a repo
-  sideclaw review [--repo R] [--scope S | --pr N | --branch B]   multi-angle review
-  sideclaw update-pr [--repo R] --pr N        rebase a dispatch/* PR onto the latest base, re-check, push
-  sideclaw triage --prompt-file F --schema-file F   one tool-less model call → JSON
-  sideclaw jobs [--running]                   list recent jobs
-  sideclaw status <jobId>                     one-shot job state
-  sideclaw wait <jobId>                       block until a job reaches a terminal state
-  sideclaw cancel <jobId>                     cancel a pending/running job
-  sideclaw routing                            the model/backend table (GET /api/routing)
-  sideclaw policy                             the dispatch repo policy (GET /api/dispatch-policy)
-  sideclaw health                             queue health (GET /api/jobs/health)
+  agw dispatch [flags] <brief...>        hand one episode to a repo
+  agw check [--repo R] [--commands "a,b"]   run validation in a repo
+  agw review [--repo R] [--scope S | --pr N | --branch B]   multi-angle review
+  agw update-pr [--repo R] --pr N        rebase a dispatch/* PR onto the latest base, re-check, push
+  agw triage --prompt-file F --schema-file F   one tool-less model call → JSON
+  agw jobs [--running]                   list recent jobs
+  agw status <jobId>                     one-shot job state
+  agw wait <jobId>                       block until a job reaches a terminal state
+  agw cancel <jobId>                     cancel a pending/running job
+  agw routing                            the model/backend table (GET /api/routing)
+  agw policy                             the dispatch repo policy (GET /api/dispatch-policy)
+  agw health                             queue health (GET /api/jobs/health)
 
 Global flags (any subcommand):
   --json          emit only JSON on stdout, nothing else
@@ -1108,7 +1109,7 @@ Exit codes:
   0 job done · 1 job failed/interrupted/cancelled · 2 usage error or policy refusal · 3 server unreachable
 `;
 
-const DISPATCH_HELP = `sideclaw dispatch [flags] <brief...>
+const DISPATCH_HELP = `agw dispatch [flags] <brief...>
 
 Flags:
   --repo <name|path>    repo to run in: a bare name under a dispatch root, or an absolute
@@ -1122,25 +1123,25 @@ Flags:
                         investigate tier — the CLI does not validate it client-side
 `;
 
-const CHECK_HELP = `sideclaw check [--repo <name|path>] [--commands "cmd1,cmd2"]
+const CHECK_HELP = `agw check [--repo <name|path>] [--commands "cmd1,cmd2"]
 
   --commands is a comma-separated list run verbatim (skips ecosystem discovery).
 `;
 
-const REVIEW_HELP = `sideclaw review [--repo <name|path>] [--scope S | --pr N | --branch B]
+const REVIEW_HELP = `agw review [--repo <name|path>] [--scope S | --pr N | --branch B]
 
   --scope, --pr and --branch are mutually exclusive: --scope reviews local state,
   --pr/--branch review a ref fetched from origin.
 `;
 
-const UPDATE_PR_HELP = `sideclaw update-pr [--repo <name|path>] --pr N
+const UPDATE_PR_HELP = `agw update-pr [--repo <name|path>] --pr N
 
   Rebases the open dispatch/* PR onto the latest default branch, re-runs the repo's checks,
   force-with-lease pushes. Result: { status: updated|up_to_date|conflict, headSha, checks }.
   A conflict is reported, never hand-resolved — re-dispatch from the new base.
 `;
 
-const TRIAGE_HELP = `sideclaw triage --prompt-file <file> --schema-file <file>
+const TRIAGE_HELP = `agw triage --prompt-file <file> --schema-file <file>
 
   --prompt-file   the whole task, instructions and material together (no tools, no repo)
   --schema-file   a JSON Schema file for the answer; the top level must be "type": "object"

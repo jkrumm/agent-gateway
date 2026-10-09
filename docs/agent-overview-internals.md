@@ -26,7 +26,7 @@ request.
 - **Per-agent `state`** (`needs_you > working > stale > idle > done >
   unknown`, see `deriveState()`'s doc comment) is the only field consumers
   should branch on — `herdrStatus`/`claudeStatus` are raw passthrough for
-  debugging, not a second source of truth. `SIDECLAW_AGENT_STALE_HOURS`
+  debugging, not a second source of truth. `AGENT_GATEWAY_AGENT_STALE_HOURS`
   (default 24) sets the stale threshold. A dispatch job's own needs-human
   verdict is **not** distinguished into `needs_you` — that signal isn't
   cheaply available without a tool-specific parse of `job.result`, so a
@@ -273,7 +273,7 @@ narrative"), never inline in an interactive session.
   `type: project-narrative`, `description` (the first sentence of
   `whatItIs`, ≤160 chars), `tags: [project, engineering, narrative]`,
   `timestamp` (`YYYY-MM-DD`), `repo` (cwd basename), `revised_from` (`since`
-  or `"bootstrap"`), `generated_by: sideclaw/narrative`. String frontmatter
+  or `"bootstrap"`), `generated_by: agent-gateway/narrative`. String frontmatter
   values are double-quoted (`yamlString`) since generated prose routinely
   contains a colon-space, which breaks an unquoted YAML flow scalar. The
   `## Open questions` section is omitted entirely when the model returned

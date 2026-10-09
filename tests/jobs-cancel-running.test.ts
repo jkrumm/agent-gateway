@@ -25,8 +25,8 @@ async function flush(): Promise<void> {
 }
 
 function cancelRequestedAtColumn(id: string): number | null {
-  const p = process.env.SIDECLAW_JOBS_DB;
-  if (!p) throw new Error("SIDECLAW_JOBS_DB not set — tests/setup.ts should have set it");
+  const p = process.env.AGENT_GATEWAY_JOBS_DB;
+  if (!p) throw new Error("AGENT_GATEWAY_JOBS_DB not set — tests/setup.ts should have set it");
   const db = new Database(p);
   db.run("PRAGMA busy_timeout = 5000");
   const row = db

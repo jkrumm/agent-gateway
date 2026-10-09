@@ -1033,7 +1033,7 @@ describe("GitLab artifact write paths (openIssue/openPullRequest via glab)", () 
   let originalArgvFile: string | undefined;
 
   beforeEach(() => {
-    binDir = mkdtempSync(join(tmpdir(), "sideclaw-glab-"));
+    binDir = mkdtempSync(join(tmpdir(), "agent-gateway-glab-"));
     argvFile = join(binDir, "argv.txt");
     writeFileSync(
       join(binDir, "glab"),

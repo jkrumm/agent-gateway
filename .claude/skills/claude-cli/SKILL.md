@@ -12,7 +12,7 @@ description: >
 # Spawning Claude Code CLI — Patterns & Reference
 
 **The executable reference is `buildSessionArgs()` in
-`server/mcp/session-runner.ts`** — every sideclaw worker session goes through
+`server/mcp/session-runner.ts`** — every agent-gateway worker session goes through
 it. This skill is the pattern library behind it; when the two disagree,
 `session-runner.ts` is correct and this file is stale.
 
@@ -22,7 +22,7 @@ it. This skill is the pattern library behind it; when the two disagree,
 - Need the exact CLI flags → `references/cli-flags.md`
 - Parsing NDJSON stream output → `references/stream-format.md`
 
-## What sideclaw actually does (not the CLI's full option space)
+## What agent-gateway actually does (not the CLI's full option space)
 
 - **`--output-format stream-json --verbose`**, not single-blob `json` —
   needed for live progress (`turns`, `lastAction`, `idleMs`); the `result`
@@ -69,7 +69,7 @@ See `references/cli-flags.md` for the complete list.
 | Flag | Purpose |
 |-|-|
 | `-p` / `--print` | Non-interactive mode (required) |
-| `--output-format json\|stream-json\|text` | Output format — sideclaw uses `stream-json --verbose` |
+| `--output-format json\|stream-json\|text` | Output format — agent-gateway uses `stream-json --verbose` |
 | `--json-schema '<schema>'` | Validated structured output (json format only); result in `structured_output` |
 | `--dangerously-skip-permissions` | All tools auto-approved — the MCP server is the trust boundary |
 | `--disallowedTools "Write,Edit"` | Block specific tools — the only lever that works under skip-permissions |

@@ -423,7 +423,7 @@ describe("buildOpencodeEnv", () => {
       opencodeConfigContent: "{}",
       baseEnv: { CLAUDE_SESSION_ID: "leftover", CLAUDE_PARENT_SESSION_ID: "leftover2" },
     });
-    expect(env.USAGE_LANE).toBe("sideclaw:dispatch");
+    expect(env.USAGE_LANE).toBe("agent-gateway:dispatch");
     expect(env.CLAUDE_ENTRYPOINT).toBe("worker");
     expect(env.CLAUDE_SESSION_ID).toBeUndefined();
     expect(env.CLAUDE_PARENT_SESSION_ID).toBeUndefined();

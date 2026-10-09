@@ -250,7 +250,7 @@ export const DISPATCH_OUTPUT = z.strictObject({
   // `degraded`: without it, a salvaged verdict and a real needs-human verdict are the
   // identical {confidence:"low", nextAction:"human"} tuple, and an automated Slack post or
   // watchdog projection could only tell them apart by substring-matching English prose.
-  // They need opposite handling: one is "sideclaw itself failed, retry or alert", the other
+  // They need opposite handling: one is "agent-gateway itself failed, retry or alert", the other
   // is a genuine finding to track.
   degraded: z
     .boolean()

@@ -201,7 +201,7 @@ describe("owningRepo", () => {
     ).owningRepo;
 
   test("a valid bare repo name is kept verbatim on every tier", () => {
-    for (const ok of ["sideclaw", "homelab-private", "weather.orb", "repo_1"]) {
+    for (const ok of ["agent-gateway", "homelab-private", "weather.orb", "repo_1"]) {
       for (const tier of TIERS) {
         const r = workerValidator(tier)(base(tier, { owningRepo: ok }));
         expect(r.ok).toBe(true);

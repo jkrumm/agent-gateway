@@ -258,12 +258,12 @@ describe("runDispatch — revisionOf refusals", () => {
 
 describe("repo lease", () => {
   test("an unresolvable cwd fails closed on acquire", () => {
-    const gone = join(tmpdir(), `sideclaw-lease-missing-${randomUUID()}`);
+    const gone = join(tmpdir(), `agent-gateway-lease-missing-${randomUUID()}`);
     expect(() => tryAcquireRepoLease(gone, "job-a")).toThrow();
   });
 
   test("release deletes the key acquired even if the path no longer resolves", () => {
-    const dir = mkdtempSync(join(tmpdir(), "sideclaw-lease-"));
+    const dir = mkdtempSync(join(tmpdir(), "agent-gateway-lease-"));
     expect(tryAcquireRepoLease(dir, "job-a").ok).toBe(true);
     rmSync(dir, { recursive: true, force: true });
     releaseRepoLease(dir);
@@ -310,7 +310,7 @@ describe("runUpdatePr against a stubbed GitLab MR", () => {
     });
 
   beforeEach(async () => {
-    binDir = mkdtempSync(join(tmpdir(), "sideclaw-glab-"));
+    binDir = mkdtempSync(join(tmpdir(), "agent-gateway-glab-"));
     writeFileSync(join(binDir, "glab"), "#!/bin/sh\nprintf '%s' \"$GLAB_MR_JSON\"\n");
     chmodSync(join(binDir, "glab"), 0o755);
     savedPath = process.env.PATH;

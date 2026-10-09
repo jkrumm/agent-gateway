@@ -1,4 +1,4 @@
-// Which sideclaw entrypoint this OS process is: the always-on HTTP/job server
+// Which agent-gateway entrypoint this OS process is: the always-on HTTP/job server
 // (`server/index.ts`), or the stdio MCP process Claude Code spawns on demand
 // (`server/mcp.ts`). Shared modules that both processes import — `session-runner.ts` is the
 // concrete case — need this to tag their own logs with the right `source`, since a module-level

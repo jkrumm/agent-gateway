@@ -1,9 +1,9 @@
 {
-  "name": "sideclaw",
+  "name": "agent-gateway",
   "version": "0.1.0",
   "private": true,
   "bin": {
-    "sideclaw": "bin/sideclaw.ts"
+    "agw": "bin/agw.ts"
   },
   "scripts": {
     "dev:server": "bun --watch server/index.ts",
@@ -13,7 +13,7 @@
     "format": "oxfmt server tests --write",
     "format:check": "oxfmt server tests --check",
     "start": "bun server/index.ts",
-    "logs:tail": "tail -f ~/Library/Logs/sideclaw.jsonl | bunx pino-pretty"
+    "logs:tail": "tail -f ~/Library/Logs/agent-gateway.jsonl | bunx pino-pretty"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

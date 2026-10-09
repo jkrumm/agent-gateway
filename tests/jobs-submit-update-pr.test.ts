@@ -11,7 +11,7 @@ import { jobsRoutes } from "../server/routes/jobs.ts";
 __resetForTests();
 afterAll(() => __resetForTests());
 
-const root = (process.env.SIDECLAW_DISPATCH_ROOTS ?? "").split(",")[0]?.trim() ?? "";
+const root = (process.env.AGENT_GATEWAY_DISPATCH_ROOTS ?? "").split(",")[0]?.trim() ?? "";
 
 async function post(body: unknown) {
   const res = await jobsRoutes.handle(

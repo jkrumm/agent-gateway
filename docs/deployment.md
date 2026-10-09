@@ -1,10 +1,10 @@
 # Deployment — LaunchAgent, BTM denial, log discipline
 
-Full forensic story behind why sideclaw runs the way it does. AGENTS.md and
+Full forensic story behind why agent-gateway runs the way it does. AGENTS.md and
 `.claude/rules/deployment.md` keep only the invariants (never start standalone,
 use the tracked plist, logs live in `~/Library/Logs`); this is the "why", read
-on demand before touching `com.jkrumm.sideclaw-server.plist` or
-`scripts/sideclaw-start.sh` — the same story is also inline as comments in
+on demand before touching `com.jkrumm.agent-gateway.plist` or
+`scripts/agent-gateway-start.sh` — the same story is also inline as comments in
 both those files, since an editor there may never open this doc.
 
 ## Logs must live in `~/Library/Logs`, never `/tmp`
@@ -13,10 +13,10 @@ A KeepAlive agent opens its stdio exactly once, at spawn. macOS's periodic
 cleanup sweeps `/tmp` files untouched for 3+ days, so after a sweep the
 process keeps writing into an unlinked inode: `lsof` still shows the fd, `ls`
 says the file is gone, and every line written since is unrecoverable — which
-is how sideclaw ended up with no post-mortem at all (measured on this machine
-2026-07-31: `lsof -p 895` showed `/private/tmp/sideclaw.log` and `.err` held
-open while `ls /tmp/sideclaw.log` returned "No such file"). The paths live in
-`com.jkrumm.sideclaw-server.plist`, and `make install-agent` copies that file
+is how agent-gateway ended up with no post-mortem at all (measured on this machine
+2026-07-31: `lsof -p 895` showed `/private/tmp/agent-gateway.log` and `.err` held
+open while `ls /tmp/agent-gateway.log` returned "No such file"). The paths live in
+`com.jkrumm.agent-gateway.plist`, and `make install-agent` copies that file
 verbatim over the live one, so changing the live plist by hand is silently
 reverted on the next install. Change the tracked file.
 
@@ -26,7 +26,7 @@ An earlier revision of this file (and of `server/lib/shutdown.ts`'s comments) si
 window, `SHUTDOWN_GRACE_MS`, and applied it uniformly to every shutdown trigger — SIGTERM from
 `make reload`, SIGINT from `FORCE=1`, a real reboot, all of it. **That was wrong.** Measured on
 this host 2026-09-08: raising the tracked plist's `ExitTimeOut` to 2700 (45 min) changed
-nothing — `launchctl print gui/<uid>/com.jkrumm.sideclaw-server` still reported `exit timeout =
+nothing — `launchctl print gui/<uid>/com.jkrumm.agent-gateway` still reported `exit timeout =
 60`, and a control probe at 120 confirmed the same 60s ceiling. launchd hard-caps `ExitTimeOut`
 at 60 seconds on this machine, full stop, regardless of what the plist says. Every `make reload`
 that ran under the old code was never actually protected by the 40-minute drain it believed it
@@ -88,7 +88,7 @@ Two changes landed in the same pass that make this safe rather than reckless:
    the boot-time worktree sweep runs, so a resume-eligible worktree survives the same restart
    that would otherwise have deleted it as an ordinary leftover.
 
-The historical percentile measurement (91 real jobs, three days of `~/Library/Logs/sideclaw.jsonl`)
+The historical percentile measurement (91 real jobs, three days of `~/Library/Logs/agent-gateway.jsonl`)
 and the per-step `depositBranch()` math that used to justify "50 min" are no longer reproduced
 here — they motivated a number that no longer exists. `git log -p -- docs/deployment.md`
 carries that derivation verbatim (2026-09-08 and 2026-09-11 revisions) if it's ever needed again.
@@ -106,7 +106,7 @@ independently-true facts:
 | `SIGNAL_DRAIN_GRACE_MS` | `server/lib/shutdown.ts` | 45 s | drain deadline for a real SIGTERM — must stay under `LAUNCHD_HARD_EXIT_TIMEOUT_MS` with real margin, or launchd SIGKILLs mid-drain regardless of what this number says |
 | `SHUTDOWN_FLUSH_MS` | `server/lib/shutdown.ts` | 3 s | HTTP response flush after the drain decision, stacked on top of whichever grace window applies |
 | `LAUNCHD_HARD_EXIT_TIMEOUT_MS` | `server/lib/shutdown.ts` | 60 s | launchd's actual, measured ceiling — not a value this codebase controls, only observes |
-| `ExitTimeOut` | `com.jkrumm.sideclaw-server.plist` | 60 s | set to exactly the measured cap, not a value implying more headroom than launchd grants |
+| `ExitTimeOut` | `com.jkrumm.agent-gateway.plist` | 60 s | set to exactly the measured cap, not a value implying more headroom than launchd grants |
 | poll ceiling | `Makefile`'s `reload`/`install-agent` targets | none (unbounded) | how long `make reload` waits for the old PID to exit before `kickstart`ing — matches `HTTP_DRAIN_GRACE_MS` being unbounded; prints a progress line once a minute so a human watching can tell it's alive rather than hung |
 
 Guards pin this in `bun test` rather than at the next reboot — all in `tests/shutdown-window.test.ts`
@@ -127,10 +127,10 @@ settles, degrades to 503 if no controller is registered).
 `launchctl kill` (what `make reload` falls back to when `POST /api/shutdown` doesn't answer —
 see below; the normal path no longer signals the process at all) operates on the job
 definition launchd already has **loaded in memory** — it does not re-read
-`com.jkrumm.sideclaw-server.plist` from disk. Only `launchctl bootstrap` (`make install-agent`)
+`com.jkrumm.agent-gateway.plist` from disk. Only `launchctl bootstrap` (`make install-agent`)
 loads a changed plist. Measured live on this machine (2026-09-08): after raising the tracked
 plist's `ExitTimeOut` from 20 (launchd's implicit default) to 1860, `launchctl print
-gui/$(id -u)/com.jkrumm.sideclaw-server` kept reporting `exit timeout = 5` — a value from a
+gui/$(id -u)/com.jkrumm.agent-gateway` kept reporting `exit timeout = 5` — a value from a
 plist generation *before* the 1860 edit — because no `make install-agent` had run yet (a
 measurement made before the later one, above, established that even a successfully-loaded
 `ExitTimeOut` tops out at 60 regardless). Running the OLD `make reload` in that window would
@@ -196,7 +196,7 @@ an unforced drain is already running (an operator watching a normal `make reload
 mid-HTTP-drain) escalates that drain to an immediate abort instead of being dropped by an
 already-shutting-down latch — every worker is still terminated exactly once. A killed `implement`
 dispatch's worktree
-is bundled to `~/.local/state/sideclaw/salvage/` by the boot sweep before removal, same as a
+is bundled to `~/.local/state/agent-gateway/salvage/` by the boot sweep before removal, same as a
 real crash, and its job row is left `running` for the same boot's ordinary crash-recovery to
 reconcile (see `execute()` in `server/jobs/store.ts`) rather than written `failed` — the whole
 point being that a shutdown-killed job reads identically to a crashed one, everywhere.
@@ -244,12 +244,12 @@ only applies when `recoveredFromDrain` is also true.
 
 ## The BTM denial — why the label and the wrapper script are load-bearing
 
-The label is `com.jkrumm.sideclaw-server` and the program is a wrapper script
+The label is `com.jkrumm.agent-gateway` and the program is a wrapper script
 — both are Background Task Management workarounds, not style. macOS computes
 an *effective* disposition for every launch item, and on this host two
 separate denials applied: `/opt/homebrew/bin/bun` as an executable, and the
 identifier `8.com.jkrumm.sideclaw`. Either one alone is enough to make
-launchd skip the `RunAtLoad` spawn — which is what "sideclaw doesn't come up
+launchd skip the `RunAtLoad` spawn — which is what "agent-gateway doesn't come up
 after a power cut" actually was, reproduced across three reboots on
 2026-08-06 (one no-start, two starting ~3 minutes late, against ~18s for
 every allowed agent on the machine).
@@ -260,15 +260,17 @@ resolved it to `[enabled, disallowed]`; the same probe through a shell script
 resolved to `[enabled, allowed]`. The identifier half is stickier than it
 looks — deleting the plist, re-adding it, and re-adding it under a different
 *filename* all came back disallowed, so only a new **Label** clears it. Hence
-`scripts/sideclaw-start.sh` (dodges the bun denial) plus the `-server` label
-(dodges the identifier denial). Reverting either brings the boot failure
-back. It also makes the entry legible as `sideclaw-start.sh` rather than an
+`scripts/agent-gateway-start.sh` (dodges the bun denial) plus a label BTM has
+never seen (dodges the identifier denial) — `com.jkrumm.sideclaw` is burned,
+`com.jkrumm.sideclaw-server` was the first clean one, and `com.jkrumm.agent-gateway`
+(2026-10-09 rename) is the current one, re-verified after its first boot. Reverting either brings the boot failure
+back. It also makes the entry legible as `agent-gateway-start.sh` rather than an
 anonymous `bun` in System Settings → Login Items, which is how it plausibly
 got denied in the first place.
 
 Verify after any change to the plist:
 
 ```bash
-log show --last 2m --info | grep -A3 sideclaw-server.plist | grep effectiveItemDisposition
+log show --last 2m --info | grep -A3 agent-gateway.plist | grep effectiveItemDisposition
 # want: result=[enabled, allowed, ...]
 ```

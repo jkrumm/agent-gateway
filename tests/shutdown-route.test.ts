@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { __resetShutdownTriggerForTests, registerShutdownTrigger } from "../server/lib/shutdown.ts";
 import { shutdownRoutes } from "../server/routes/shutdown.ts";
 
-const SHUTDOWN_HEADERS = { "X-Sideclaw-Shutdown": "1" };
+const SHUTDOWN_HEADERS = { "X-Agent-Gateway-Shutdown": "1" };
 
 afterEach(() => {
   __resetShutdownTriggerForTests();
@@ -143,7 +143,7 @@ describe("POST /api/shutdown", () => {
   // browser. Here (no real browser/CORS layer in `.handle()`) that's simulated by asserting the
   // header check itself, and that the trigger is never called without it.
   describe("cross-origin browser guard", () => {
-    test("missing X-Sideclaw-Shutdown header is rejected with 403, trigger never called", async () => {
+    test("missing X-Agent-Gateway-Shutdown header is rejected with 403, trigger never called", async () => {
       let called = false;
       registerShutdownTrigger(() => {
         called = true;
@@ -160,7 +160,7 @@ describe("POST /api/shutdown", () => {
       expect(called).toBe(false);
     });
 
-    test("incorrect X-Sideclaw-Shutdown header value is rejected with 403", async () => {
+    test("incorrect X-Agent-Gateway-Shutdown header value is rejected with 403", async () => {
       let called = false;
       registerShutdownTrigger(() => {
         called = true;
@@ -170,7 +170,7 @@ describe("POST /api/shutdown", () => {
       const res = await shutdownRoutes.handle(
         new Request("http://localhost/api/shutdown", {
           method: "POST",
-          headers: { "X-Sideclaw-Shutdown": "0" },
+          headers: { "X-Agent-Gateway-Shutdown": "0" },
         }),
       );
 
@@ -184,7 +184,7 @@ describe("POST /api/shutdown", () => {
       const res = await shutdownRoutes.handle(
         new Request("http://localhost/api/shutdown", {
           method: "POST",
-          headers: { "x-sideclaw-shutdown": "1" },
+          headers: { "x-agent-gateway-shutdown": "1" },
         }),
       );
 

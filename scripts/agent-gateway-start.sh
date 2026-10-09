@@ -15,7 +15,7 @@
 # launchd skips the RunAtLoad spawn and KeepAlive picks the job up later, or
 # not at all. Across three reboots on 2026-08-06: no start in one, +3m06s and
 # +3m42s in the other two, against ~18s for every allowed agent on the machine.
-# A dead MCP offload lane after a power cut reads as "sideclaw is broken", not
+# A dead MCP offload lane after a power cut reads as "agent-gateway is broken", not
 # as a login-item toggle.
 #
 # BTM identifies a script by path, so this file's location is part of the fix —

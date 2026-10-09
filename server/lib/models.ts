@@ -1,7 +1,7 @@
 // ── Model registry — the ONE place a model id's capabilities are declared ────────────────
 //
 // `routing.ts` decides which model a tool runs on; this file decides which model ids may be
-// routed to AT ALL and over what wire. Every route (defaults, `SIDECLAW_MODEL_<TOOL>` env
+// routed to AT ALL and over what wire. Every route (defaults, `AGENT_GATEWAY_MODEL_<TOOL>` env
 // overrides, per-job `model` overrides) is validated against it, `opencode-runner.ts`
 // generates its provider config (limits, cost, variants) from it, and `GET /api/routing`
 // exposes it. Pure data + three lookups — no imports, so `routing.ts` and the runner can both
@@ -122,7 +122,7 @@ const MODELS: readonly ModelEntry[] = [
   },
   // deepseek-v4.1-flash over the OpenAI-compatible route (opencode only — `claude -p` cannot
   // reach it). Verified by the 2026-09-24 three-brief implement measurement (routing.ts
-  // AGENT_OC) and the review_ocr bake-off. OPEN FACT: rates conflict — sideclaw's
+  // AGENT_OC) and the review_ocr bake-off. OPEN FACT: rates conflict — agent-gateway's
   // gateway-measured 0.15/0.60/0.003 (kept here; what opencode-runner.ts costs against) vs
   // modelpick's 0.50/1.50. Re-probe before any cost claim. `jsonObject`: probed 2026-10-02 —
   // /chat/completions with response_format json_object + max_completion_tokens 16000 → HTTP 200,
@@ -139,7 +139,7 @@ const MODELS: readonly ModelEntry[] = [
       out: 0.6,
       cacheRead: 0.003,
       source:
-        "sideclaw gateway-measured 2026-09-24 (routing.ts AGENT_OC); CONFLICTS with modelpick 0.50/1.50 per MTok — unresolved, re-probe before cost claims",
+        "agent-gateway gateway-measured 2026-09-24 (routing.ts AGENT_OC); CONFLICTS with modelpick 0.50/1.50 per MTok — unresolved, re-probe before cost claims",
       date: "2026-09-24",
     },
     effort: ["high", "max", "none"],

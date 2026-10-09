@@ -26,8 +26,8 @@ import { git as fixtureGit, run as fixtureRun, Fixture, makeFixture } from "./gi
 /** Same seam tests/jobs-recover-dispatch.test.ts relies on: setup.ts points this at a
  *  throwaway sqlite file for the whole run. */
 function dbPath(): string {
-  const p = process.env.SIDECLAW_JOBS_DB;
-  if (!p) throw new Error("SIDECLAW_JOBS_DB not set — tests/setup.ts should have set it");
+  const p = process.env.AGENT_GATEWAY_JOBS_DB;
+  if (!p) throw new Error("AGENT_GATEWAY_JOBS_DB not set — tests/setup.ts should have set it");
   return p;
 }
 
