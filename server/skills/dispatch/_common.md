@@ -144,3 +144,8 @@ Every text field is read on a phone and matched by a machine. Hard limits:
   entirely for every other `nextAction`. `human` is for product decisions, irreversible data
   operations, spend and anything touching another person — not for missing permissions, a red
   CI run or low confidence.
+- `owningRepo` — optional, and only when the finding belongs to a repo **other than the one you
+  are reading** (e.g. a shared library or config the other repo depends on): the bare name of
+  that repo, at most 100 characters, matching `^[A-Za-z0-9._-]+$` (letters, digits, dots,
+  underscores, hyphens — no `owner/`, no path, no `.git`). Omit it when the finding belongs to
+  the repo you are in; do not use it to restate the repo you are reading.
