@@ -501,7 +501,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
           value: culpritValue,
           refused:
             `${model} is reachable only via the ${entry.harnesses.join("/")} harness (${harness} ` +
-            `cannot run it) — pair AGENT_GATEWAY_HARNESS_${key}=claude with a AGENT_GATEWAY_MODEL_${key} ` +
+            `cannot run it) — pair AGENT_GATEWAY_HARNESS_${key}=claude with an AGENT_GATEWAY_MODEL_${key} ` +
             `override naming a Claude id instead`,
         });
         model = base.model;

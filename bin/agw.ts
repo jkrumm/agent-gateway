@@ -827,11 +827,11 @@ export async function run(argv: string[], ctx: CliContext, io: CliIo): Promise<n
     return await execute(command, options, ctx, io, base);
   } catch (err) {
     if (err instanceof CliError) {
-      io.err(`agent-gateway: ${err.message}\n`);
+      io.err(`agw: ${err.message}\n`);
       if (err.code === 2) io.err("Try 'agw --help'.\n");
       return err.code;
     }
-    io.err(`agent-gateway: ${err instanceof Error ? err.message : String(err)}\n`);
+    io.err(`agw: ${err instanceof Error ? err.message : String(err)}\n`);
     return 1;
   }
 }
@@ -942,7 +942,7 @@ async function resolveCwd(ctx: CliContext, base: string, command: JobCommand): P
 }
 
 function timeoutMessage(jobId: string, timeoutSec: number): string {
-  return `agent-gateway: timed out after ${timeoutSec}s — job ${jobId} still running\n`;
+  return `agw: timed out after ${timeoutSec}s — job ${jobId} still running\n`;
 }
 
 async function waitForJob(
@@ -980,14 +980,14 @@ async function waitForJob(
       // malformed body) means retrying would just fail the same way.
       if (err instanceof CliUnreachableError && pollFailures < MAX_POLL_RETRIES) {
         pollFailures++;
-        if (pollFailures === 1) io.err(`agent-gateway: poll failed (${err.message}) — retrying…\n`);
+        if (pollFailures === 1) io.err(`agw: poll failed (${err.message}) — retrying…\n`);
         await wait(Math.min(POLL_RETRY_BASE_MS * 2 ** (pollFailures - 1), POLL_RETRY_CAP_MS));
         continue;
       }
       throw err;
     }
     if (pollFailures > 0) {
-      io.err(`agent-gateway: poll recovered after ${pollFailures} failed attempt(s)\n`);
+      io.err(`agw: poll recovered after ${pollFailures} failed attempt(s)\n`);
       pollFailures = 0;
     }
 
@@ -1009,7 +1009,7 @@ async function waitForJob(
     }
     if (isTerminal(job.status)) {
       if (job.status !== "done" && job.error !== null) {
-        io.err(`agent-gateway: job ${job.id} ${job.status}: ${job.error}\n`);
+        io.err(`agw: job ${job.id} ${job.status}: ${job.error}\n`);
       }
       if (options.json) io.out(`${JSON.stringify(job.result, null, 2)}\n`);
       else io.out(`${renderResult(job.result)}\n`);

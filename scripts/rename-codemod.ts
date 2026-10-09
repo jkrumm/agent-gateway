@@ -21,6 +21,7 @@ const SKIP = new Set([
   "server/lib/env-compat.ts",
   "tests/env-compat.test.ts",
   "bin/sideclaw",
+  "scripts/post-move.sh", // holds the old path/label literals on purpose
 ]);
 const SKIP_PREFIX = ["docs/waves/", "node_modules/"];
 
@@ -30,6 +31,9 @@ const CLI_VERBS =
 /** Cross-repo contracts and historical identifiers: swapped for a placeholder, restored last. */
 const PROTECT: RegExp[] = [
   /sideclaw-iu/g, // usage-tracker collector + its NDJSON sink (renamed with usage-tracker)
+  /sideclaw-sessions/g, // usage-tracker's session attribution sink
+  /sideclaw:(?=dispatch|unknown|review|<tool>|\$\{base\})/g, // USAGE_LANE values usage-tracker keys on
+  /src: "sideclaw"/g, // attribution record source, same contract
   /sideclaw\.test/g, // Caddy host (dotfiles)
   /sideclaw\.local/g, // dead localias-proxy stamp
   /sideclaw\.mini\.jkrumm\.com/g,
@@ -44,6 +48,7 @@ const RULES: [RegExp, string][] = [
   [/X-Sideclaw-Shutdown/g, "X-Agent-Gateway-Shutdown"],
   [/x-sideclaw-shutdown/g, "x-agent-gateway-shutdown"],
   [/SIDECLAW_/g, "AGENT_GATEWAY_"],
+  [/\bSIDECLAW\b/g, "AGENT-GATEWAY"],
   [/com\.jkrumm\.sideclaw-server/g, "com.jkrumm.agent-gateway"],
   [/scripts\/sideclaw-start\.sh/g, "scripts/agent-gateway-start.sh"],
   [/bin\/sideclaw\.ts/g, "bin/agw.ts"],

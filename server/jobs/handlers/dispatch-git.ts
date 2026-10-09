@@ -16,7 +16,7 @@ import { Octokit } from "@octokit/rest";
 import { z } from "zod";
 import { appLogger as logger } from "../../logger.ts";
 
-// Everything in this file runs in the SIDECLAW PROCESS, never inside a worker session.
+// Everything in this file runs in the AGENT-GATEWAY PROCESS, never inside a worker session.
 //
 // That split is the security argument for the write tiers. The worker's prompt is assembled
 // from untrusted material (a Slack message, a GitHub issue body), so anything it can reach,

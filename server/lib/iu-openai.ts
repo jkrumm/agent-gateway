@@ -12,7 +12,7 @@ import { IDLE_TIMEOUT_MS } from "./idle-timeout.ts";
 // fetches, billed IU per-token, zero Max quota.
 //
 // Because they bypass session-runner, nothing writes their usage to the normal
-// agent-gateway-sessions attribution log. `recordIuUsage()` writes a separate NDJSON
+// sideclaw-sessions attribution log. `recordIuUsage()` writes a separate NDJSON
 // sink instead, which the usage-tracker's `sideclaw-iu` collector ingests.
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);

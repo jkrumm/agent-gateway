@@ -1,7 +1,7 @@
 // The `session_env` sidecar record (server/mcp/session-runner.ts's `writeSessionEnv`) is the
 // ONLY per-worker signal usage-tracker gets at all — every worker runs with
 // `disableAllHooks: true`, so dotfiles' own SessionStart hook never fires inside one. `lane`
-// and `harness` are what let usage-tracker attribute a row to `agent-gateway:<tool>` and tell a
+// and `harness` are what let usage-tracker attribute a row to `sideclaw:<tool>` and tell a
 // `claude -p` run from an `opencode run` one. Tested via the pure `sessionEnvRecord` builder
 // so this never touches the real `~/.claude/logs` directory.
 
@@ -24,7 +24,7 @@ describe("sessionEnvRecord", () => {
       base_url: "https://iu.example.com/anthropic",
       model: "claude-sonnet-5",
       backend: "iu",
-      lane: "agent-gateway:dispatch",
+      lane: "sideclaw:dispatch",
       harness: "claude",
     });
   });
@@ -51,7 +51,7 @@ describe("sessionEnvRecord", () => {
       base_url: "https://iu.example.com/openai/v1",
       model: "deepseek-v4.1-flash",
       backend: "iu",
-      lane: "agent-gateway:dispatch",
+      lane: "sideclaw:dispatch",
       harness: "opencode",
     });
   });
@@ -59,6 +59,6 @@ describe("sessionEnvRecord", () => {
   test("an undefined tool still resolves a lane via usageLane's own default", () => {
     const r = sessionEnvRecord("sess-3", null, "m", "max", undefined, "claude");
     expect(r.lane).toBe(usageLane(undefined));
-    expect(r.lane).toBe("agent-gateway:unknown");
+    expect(r.lane).toBe("sideclaw:unknown");
   });
 });

@@ -41,7 +41,7 @@ silent no-op otherwise.
 Every session writes a `session_env` line to `~/.claude/logs/<date>.jsonl`
 with `base_url` (real on `iu`, explicit `null` on `max`), `model` and
 `backend`, plus an attribution record to
-`~/.local/share/usage-tracker/agent-gateway-sessions.jsonl` carrying the same —
+`~/.local/share/usage-tracker/sideclaw-sessions.jsonl` carrying the same —
 usage-tracker classifies by `base_url` present → `iu`, `null`/missing →
 `max`, and bills the run to the model actually used.
 

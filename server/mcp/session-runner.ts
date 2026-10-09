@@ -141,7 +141,7 @@ export function sessionEnvRecord(
  * for why null is written rather than skipped). Idempotent — safe if the hook also
  * fires. Never throws.
  *
- * `lane` (`usageLane(tool)`, e.g. `"agent-gateway:dispatch"`) and `harness` are the only
+ * `lane` (`usageLane(tool)`, e.g. `"sideclaw:dispatch"`) and `harness` are the only
  * per-worker signal that survives to usage-tracker at all: every worker runs with
  * `disableAllHooks: true` (WORKER_SETTINGS), so dotfiles' own SessionStart hook never
  * fires inside one — this sidecar record is the sole source, not a mirror of a redundant
@@ -162,7 +162,7 @@ export function writeSessionEnv(
     const line =
       JSON.stringify({
         ts: now,
-        src: "agent-gateway",
+        src: "sideclaw",
         event: "session_env",
         level: "info",
         data: sessionEnvRecord(sessionId, baseUrl, model, backend, tool, harness),
@@ -183,7 +183,7 @@ const ATTRIBUTION_LOG = join(
   ".local",
   "share",
   "usage-tracker",
-  "agent-gateway-sessions.jsonl",
+  "sideclaw-sessions.jsonl",
 );
 
 /** Exported so `opencode-runner.ts` appends to the SAME attribution log/sink under its own
@@ -268,7 +268,7 @@ export interface SessionOptions<T = unknown> {
   extraEnv?: Record<string, string>;
   /**
    * Tool name for usage attribution — e.g. "check", "review".
-   * Written to the agent-gateway-sessions.jsonl attribution log so
+   * Written to the sideclaw-sessions.jsonl attribution log so
    * usage-tracker can tag worker requests back to the agent-gateway tool that caused
    * them. Optional but every job handler should set it.
    */
@@ -724,7 +724,7 @@ export function buildSessionArgs(input: SessionArgsInput): string[] {
 }
 
 export interface WorkerEnvInput {
-  /** Routed tool name, tags `USAGE_LANE` as `agent-gateway:<tool>` — `"unknown"` when absent. */
+  /** Routed tool name, tags `USAGE_LANE` as `sideclaw:<tool>` — `"unknown"` when absent. */
   tool?: string;
   backend: Backend;
   model: string;
@@ -743,19 +743,19 @@ export interface WorkerEnvInput {
 }
 
 /**
- * The `USAGE_LANE` value for a routed tool — `agent-gateway:<tool>`, coarsened to the part
+ * The `USAGE_LANE` value for a routed tool — `sideclaw:<tool>`, coarsened to the part
  * before the first `:` in `tool` itself. `review`'s sub-steps (`review:router`,
  * `review:angle`, `review:adversary`, `review:synthesis`) pass their own sub-tool label
  * through `SessionOptions.tool` for logging/attribution, but usage-tracker's `sub_tool`
  * column is a flat string with no sub-lane concept (`report.ts`'s grouping is a plain
  * `coalesce`, nothing wildcard-aware) — one lane per Max-lane worker keeps
- * `stats --by sub_tool` a single `agent-gateway:review` row instead of four fragments. Single
+ * `stats --by sub_tool` a single `sideclaw:review` row instead of four fragments. Single
  * chokepoint so every spawn path (all of them already route through `buildWorkerEnv`)
  * gets this for free rather than each call site coarsening its own `tool` string.
  */
 export function usageLane(tool: string | undefined): string {
   const base = (tool ?? "unknown").split(":")[0];
-  return `agent-gateway:${base}`;
+  return `sideclaw:${base}`;
 }
 
 /** The worker's full spawn env. Split out of `runSessionAttempt` so `USAGE_LANE` and the

@@ -132,7 +132,8 @@ reload:
 	curl -sf --max-time 2 http://127.0.0.1:7705/health >/dev/null && echo "agent-gateway reloaded" || { echo "agent-gateway did not come back on :7705 — tail ~/Library/Logs/agent-gateway.err"; exit 1; }
 
 # The legacy `com.jkrumm.sideclaw` and `com.jkrumm.sideclaw-server` labels (pre-rename) are booted
-# out and their plists removed first. Leaving either behind is not merely untidy: the first is the
+# out and their plists removed right after the running-jobs guard (not before: the old label is the
+# server that guard probes). Leaving either behind is not merely untidy: the first is the
 # label Background Task Management has denied, and any stale copy is a second agent racing for
 # port 7705.
 #
@@ -164,14 +165,15 @@ reload:
 # relying on its own default (SIGTERM-equivalent) termination, and accept that any running job
 # is abandoned for the next boot's crash recovery to pick up.
 install-agent:
-	@for l in com.jkrumm.sideclaw com.jkrumm.sideclaw-server; do \
-	  launchctl bootout gui/$$(id -u)/$$l 2>/dev/null || true; \
-	  rm -f ~/Library/LaunchAgents/$$l.plist; \
-	done
 	@if [ -z "$(FORCE)" ]; then \
 	  n=$$(curl -sf --max-time 3 http://127.0.0.1:7705/api/jobs/health 2>/dev/null | jq -r '.running // 0' 2>/dev/null || echo 0); \
 	  if [ "$${n:-0}" != "0" ]; then echo "refusing to install-agent: $$n job(s) running — waiting is normal (jobs commonly run minutes), or FORCE=1 make install-agent discards them"; exit 1; fi; \
 	fi
+	@# After the guard, not before: during the rename the old label is still the live server the guard probes.
+	@for l in com.jkrumm.sideclaw com.jkrumm.sideclaw-server; do \
+	  launchctl bootout gui/$$(id -u)/$$l 2>/dev/null || true; \
+	  rm -f ~/Library/LaunchAgents/$$l.plist; \
+	done
 	@old=$$(launchctl print gui/$$(id -u)/com.jkrumm.agent-gateway 2>/dev/null | awk '/^[[:space:]]*pid = /{print $$3; exit}'); \
 	if [ -n "$(FORCE)" ] && [ -n "$$old" ]; then \
 	  launchctl kill SIGINT gui/$$(id -u)/com.jkrumm.agent-gateway 2>/dev/null || true; \

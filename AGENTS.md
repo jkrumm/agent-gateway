@@ -24,7 +24,7 @@ Bun loads `.env` automatically from the `agent-gateway/` directory — all env v
 (`PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH`, `GITHUB_TOKEN`, `AGENT_GATEWAY_*`,
 `RESEARCH_GATEWAY_*`) live there, listed in `README.md`. That auto-load is
 cwd-based, so the **MCP process** (spawned with the calling session's cwd)
-imports `server/lib/load-env.ts` first thing in `mcp.ts` to read the same
+imports `server/lib/env-compat.ts` (which loads `load-env.ts`) first thing in `mcp.ts` to read the same
 file — existing environment always wins over the file.
 
 ## Validate

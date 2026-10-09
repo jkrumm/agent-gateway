@@ -1,4 +1,3 @@
-import "./lib/env-compat.ts";
 import { warnLegacyEnv } from "./lib/env-compat.ts";
 import { Elysia } from "elysia";
 import { appLogger as logger, cleanupLogFile } from "./logger.ts";

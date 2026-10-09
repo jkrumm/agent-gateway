@@ -12,7 +12,7 @@ import "./load-env.ts";
 const LEGACY_PREFIX = "SIDECLAW_";
 const PREFIX = "AGENT_GATEWAY_";
 
-/** Pure: copies `SIDECLAW_*` → `AGENT_GATEWAY_*` where the new name is unset. Returns the legacy
+/** Mutates `env`: copies `SIDECLAW_*` → `AGENT_GATEWAY_*` where the new name is unset. Returns the legacy
  *  names it saw (aliased or shadowed), sorted — the list to warn about once at boot. */
 export function aliasLegacyEnv(env: Record<string, string | undefined>): string[] {
   const seen: string[] = [];

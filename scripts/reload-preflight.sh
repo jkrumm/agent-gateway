@@ -11,6 +11,15 @@ set -uo pipefail
 
 REFUSED=3
 
+# Pre-rename install: the old-named agent is still the loaded one, its plist points at scripts that
+# no longer exist, so a reload would drain it and KeepAlive could never respawn it.
+for old in com.jkrumm.sideclaw-server com.jkrumm.sideclaw; do
+  if launchctl print "gui/$(id -u)/$old" >/dev/null 2>&1; then
+    echo "refusing to reload: the pre-rename LaunchAgent $old is still loaded — run scripts/migrate-runtime.sh (drains it, moves data, installs com.jkrumm.agent-gateway) first."
+    exit "$REFUSED"
+  fi
+done
+
 tracked="com.jkrumm.agent-gateway.plist"
 installed="$HOME/Library/LaunchAgents/com.jkrumm.agent-gateway.plist"
 if [ -f "$installed" ]; then

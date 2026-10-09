@@ -40,10 +40,19 @@ mv_if() { # mv_if <from> <to>: skip when from is gone, refuse to clobber an exis
   echo "moved $1 -> $2"
 }
 
+# Entry-wise, not a directory move: a process started on the new code (store.ts, dispatch-git.ts
+# mkdir eagerly) may already have created an empty target dir, and a directory-level `mv` would
+# then skip and strand jobs.db / salvage bundles at the old path.
+mv_dir() {
+  [ -d "$1" ] || return 0
+  mkdir -p "$2"
+  for e in "$1"/* "$1"/.[!.]*; do [ -e "$e" ] && mv_if "$e" "$2/$(basename "$e")"; done
+  rmdir "$1" 2>/dev/null || true
+}
+
 share="$HOME/.local/share" state="$HOME/.local/state" logs="$HOME/Library/Logs"
-mv_if "$share/sideclaw" "$share/agent-gateway"
-mv_if "$share/agent-gateway/sideclaw.db" "$share/agent-gateway/agent-gateway.db"
-mv_if "$state/sideclaw" "$state/agent-gateway"
+mv_dir "$share/sideclaw" "$share/agent-gateway"
+mv_dir "$state/sideclaw" "$state/agent-gateway"
 for ext in log err jsonl; do mv_if "$logs/sideclaw.$ext" "$logs/agent-gateway.$ext"; done
 
 make install-agent
