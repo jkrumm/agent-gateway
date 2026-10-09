@@ -9,7 +9,12 @@ export function registerNarrativeTool(server: McpServer): void {
     title: "Project Narrative Page",
     tool: "narrative",
     inputSchema: NARRATIVE_INPUT.shape,
-    annotations: { readOnlyHint: true, idempotentHint: false },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     description: `Write or revise ONE project's narrative page for the Obsidian vault: what it is, where it stands, how it got here — business terms, never a changelog. Runs as a BACKGROUND JOB: this call returns a jobId immediately — it does NOT return the page.
 
 WHEN TO CALL: Hermes' daily cron pass over tracked projects, or an explicit "update this project's narrative" request. Spends real tokens on the reasoning-tier model (editorial judgment, not classification) — don't call it speculatively.

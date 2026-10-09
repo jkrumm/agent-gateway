@@ -16,7 +16,7 @@
     "logs:tail": "tail -f ~/Library/Logs/agent-gateway.jsonl | bunx pino-pretty"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@octokit/rest": "^22.0.1",
     "elysia": "1.4.30",
     "pino": "^10.3.1",

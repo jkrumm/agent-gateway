@@ -8,7 +8,12 @@ export function registerUpdatePrTool(server: McpServer): void {
     title: "Update Dispatch PR",
     tool: "update_pr",
     inputSchema: UPDATE_PR_INPUT.shape,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     description: `Rebase one open \`dispatch/*\` pull request onto the latest default branch, re-run the repo's own checks on the result and force-with-lease push it. Mechanical — no model writes code. Runs as a BACKGROUND JOB: this call returns a jobId immediately — it does NOT return the result.
 
 WHEN TO CALL: a dispatch PR's base moved and it must be brought up to date before merge (the merge-train step). NOT for conflict resolution — a conflict is reported, and the caller re-dispatches the work (implement with \`revisionOf\`, or fresh) from the new base.

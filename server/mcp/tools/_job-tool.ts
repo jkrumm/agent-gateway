@@ -29,8 +29,26 @@ interface JobToolSpec {
   description: string;
   inputSchema: z.ZodRawShape;
   tool: JobTool;
-  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean };
+  annotations?: Partial<ToolHints>;
 }
+
+interface ToolHints {
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+}
+
+// The MCP spec's own defaults, spelled out: a tool that omits a hint is advertised as a
+// non-read-only, destructive, non-idempotent, open-world call — the pessimistic reading. Every
+// tool still states all four itself (tests/mcp-tools-list.test.ts pins it); this only keeps a
+// forgotten hint from reaching the wire as an absent one.
+const DEFAULT_HINTS: ToolHints = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: true,
+};
 
 export function registerJobSubmitTool(server: McpServer, spec: JobToolSpec): void {
   server.registerTool(
@@ -40,7 +58,7 @@ export function registerJobSubmitTool(server: McpServer, spec: JobToolSpec): voi
       description: spec.description,
       inputSchema: spec.inputSchema,
       outputSchema: JOB_HANDLE_OUTPUT.shape,
-      annotations: spec.annotations ?? {},
+      annotations: { ...DEFAULT_HINTS, ...spec.annotations },
     },
     async (args) => {
       if (!(await httpReachable())) {

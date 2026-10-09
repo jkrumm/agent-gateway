@@ -197,7 +197,9 @@ MODEL: ${describeRoute(routeFor("otel"))} — see GET /api/routing.`,
       outputSchema: OTEL_OUTPUT.shape,
       annotations: {
         readOnlyHint: true,
+        destructiveHint: false,
         idempotentHint: false,
+        openWorldHint: true,
       },
     },
     async ({ investigation, environment, cwd }, extra) => {

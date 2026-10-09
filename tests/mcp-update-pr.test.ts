@@ -1,7 +1,7 @@
 // The `update_pr` MCP tool is registered with the schema the handler validates against, and
-// server/mcp.ts actually wires it in. mcp.ts itself connects a stdio transport at import, so
-// it cannot be imported here: the registration function is exercised over an in-memory
-// transport and the wiring is pinned against mcp.ts's source.
+// the tool is in the registry server/mcp.ts registers from. mcp.ts itself connects a stdio
+// transport at import, so it cannot be imported here: the registration function is exercised
+// over an in-memory transport and the wiring is pinned against mcp.ts's source.
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { MCP_TOOLS } from "../server/mcp/tools/index.ts";
 import { registerUpdatePrTool } from "../server/mcp/tools/update-pr.ts";
 
 describe("update_pr MCP tool", () => {
@@ -31,9 +32,10 @@ describe("update_pr MCP tool", () => {
     }
   });
 
-  test("server/mcp.ts registers it", () => {
+  test("it is in the MCP_TOOLS registry that server/mcp.ts registers from", () => {
+    expect(MCP_TOOLS.map((t) => t.name)).toContain("update_pr");
+    expect(MCP_TOOLS.find((t) => t.name === "update_pr")?.register).toBe(registerUpdatePrTool);
     const source = readFileSync(join(import.meta.dir, "../server/mcp.ts"), "utf8");
-    expect(source).toContain('import { registerUpdatePrTool } from "./mcp/tools/update-pr.ts"');
-    expect(source).toMatch(/^registerUpdatePrTool\(server\);$/m);
+    expect(source).toMatch(/^registerAllTools\(server\);$/m);
   });
 });

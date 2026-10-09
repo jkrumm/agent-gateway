@@ -9,7 +9,12 @@ export function registerCheckTool(server: McpServer): void {
     title: "Code Quality Check",
     tool: "check",
     inputSchema: CHECK_INPUT.shape,
-    annotations: { readOnlyHint: true, idempotentHint: false },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     description: `Run all available validation steps (format, lint, typecheck, test, fallow) in a git repo. Auto-detects the ecosystem (Node/Bun, Python/uv, Makefile, Rust, Go). Runs as a BACKGROUND JOB: this call returns a jobId immediately — it does NOT return the pass/fail result.
 
 WHEN TO CALL: before committing, before a PR, or when validating code quality.

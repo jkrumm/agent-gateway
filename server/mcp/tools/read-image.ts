@@ -53,7 +53,12 @@ OUTPUT: \`text\` holds the reading. Default model ${routeFor("read_image").model
           ),
       },
       outputSchema: READ_IMAGE_OUTPUT.shape,
-      annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ path, prompt, model }, extra) => {
       const startMs = performance.now();

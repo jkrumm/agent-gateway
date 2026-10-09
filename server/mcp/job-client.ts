@@ -56,3 +56,28 @@ export async function getJobStatus(jobId: string): Promise<JobView | null> {
   }
   return data.job;
 }
+
+/** Outcome of `POST /api/jobs/:id/cancel`. 404 and 409 are expected answers, not transport
+ *  failures, so they are values; anything else unexpected throws like the other helpers. */
+export type CancelResult =
+  | { kind: "accepted"; job: JobView }
+  | { kind: "not_found" }
+  | { kind: "already_terminal"; error: string };
+
+/** Ask the server to cancel one job. A `pending` job comes back already `cancelled`; a
+ *  `running` one comes back still `running` with `cancelRequested: true` (best-effort SIGTERM,
+ *  the `cancelled` transition lands once the worker exits). */
+export async function requestJobCancel(jobId: string): Promise<CancelResult> {
+  const res = await fetch(`${BASE}/api/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: "POST",
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (res.status === 404) return { kind: "not_found" };
+  const data = (await res.json()) as JobEnvelope;
+  if (res.status === 409)
+    return { kind: "already_terminal", error: data.error ?? "job already terminal" };
+  if (!res.ok || !data.ok || !data.job) {
+    throw new Error(data.error ?? `job cancel failed with status ${res.status}`);
+  }
+  return { kind: "accepted", job: data.job };
+}

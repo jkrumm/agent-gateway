@@ -9,7 +9,12 @@ export function registerTriageTool(server: McpServer): void {
     title: "Single-Shot Triage",
     tool: "triage",
     inputSchema: TRIAGE_INPUT.shape,
-    annotations: { readOnlyHint: true, idempotentHint: false },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     description: `Answer ONE classification/extraction question with ONE tool-less model call and get back JSON that conforms to a JSON Schema you supply (e.g. "attach this event to an open item, file a new one, or ignore it"). No agent, no repo access, no worktree — seconds and cents, not minutes. Runs as a BACKGROUND JOB: this call returns a jobId immediately — it does NOT return the answer.
 
 WHEN TO CALL: a bounded decision whose full input fits in one prompt (intake routing, duplicate detection, a fixed-by check). NOT for anything that must read files, run commands or edit code — use dispatch for that.

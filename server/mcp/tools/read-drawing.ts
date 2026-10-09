@@ -83,7 +83,12 @@ OUTPUT: \`synthesis\` is the merged prose; \`structure\` is the deterministic JS
           .describe(`Vision model. Default "${routeFor("read_drawing").model}".`),
       },
       outputSchema: READ_DRAWING_OUTPUT.shape,
-      annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
     async ({ path, model }, extra) => {
       const startMs = performance.now();

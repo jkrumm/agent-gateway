@@ -9,7 +9,12 @@ export function registerDispatchTool(server: McpServer): void {
     title: "Repo Dispatch",
     tool: "dispatch",
     inputSchema: DISPATCH_INPUT.shape,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     description: `Hand one bounded episode to a Claude Code session running INSIDE a specific repo, so it works with that repo's own AGENTS.md/CLAUDE.md, .claude/rules/ and .claude/skills/ in context. Runs as a BACKGROUND JOB: this call returns a jobId immediately — it does NOT return the verdict.
 
 WHEN TO CALL: something in another repo is broken/failing/behaving oddly and answering it means actually reading that repo; or a small, well-understood change should be made there. Also the path an automated observer (Hermes) uses to escalate an incident it cannot judge on its own.

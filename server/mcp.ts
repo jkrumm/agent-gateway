@@ -3,18 +3,7 @@
 import { warnLegacyEnv } from "./lib/env-compat.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { registerCheckTool } from "./mcp/tools/check.ts";
-import { registerReviewTool } from "./mcp/tools/review.ts";
-import { registerOtelTool } from "./mcp/tools/otel.ts";
-import { registerJobTools } from "./mcp/tools/jobs.ts";
-import { registerReadImageTool } from "./mcp/tools/read-image.ts";
-import { registerReadDrawingTool } from "./mcp/tools/read-drawing.ts";
-import { registerExcalidrawDiagramTool } from "./mcp/tools/excalidraw-diagram.ts";
-import { registerDispatchTool } from "./mcp/tools/dispatch.ts";
-import { registerOverviewTool } from "./mcp/tools/overview.ts";
-import { registerNarrativeTool } from "./mcp/tools/narrative.ts";
-import { registerTriageTool } from "./mcp/tools/triage.ts";
-import { registerUpdatePrTool } from "./mcp/tools/update-pr.ts";
+import { registerAllTools } from "./mcp/tools/index.ts";
 import { logger } from "./mcp/logger.ts";
 import { setProcessKind } from "./lib/process-context.ts";
 import { logRoutingOverrides, logStaleQuotaEnvVars } from "./lib/routing.ts";
@@ -32,18 +21,7 @@ const server = new McpServer({
   version: "0.1.0",
 });
 
-registerCheckTool(server);
-registerOtelTool(server);
-registerReviewTool(server);
-registerJobTools(server);
-registerReadImageTool(server);
-registerReadDrawingTool(server);
-registerExcalidrawDiagramTool(server);
-registerDispatchTool(server);
-registerOverviewTool(server);
-registerNarrativeTool(server);
-registerTriageTool(server);
-registerUpdatePrTool(server);
+registerAllTools(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

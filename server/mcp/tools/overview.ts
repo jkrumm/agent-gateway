@@ -9,7 +9,12 @@ export function registerOverviewTool(server: McpServer): void {
     title: "Agent Fleet Overview",
     tool: "overview",
     inputSchema: OVERVIEW_INPUT.shape,
-    annotations: { readOnlyHint: true, idempotentHint: false },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     description: `Enrich the deterministic agent snapshot (GET /api/agents) with one LLM recommendation per Claude Code agent on this Mac mini — a batched, single-call, prompt-only triage pass. Runs as a BACKGROUND JOB: this call returns a jobId immediately — it does NOT return the recommendations.
 
 WHEN TO CALL: when a caller wants a fleet-wide "what should I look at next" verdict rather than raw agent state — the enum tells you which pane needs a reply, a commit, a review, or is safe to ignore. Most callers should just poll GET /api/overview(.txt) instead of calling this tool directly; call this only when you specifically need to trigger a fresh recommendation pass.

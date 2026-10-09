@@ -8,7 +8,12 @@ export function registerExcalidrawDiagramTool(server: McpServer): void {
     title: "Create Excalidraw Diagram",
     tool: "excalidraw_diagram",
     inputSchema: EXCALIDRAW_DIAGRAM_INPUT.shape,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     description: `Generate a fully-hydrated \`.excalidraw\` v2 file from a design brief. The worker emits skeleton JSON; the host hydrates via @excalidraw/excalidraw in headless Chrome and writes the file. The result opens cleanly in the Obsidian Excalidraw plugin (zsviczian), and excalidraw.com. Runs as a BACKGROUND JOB: returns a jobId immediately — it does NOT return the result.
 
 WHEN TO CALL: when the user wants a diagram of a workflow, architecture, system, protocol, or concept. The skill prompt owns the cheat sheet (palette, fonts, patterns) — pass a design brief, not raw JSON.

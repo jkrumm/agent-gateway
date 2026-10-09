@@ -18,7 +18,12 @@ export function registerReviewTool(server: McpServer): void {
     title: "Code Review",
     tool: "review",
     inputSchema: REVIEW_MCP_INPUT.shape,
-    annotations: { readOnlyHint: true, idempotentHint: false },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     description: `Run a deep multi-angle code review (architect + senior-dev always, file-type reviewers auto-added, plus a triage router for security/performance/concurrency/data-migration/api-contract/resilience). Runs as a BACKGROUND JOB: returns a jobId immediately — it does NOT return the findings.
 
 WHEN TO CALL: before committing, before a PR, or when asked to review code quality.
