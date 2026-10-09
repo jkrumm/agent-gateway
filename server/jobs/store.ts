@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { appLogger as logger } from "../logger.ts";
 import { terminateSessionsForJob } from "../mcp/session-runner.ts";
 import {
@@ -43,6 +43,9 @@ const MAX_CONCURRENT = parseInt(process.env.AGENT_GATEWAY_JOB_CONCURRENCY ?? "3"
 // Retention: keep terminal jobs queryable for a while after they finish, then GC.
 const PRUNE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_TERMINAL_ROWS = 200;
+// `job_stats` is the slim, blob-free history kept long after the full `jobs` row is pruned.
+const STATS_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+const STATS_ERROR_HEAD_CHARS = 300;
 
 /** Persist a live progress snapshot for a running job. Passed to the executor. */
 export type ProgressSink = (progress: JobProgress) => void;
@@ -86,6 +89,28 @@ db.run(`
   )
 `);
 db.run("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at)");
+
+// Slim per-job history for effectiveness stats. `jobs` rows are pruned after 24h / 200 rows, so
+// anything that wants a week of tool/status/error trends cannot read them. No params/result
+// blobs here, ever — `repo` is only the basename of `params.cwd`, `error_head` the first
+// `STATS_ERROR_HEAD_CHARS` chars of the error. Written by `recordJobStats` on every terminal
+// transition, pruned at `STATS_TTL_MS`.
+db.run(`
+  CREATE TABLE IF NOT EXISTS job_stats (
+    id          TEXT PRIMARY KEY,
+    tool        TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    started_at  INTEGER,
+    finished_at INTEGER,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    backend     TEXT,
+    model       TEXT,
+    error_head  TEXT,
+    repo        TEXT
+  )
+`);
+db.run("CREATE INDEX IF NOT EXISTS idx_job_stats_finished ON job_stats(finished_at)");
 
 // Migration for dbs created before the `progress` column existed (the db file
 // persists across restarts within a /tmp lifetime). Ignore if already present.
@@ -220,6 +245,7 @@ export function __resetForTests(): void {
   executor = null;
   onDone = null;
   db.run("DELETE FROM jobs");
+  db.run("DELETE FROM job_stats");
 }
 
 /** When THIS process started. A restart — whether from a crash, a `make reload` drain, or
@@ -758,6 +784,83 @@ export function jobFinishLogFields(
   };
 }
 
+/** Upsert the slim `job_stats` row for a job that just became terminal. Reads the row back
+ *  rather than taking arguments so every terminal path (`finish`, and `recover`'s boot-time
+ *  `cancelled`/`interrupted` landings) records the same shape. Never stores `params`/`result`
+ *  — only `backend`/`model` lifted from the result JSON, the basename of `params.cwd`, and the
+ *  head of the error. A failure here must not break the job lifecycle, so it only logs. */
+function recordJobStats(id: string): void {
+  try {
+    const row = fetchRow(id);
+    if (!row) return;
+    const result = parseJsonObject(row.result);
+    const params = parseJsonObject(row.params);
+    db.run(
+      `INSERT OR REPLACE INTO job_stats
+         (id, tool, status, created_at, started_at, finished_at, attempts, backend, model, error_head, repo)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        row.id,
+        row.tool,
+        row.status,
+        row.created_at,
+        row.started_at,
+        row.finished_at,
+        row.attempts,
+        typeof result?.backend === "string" ? result.backend : null,
+        typeof result?.model === "string" ? result.model : null,
+        row.error ? row.error.slice(0, STATS_ERROR_HEAD_CHARS) : null,
+        typeof params?.cwd === "string" && params.cwd !== "" ? basename(params.cwd) : null,
+      ],
+    );
+  } catch (err) {
+    logger.warn({ event: "job.stats_failed", jobId: id, error: String(err) }, "job_stats write");
+  }
+}
+
+function parseJsonObject(raw: string | null): Record<string, unknown> | null {
+  if (raw === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface JobStatsSummary {
+  days: number;
+  /** Terminal jobs finished in the window, per tool and final status. */
+  byToolStatus: { tool: string; status: string; count: number }[];
+  /** Most frequent failure heads (first 100 chars of the error), per tool. */
+  topErrors: { tool: string; errorHead: string; count: number }[];
+}
+
+const TOP_ERROR_GROUPS = 10;
+const ERROR_GROUP_CHARS = 100;
+
+/** Aggregate of `job_stats` over the last `days` days (by `finished_at`): counts per
+ *  tool/status plus the top failed-error groups. Survives the 24h `jobs` prune. */
+export function jobStatsSummary(days = 7, now = Date.now()): JobStatsSummary {
+  const since = now - days * 24 * 60 * 60 * 1000;
+  const byToolStatus = db
+    .query<{ tool: string; status: string; count: number }, [number]>(
+      `SELECT tool, status, COUNT(*) AS count FROM job_stats
+       WHERE finished_at >= ? GROUP BY tool, status ORDER BY tool, status`,
+    )
+    .all(since);
+  const topErrors = db
+    .query<{ tool: string; errorHead: string; count: number }, [number, number, number]>(
+      `SELECT tool, substr(error_head, 1, ?) AS errorHead, COUNT(*) AS count FROM job_stats
+       WHERE status = 'failed' AND error_head IS NOT NULL AND finished_at >= ?
+       GROUP BY tool, errorHead ORDER BY count DESC, tool, errorHead LIMIT ?`,
+    )
+    .all(ERROR_GROUP_CHARS, since, TOP_ERROR_GROUPS);
+  return { days, byToolStatus, topErrors };
+}
+
 /** Job record + explicit finish reason, not just an id — `job.done`/`job.fail` need `tool` and
  *  a duration to be joinable/analyzable without a three-way log join (that's how the
  *  docs/deployment.md § Two shutdown paths, two windows table had to be built: `job.start` joined to
@@ -775,6 +878,7 @@ function finish(
     now,
     job.id,
   ]);
+  recordJobStats(job.id);
   runningIds.delete(job.id);
   logger.info(jobFinishLogFields(job, status, outcome, now), `job ${status}`);
   if (status === "done" && onDone) {
@@ -822,6 +926,7 @@ function recover(): void {
         "UPDATE jobs SET status = 'cancelled', error = 'cancelled by request', finished_at = ? WHERE id = ?",
         [now, row.id],
       );
+      recordJobStats(row.id);
       cancelled++;
       logger.info(
         { event: "job.cancelled", jobId: row.id, tool: row.tool },
@@ -857,6 +962,7 @@ function recover(): void {
           "UPDATE jobs SET status = 'interrupted', error = 'HTTP server restarted while job was running', finished_at = ? WHERE id = ?",
           [now, row.id],
         );
+        recordJobStats(row.id);
         interrupted++;
         if (metaIsInPlace) {
           // Named explicitly rather than left to be found by grepping — an in-place episode
@@ -932,6 +1038,7 @@ function recover(): void {
         [now, row.id],
       );
       interrupted++;
+      recordJobStats(row.id);
     }
   }
   const pending =
@@ -959,6 +1066,9 @@ function prune(): void {
      )`,
     [MAX_TERMINAL_ROWS],
   );
+  db.run("DELETE FROM job_stats WHERE COALESCE(finished_at, created_at) < ?", [
+    Date.now() - STATS_TTL_MS,
+  ]);
 }
 
 function fallbackRecord(
