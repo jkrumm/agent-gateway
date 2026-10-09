@@ -62,6 +62,7 @@ describe("worker schema — old shape and new fields", () => {
         rootCause: "stale-lockfile-after-rename",
         nextAction: "human",
         decisionQuestion: "Drop /v1 now, or keep it?",
+        owningRepo: "warden",
       }).success,
     ).toBe(true);
   });
@@ -99,6 +100,8 @@ describe("worker schema — old shape and new fields", () => {
     expect(js.properties.rootCause?.maxLength).toBe(80);
     expect(js.properties.rootCause?.pattern).toBe("^[a-z0-9]+(-[a-z0-9]+)*$");
     expect(js.properties.decisionQuestion?.maxLength).toBe(200);
+    expect(js.properties.owningRepo?.maxLength).toBe(100);
+    expect(js.properties.owningRepo?.pattern).toBe("^[A-Za-z0-9._-]+$");
   });
 });
 
@@ -189,6 +192,54 @@ describe("rootCause normalization", () => {
   });
 });
 
+describe("owningRepo", () => {
+  const repo = (owningRepo: unknown) =>
+    (
+      normalizeWorkerOutput(base("investigate", { owningRepo })) as {
+        owningRepo?: string;
+      }
+    ).owningRepo;
+
+  test("a valid bare repo name is kept verbatim on every tier", () => {
+    for (const ok of ["sideclaw", "homelab-private", "weather.orb", "repo_1"]) {
+      for (const tier of TIERS) {
+        const r = workerValidator(tier)(base(tier, { owningRepo: ok }));
+        expect(r.ok).toBe(true);
+        expect(r.ok && (r.value as DispatchOutput).owningRepo).toBe(ok);
+      }
+    }
+  });
+
+  test("the two unambiguous near-misses are rescued", () => {
+    expect(repo("  warden  ")).toBe("warden");
+    expect(repo("warden.git")).toBe("warden");
+  });
+
+  test("a reference-shaped or malformed value is dropped, never mangled into a wrong name", () => {
+    for (const bad of ["", "   ", "has space", "owner/warden", "a/b/c", "café"]) {
+      expect(repo(bad)).toBeUndefined();
+    }
+  });
+
+  test("an overlong name is dropped too", () => {
+    expect(repo("x".repeat(100))).toBe("x".repeat(100));
+    expect(repo("x".repeat(101))).toBeUndefined();
+  });
+
+  test("the strict schema still rejects a malformed name that skips normalization", () => {
+    const s = WORKER_OUTPUT.investigate;
+    for (const bad of ["has space", "owner/warden", "x".repeat(101), ""]) {
+      expect(s.safeParse(base("investigate", { owningRepo: bad })).success).toBe(false);
+    }
+  });
+
+  test("a dropped name never fails the episode", () => {
+    const r = workerValidator("investigate")(base("investigate", { owningRepo: "has space" }));
+    expect(r.ok).toBe(true);
+    expect(r.ok && "owningRepo" in (r.value as object)).toBe(false);
+  });
+});
+
 describe("decisionQuestion gating", () => {
   test("allowed with nextAction human", () => {
     for (const tier of TIERS) {
@@ -264,6 +315,16 @@ describe("applySensitiveScan with the new fields", () => {
     expect(out.outcome).toBe("withheld");
     expect(out.decisionQuestion).toBeUndefined();
     expect(out.rootCause).toBeUndefined();
+    expect(JSON.stringify(out)).not.toContain(secret);
+  });
+
+  test("a secret in owningRepo is withheld and the field is not carried through", () => {
+    const out = applySensitiveScan(
+      { ...verdict, decisionQuestion: undefined, owningRepo: secret } as DispatchOutput,
+      { sensitive: true, jobId: "verdict-schema-test", project: "x" },
+    );
+    expect(out.outcome).toBe("withheld");
+    expect(out.owningRepo).toBeUndefined();
     expect(JSON.stringify(out)).not.toContain(secret);
   });
 });

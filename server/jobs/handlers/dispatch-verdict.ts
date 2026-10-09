@@ -20,7 +20,9 @@ const VERDICT_MAX = 600;
 const RECOMMENDATION_MAX = 400;
 const ROOT_CAUSE_MAX = 80;
 const DECISION_QUESTION_MAX = 200;
+const OWNING_REPO_MAX = 100;
 const ROOT_CAUSE_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+const OWNING_REPO_RE = /^[A-Za-z0-9._-]+$/;
 
 const ROOT_CAUSE_FIELD = z
   .string()
@@ -42,6 +44,18 @@ const DECISION_QUESTION_FIELD = z
   .describe(
     `ONLY when nextAction is "human": one concrete question naming two options, at most ` +
       `${DECISION_QUESTION_MAX} chars. Omit it for every other nextAction.`,
+  );
+
+const OWNING_REPO_FIELD = z
+  .string()
+  .max(OWNING_REPO_MAX)
+  .regex(OWNING_REPO_RE)
+  .optional()
+  .describe(
+    `Optional: the bare name of the repo that OWNS the finding when it is not the repo this ` +
+      `episode runs in (e.g. a shared config or library the other repo depends on). Letters, ` +
+      `digits, dots, underscores and hyphens only, at most ${OWNING_REPO_MAX} chars. Omit it ` +
+      `when the finding belongs to the repo you are reading.`,
   );
 
 const VERDICT_FIELDS = {
@@ -82,12 +96,13 @@ const VERDICT_FIELDS = {
   // must keep validating. Optional-ness is the compat decision; the prompt demands them.
   rootCause: ROOT_CAUSE_FIELD,
   decisionQuestion: DECISION_QUESTION_FIELD,
+  owningRepo: OWNING_REPO_FIELD,
 };
 
 // What the WORKER is held to is tighter than what the handler may RETURN: the handler folds
 // `artifactNote` into `verdict`, and the salvage wrapper carries up to 3000 chars of raw
 // worker text, so the output-side `verdict`/`recommendation` caps (4000/2000) stay loose while
-// the worker's own are the terse ones below. Overlong `summary`/`verdict`/`recommendation`/`rootCause`/`decisionQuestion` is
+// the worker's own are the terse ones below. Overlong `summary`/`verdict`/`recommendation`/`rootCause`/`decisionQuestion`/`owningRepo` is
 // normalized by `normalizeWorkerOutput` BEFORE validation (evidence and artifact fields stay strict).
 const WORKER_VERDICT_FIELDS = {
   ...VERDICT_FIELDS,
@@ -329,14 +344,27 @@ function normalizeRootCause(text: string): string {
     .replace(/-+$/g, "");
 }
 
+/** Coerce an arbitrary string toward the bare `owningRepo` name; "" when nothing usable is
+ *  left. Unlike `rootCause` this must NOT invent a key: a repo name names something real, so
+ *  rewriting `owner/repo` into `owner-repo` — or slicing a secret-store reference down to its
+ *  last segment — would fabricate a name that is not the one meant. It rescues only the two
+ *  unambiguous
+ *  slips (surrounding whitespace, a trailing `.git`) and drops every reference-shaped or
+ *  otherwise malformed value rather than guessing at it. */
+function normalizeOwningRepo(text: string): string {
+  const name = text.trim().replace(/\.git$/i, "");
+  return name.length > 0 && name.length <= OWNING_REPO_MAX && OWNING_REPO_RE.test(name) ? name : "";
+}
+
 /**
  * Lenient pre-validation pass over the worker's raw object. The caps live in WORKER_OUTPUT
  * (that is what the worker is shown via --json-schema), but a finished episode must never be
  * thrown away for being wordy: overlong text is truncated with an ellipsis, a `rootCause`
- * that is not quite kebab-case is coerced (or dropped when nothing usable remains), and a
- * `decisionQuestion` that is empty or accompanies a non-human `nextAction` is dropped.
- * Anything that is not a plain object, and every field it does not own, passes through
- * untouched so the strict schema still judges the shape.
+ * that is not quite kebab-case is coerced (or dropped when nothing usable remains), a
+ * `decisionQuestion` that is empty or accompanies a non-human `nextAction` is dropped, and an
+ * `owningRepo` that is not a plausible bare repo name is dropped. Anything that is not a plain
+ * object, and every field it does not own, passes through untouched so the strict schema still
+ * judges the shape.
  */
 export function normalizeWorkerOutput(data: unknown): unknown {
   if (typeof data !== "object" || data === null || Array.isArray(data)) return data;
@@ -357,6 +385,11 @@ export function normalizeWorkerOutput(data: unknown): unknown {
     const q = clampText(out.decisionQuestion, DECISION_QUESTION_MAX);
     if (q && out.nextAction === "human") out.decisionQuestion = q;
     else delete out.decisionQuestion;
+  }
+  if (typeof out.owningRepo === "string") {
+    const repo = normalizeOwningRepo(out.owningRepo);
+    if (repo) out.owningRepo = repo;
+    else delete out.owningRepo;
   }
   return out;
 }

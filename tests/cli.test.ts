@@ -644,7 +644,7 @@ describe("human-readable rendering", () => {
     expect(text).toContain("recommendation: next step");
   });
 
-  test("renderVerdictResult prints rootCause and decisionQuestion when present", () => {
+  test("renderVerdictResult prints rootCause, decisionQuestion and owningRepo when present", () => {
     const text = renderVerdictResult({
       ...VERDICT,
       confidence: "high" as const,
@@ -653,9 +653,11 @@ describe("human-readable rendering", () => {
       schemaVersion: 5 as const,
       rootCause: "stale-lockfile-after-rename",
       decisionQuestion: "Drop the column or keep it? A: drop. B: keep.",
+      owningRepo: "warden",
     });
     expect(text).toContain("rootCause: stale-lockfile-after-rename");
     expect(text).toContain("decisionQuestion: Drop the column or keep it?");
+    expect(text).toContain("owningRepo: warden");
   });
 
   test("renderCheckResult renders a check result", () => {
