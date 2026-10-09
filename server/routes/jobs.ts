@@ -1,12 +1,8 @@
 import { Elysia, t } from "elysia";
-import {
-  backendFallbacksLastHour,
-  ROUTE_STREAK_LIMIT,
-  routeFailureStreaks,
-} from "../mcp/session-runner.ts";
-import { cancelJob, createJob, getJob, jobHealth, listJobs, queueStats } from "../jobs/store.ts";
+import { cancelJob, createJob, getJob, listJobs, queueStats } from "../jobs/store.ts";
 import { isJobTool } from "../jobs/types.ts";
 import { DEFAULT_DISPATCH_TIER, resolveDispatchTarget } from "../lib/dispatch-policy.ts";
+import { computeHealth } from "../lib/health.ts";
 import { validateModel } from "../lib/routing.ts";
 
 // HTTP surface for the async job system. The MCP tools are thin clients of these
@@ -81,34 +77,11 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
   // hour or the oldest pending job has waited >15 min. Static route, so it is registered
   // before `/:id` — never resolved as a job named "health".
   //
-  // `routeStreaks`/`degradedRoutes`/`warnings` are reported, never enforced, same as
-  // `backendFallbacks` above them — a route stuck on consecutive failures (e.g. the IU
-  // gateway refusing every `check@iu/glm-5.3-flash` attempt) is a WARN a human should look
-  // at, not a page. `ok` above stays computed from `evaluateJobHealth` alone.
-  .get("/health", () => {
-    const health = jobHealth();
-    const backendFallbacks = backendFallbacksLastHour();
-    const streaks = routeFailureStreaks();
-    const degradedRoutes = Object.entries(streaks)
-      .filter(([, count]) => count >= ROUTE_STREAK_LIMIT)
-      .map(([route]) => route);
-    const warnings: string[] = degradedRoutes.map(
-      (route) => `route ${route} failed ${streaks[route]} in a row`,
-    );
-    if (backendFallbacks.count > 0) {
-      const reasons = Object.entries(backendFallbacks.reasons)
-        .map(([reason, count]) => `${reason}×${count}`)
-        .join(", ");
-      warnings.push(`${backendFallbacks.count} backend fallback(s) in the last hour: ${reasons}`);
-    }
-    return {
-      ...health,
-      backendFallbacks,
-      routeStreaks: streaks,
-      degradedRoutes,
-      warnings,
-    };
-  })
+  // `routeStreaks`/`degradedRoutes`/`warnings` are reported, never enforced on `ok`, same as
+  // `backendFallbacks` — `ok` stays computed from `evaluateJobHealth` alone. The additive
+  // `pageable`/`pageReason` carry the "should this page" verdict the Kuma heartbeat uses
+  // (server/lib/health.ts, kuma-push.ts): a degraded route pages there, not via `ok`.
+  .get("/health", () => computeHealth())
 
   // Poll a single job's state. `job.status` terminal ⇒ `result` or `error` is set.
   .get("/:id", ({ params, set }) => {

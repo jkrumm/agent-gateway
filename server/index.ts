@@ -20,6 +20,7 @@ import {
 } from "./jobs/store";
 import { executeJob } from "./jobs/executor";
 import { pushOverviewToArgo } from "./lib/argo-push.ts";
+import { startKumaPush, stopKumaPush } from "./lib/kuma-push.ts";
 import { activeSessionCount, terminateActiveSessions } from "./mcp/session-runner.ts";
 import { setProcessKind } from "./lib/process-context.ts";
 import { logRoutingOverrides, logStaleQuotaEnvVars } from "./lib/routing.ts";
@@ -120,6 +121,11 @@ initJobStore({
 const ARGO_PUSH_INTERVAL_MS = 10 * 60 * 1000;
 setInterval(() => void pushOverviewToArgo("timer"), ARGO_PUSH_INTERVAL_MS);
 
+// Kuma push heartbeat: `down` with the reason when a route is degraded or the queue unhealthy,
+// else `up`. After initJobStore so the first health read sees a booted store; it keeps pushing
+// `up` through a drain and stops only on the exit path below.
+startKumaPush();
+
 const PORT = parseInt(process.env.PORT ?? "7705");
 // Loopback only. Every consumer is local — the herdr overview pane, Hermes, the MCP child
 // per session, fetch_usage.py's POST, devhost-health — and nothing here carries auth of
@@ -175,7 +181,10 @@ const shutdownController = createShutdownController({
   markDrainKilled,
   markDrainCompleted,
   log: (level, fields, msg) => logger[level](fields, msg),
-  exit: (code) => process.exit(code),
+  exit: (code) => {
+    stopKumaPush();
+    process.exit(code);
+  },
   now: () => Date.now(),
   scheduleFlush: (cb, ms) => setTimeout(cb, ms),
 });
