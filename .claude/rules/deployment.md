@@ -8,7 +8,7 @@ sideclaw runs **exclusively via macOS LaunchAgent**. Never start the server
 directly (`make dev`/`make start` exit with an error; `bun run dev`/`bun run
 start`/`bun server/index.ts` conflict with the LaunchAgent's port 7705).
 
-Use `make build` (frontend only), `make reload` (build + self-initiated drain
+Use `make reload` (self-initiated drain
 via `POST /api/shutdown` + restart, `FORCE=1` while jobs are running), `make
 install-agent` / `make uninstall-agent`. Logs: `~/Library/Logs/sideclaw.{log,err}`
 — never `/tmp` (see `.claude/rules/logs.md`). Edit the tracked

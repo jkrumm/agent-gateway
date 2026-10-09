@@ -1,14 +1,6 @@
 import { Elysia } from "elysia";
-import { staticPlugin } from "@elysiajs/static";
-import { existsSync, readFileSync } from "fs";
 import { appLogger as logger, cleanupLogFile } from "./logger.ts";
-import { reposRoutes } from "./routes/repos";
-import { notesRoutes } from "./routes/notes";
-import { eventsRoutes } from "./routes/events";
-import { markdownRoutes } from "./routes/markdown";
 import { usageRoutes } from "./routes/usage";
-import { diagramsRoutes } from "./routes/diagrams";
-import { kioskRoute } from "./routes/kiosk";
 import { agentsRoutes } from "./routes/agents";
 import { routingRoutes } from "./routes/routing";
 import { dispatchPolicyRoutes } from "./routes/dispatch-policy";
@@ -49,13 +41,9 @@ logRoutingOverrides(logger);
 logStaleQuotaEnvVars(logger);
 logDispatchPolicy(logger);
 
-const isDev = !existsSync("dist/index.html");
-const indexHtml = isDev ? null : readFileSync("dist/index.html", "utf-8");
-const BUILD_ID = crypto.randomUUID();
-
 await cleanupLogFile();
 
-const SKIP_LOG_PATHS = new Set(["/health", "/api/build-id"]);
+const SKIP_LOG_PATHS = new Set(["/health"]);
 
 const app = new Elysia()
   .derive(() => ({ _startMs: performance.now() }))
@@ -87,14 +75,7 @@ const app = new Elysia()
     );
   })
   .get("/health", () => ({ ok: true }))
-  .get("/api/build-id", () => ({ buildId: BUILD_ID }))
-  .use(reposRoutes)
-  .use(notesRoutes)
-  .use(eventsRoutes)
-  .use(markdownRoutes)
   .use(usageRoutes)
-  .use(diagramsRoutes)
-  .use(kioskRoute)
   .use(jobsRoutes)
   .use(agentsRoutes)
   .use(routingRoutes)
@@ -137,14 +118,6 @@ initJobStore({
 const ARGO_PUSH_INTERVAL_MS = 10 * 60 * 1000;
 setInterval(() => void pushOverviewToArgo("timer"), ARGO_PUSH_INTERVAL_MS);
 
-if (!isDev) {
-  app.use(staticPlugin({ assets: "dist/assets", prefix: "/assets" })).get("*", ({ set }) => {
-    set.headers["content-type"] = "text/html; charset=utf-8";
-    set.headers["cache-control"] = "no-cache";
-    return indexHtml;
-  });
-}
-
 const PORT = parseInt(process.env.PORT ?? "7705");
 // Loopback only. Every consumer is local — the herdr overview pane, Hermes, the MCP child
 // per session, fetch_usage.py's POST, devhost-health — and nothing here carries auth of
@@ -154,10 +127,8 @@ const HOSTNAME = process.env.SIDECLAW_HOST ?? "127.0.0.1";
 app.listen({ hostname: HOSTNAME, port: PORT });
 
 logger.info(
-  { event: "app.startup", host: HOSTNAME, port: PORT, dev: isDev },
-  isDev
-    ? `sideclaw API running on ${HOSTNAME}:${PORT} (dev)`
-    : `sideclaw running on ${HOSTNAME}:${PORT}`,
+  { event: "app.startup", host: HOSTNAME, port: PORT },
+  `sideclaw running on ${HOSTNAME}:${PORT}`,
 );
 
 // One drain state machine, two triggers, each with its own window (see lib/shutdown.ts's
@@ -253,5 +224,3 @@ registerShutdownTrigger((force) => {
   onSignal(origin, mode, graceMs);
   return { running };
 });
-
-export type App = typeof app;

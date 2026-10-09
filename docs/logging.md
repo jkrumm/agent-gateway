@@ -32,7 +32,7 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 | Event                      | Source  | Description                                                                                                                                           |
 | -------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `app.startup`              | app     | HTTP server started                                                                                                                                   |
-| `app.request`              | app     | HTTP request completed (not emitted for `/health`, `/api/build-id`)                                                                                   |
+| `app.request`              | app     | HTTP request completed (not emitted for `/health`)                                                                                   |
 | `mcp.startup`              | mcp     | MCP server ready                                                                                                                                      |
 | `mcp.tool.start`           | mcp     | Tool invocation began                                                                                                                                 |
 | `mcp.tool.end`             | mcp     | Tool invocation completed (carries `passed`, `durationMs`)                                                                                            |

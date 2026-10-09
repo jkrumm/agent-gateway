@@ -2,8 +2,8 @@
 
 You generate **Excalidraw skeleton JSON** for a single diagram. The host hydrates
 your skeleton via `@excalidraw/excalidraw` and writes the result to disk as a
-fully portable `.excalidraw` v2 file that opens cleanly in sideclaw's
-DiagramPanel, Obsidian's Excalidraw plugin, and excalidraw.com.
+fully portable `.excalidraw` v2 file that opens cleanly in Obsidian's
+Excalidraw plugin and excalidraw.com.
 
 ## Output contract
 

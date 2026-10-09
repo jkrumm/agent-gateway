@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ships the checked-out HEAD: `make reload` (build + self-drain + restart), then `make verify`.
+# Ships the checked-out HEAD: `make reload` (self-drain + restart), then `make verify`.
 # On a failed verify (reload succeeded, the new server is unhealthy), rolls the checkout back to
 # HEAD~1 (detached) and reloads again — only when the working tree is clean; otherwise it refuses
 # and says how to recover by hand. A REFUSED reload (running jobs, plist drift) never rolls back:

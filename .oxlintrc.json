@@ -1,9 +1,8 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["typescript", "react", "unicorn", "promise", "import"],
+  "plugins": ["typescript", "unicorn", "promise", "import"],
   "jsPlugins": ["eslint-plugin-zod"],
   "env": {
-    "browser": true,
     "node": true
   },
   "categories": {
@@ -13,9 +12,6 @@
   "rules": {
     "typescript/no-explicit-any": "error",
     "typescript/no-non-null-assertion": "warn",
-    "react/rules-of-hooks": "error",
-    "react/exhaustive-deps": "warn",
-    "react/react-in-jsx-scope": "off",
     "eslint/no-console": "warn",
     "eslint/no-unused-vars": "error",
     "eslint/max-depth": ["warn", { "max": 5 }],
@@ -32,5 +28,5 @@
     "zod/consistent-import": ["error", { "syntax": "named" }],
     "zod/prefer-meta": "off"
   },
-  "ignorePatterns": ["dist/**", "node_modules/**", ".out/**"]
+  "ignorePatterns": ["node_modules/**", ".out/**"]
 }

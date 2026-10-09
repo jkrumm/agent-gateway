@@ -22,8 +22,7 @@ import { triggerShutdown } from "../lib/shutdown.ts";
 // "POST" })` with no preflight and no way for this server to refuse it, because the browser never
 // asks first. Before `POST /api/shutdown` existed, triggering a forced abort needed OS signal
 // privileges; now it needs one `fetch` call from a tab the user happens to have open. Requiring a
-// header outside the CORS-safelisted set (`x-sideclaw-shutdown`, matching the `x-lock-token`
-// convention in routes/diagrams.ts) forces the browser to send a preflight OPTIONS request first
+// header outside the CORS-safelisted set (`x-sideclaw-shutdown`) forces the browser to send a preflight OPTIONS request first
 // — which this server never answers with an `Access-Control-Allow-*` response, so the actual POST
 // never fires. A same-origin caller (`curl` in the Makefile) sets the header trivially. This is
 // NOT authentication — it closes exactly one vector (a background browser tab), not the one this

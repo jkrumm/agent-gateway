@@ -1,7 +1,7 @@
 # Repo contract (dotfiles/docs/agent-platform.md §Repo contract): check · deploy · verify · logs.
 
 # All local validation, no side effects. Gating: format, lint, typecheck
-# (`bun run typecheck` = server project then frontend project), tests.
+# (`bun run typecheck`), tests.
 check:
 	bun run format:check
 	bun run lint
@@ -27,9 +27,6 @@ dev:
 
 start:
 	@echo "ERROR: sideclaw runs via LaunchAgent only. Use 'make reload' to apply changes." && exit 1
-
-build:
-	bun run build
 
 # Refuses while jobs are running unless FORCE=1 — a reload kills every worker session
 # mid-flight (check/overview/narrative/review are re-queued once on boot; dispatch and
@@ -106,7 +103,7 @@ build:
 # The refusals above (plist drift, running jobs) live in scripts/reload-preflight.sh, which exits
 # 3 on a refusal. make itself collapses that to exit 2, so scripts/deploy.sh runs the script
 # directly to tell a refusal (nothing was touched) from a post-restart failure.
-reload: build
+reload:
 	@scripts/reload-preflight.sh
 	@if [ -n "$(RESTART_MCP)" ]; then \
 	  pkill -f "sideclaw/server/mcp.ts" 2>/dev/null || true; \
@@ -165,7 +162,7 @@ reload: build
 # for why it must stay catchable) so the old process exits immediately instead of `bootout`
 # relying on its own default (SIGTERM-equivalent) termination, and accept that any running job
 # is abandoned for the next boot's crash recovery to pick up.
-install-agent: build
+install-agent:
 	@launchctl bootout gui/$$(id -u)/com.jkrumm.sideclaw 2>/dev/null || true
 	@rm -f ~/Library/LaunchAgents/com.jkrumm.sideclaw.plist
 	@if [ -z "$(FORCE)" ]; then \
@@ -198,4 +195,4 @@ uninstall-agent:
 	rm ~/Library/LaunchAgents/com.jkrumm.sideclaw-server.plist
 	@echo "sideclaw LaunchAgent removed"
 
-.PHONY: check deploy verify logs dev start build reload install-agent install-cli uninstall-agent
+.PHONY: check deploy verify logs dev start reload install-agent install-cli uninstall-agent

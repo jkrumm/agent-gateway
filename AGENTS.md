@@ -2,14 +2,13 @@
 
 ## Architecture
 
-React frontend (Vite) + Bun/Elysia backend, running natively on the host,
+Bun/Elysia backend (no UI), running natively on the host,
 loopback-only on `:7705`. Reached via Caddy: `https://sideclaw.test` locally
 — **no tailnet door, deliberately**. `~/.config/caddy-tailnet.ports` carries
 an explicit `exclude sideclaw`: the job API has no auth, so a tailnet twin
 would let any tag:mac/phone/tablet node `POST /api/jobs` with `dispatch
-implement`. Don't remove that exclusion. (A few source files still reference
-`http://sideclaw.local`, a localias-proxy convention; localias isn't
-installed here — treat it as dead, see `docs/ui-and-caching.md`.)
+implement`. Don't remove that exclusion. (`excalidraw-hydrate.ts` still stamps
+`https://sideclaw.local` as a diagram `source`, a dead localias-proxy convention.)
 
 Bun loads `.env` automatically from the `sideclaw/` directory — all env vars
 (`PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH`, `GITHUB_TOKEN`, `SIDECLAW_*`,
@@ -18,15 +17,12 @@ cwd-based, so the **MCP process** (spawned with the calling session's cwd)
 imports `server/lib/load-env.ts` first thing in `mcp.ts` to read the same
 file — existing environment always wins over the file.
 
-Frontend UI (kiosk fullscreen, validating UI changes): `docs/ui-and-caching.md`.
-
 ## Validate
 
 `make check` — format (`oxfmt --check`), lint (`oxlint`), typecheck
-(`bun run typecheck` = `tsc -p tsconfig.server.json --noEmit --allowImportingTsExtensions`
-then `tsc -p tsconfig.src.json --noEmit`), `bun test`; non-zero on failure, no
-side effects. Both projects typecheck with zero errors, so a type error now gates
-a change the same way lint and tests do.
+(`bun run typecheck` = `tsc -p tsconfig.server.json --noEmit --allowImportingTsExtensions`),
+`bun test`; non-zero on failure, no side effects. A type error gates a change the same
+way lint and tests do.
 
 ## Deploy
 
@@ -48,9 +44,8 @@ touched; any later reload failure rolls back like a failed verify. Detail below.
 - Port 7705 is owned by the LaunchAgent. Starting a second process there causes conflicts.
 
 ```bash
-make build           # Build frontend to dist/ (no server start)
-make reload          # After code changes: build + self-initiated drain (POST /api/shutdown, ≤50 min — launchd's real signal-and-wait timer never engages on this path) + restart. Refuses while jobs run — FORCE=1 discards them (force=1 request, or a real SIGINT), escalating an in-progress drain if one is running. Falls back to `launchctl kill` (short window, capped by launchd's measured 60s ExitTimeOut) if the endpoint doesn't answer. Also refuses on tracked/installed plist drift (file AND launchd's live state) — see docs/deployment.md § Two shutdown paths, two windows
-make install-agent   # One-time: build + install + start LaunchAgent
+make reload          # After code changes: self-initiated drain (POST /api/shutdown, ≤50 min — launchd's real signal-and-wait timer never engages on this path) + restart. Refuses while jobs run — FORCE=1 discards them (force=1 request, or a real SIGINT), escalating an in-progress drain if one is running. Falls back to `launchctl kill` (short window, capped by launchd's measured 60s ExitTimeOut) if the endpoint doesn't answer. Also refuses on tracked/installed plist drift (file AND launchd's live state) — see docs/deployment.md § Two shutdown paths, two windows
+make install-agent   # One-time: install + start LaunchAgent
 make uninstall-agent # Remove LaunchAgent
 
 tail -f ~/Library/Logs/sideclaw.log   # stdout
@@ -100,9 +95,8 @@ Full forensic story (why BTM denies this specific label/executable):
 - **MCP schema changes need a client reconnect** — `make reload` does not restart the
   MCP process; Zod strips the unknown field until `/mcp` reconnects
   (§MCP Server).
-- **`tsc` runs per project, not via the root config** — `tsconfig.json` has
-  `files: []`; `bun run typecheck` (part of `make check`) checks the server and
-  frontend projects explicitly (§Validate).
+- **`tsc` runs on `tsconfig.server.json`, not the root config** — `tsconfig.json` has
+  `files: []`; `bun run typecheck` (part of `make check`) names the project (§Validate).
 - **Logs live in `~/Library/Logs`, never `/tmp`** (§Deploy).
 - **No tailnet door, deliberately** — the job API has no auth; keep the
   `exclude sideclaw` in `~/.config/caddy-tailnet.ports` (§Architecture).

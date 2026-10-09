@@ -4,8 +4,8 @@ import { existsSync } from "node:fs";
  * Locate a usable Chrome/Chromium binary on this Mac.
  *
  * Checked in order: system Google Chrome, system Chromium, then the Playwright
- * "Chrome for Testing" cache. Shared by kiosk mode (`routes/kiosk.ts`) and the
- * SVG rasterizer (`lib/image.ts`). Returns null when nothing is found.
+ * "Chrome for Testing" cache. Shared by the SVG
+ * rasterizer (`lib/image.ts`) and the excalidraw hydrator. Returns null when nothing is found.
  */
 export async function findChrome(): Promise<string | null> {
   const candidates = [

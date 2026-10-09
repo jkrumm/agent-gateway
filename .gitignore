@@ -1,8 +1,5 @@
 node_modules/
-dist/
 .env
-.ralph-tasks.json
-.ralph-logs/
 *.tmp
 .claude/settings.json
 .claude/settings.local.json

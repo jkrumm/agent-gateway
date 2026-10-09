@@ -1,6 +1,6 @@
 # sideclaw
 
-Local Claude Code offload daemon for the Mac mini: an always-on HTTP server (`:7705`,
+Job-queue daemon for agent work on the Mac mini: an always-on HTTP server (`:7705`,
 loopback only, LaunchAgent `com.jkrumm.sideclaw-server`) that hosts a durable job queue,
 plus an MCP stdio server (`server/mcp.ts`) that every Claude Code session spawns to submit
 work to it. Tools: `check`, `review`, `dispatch`, `overview`, `narrative`, `otel`,
@@ -11,10 +11,9 @@ harness) on the model and backend the routing table assigns it. Mini-only by des
 ## Install / reload
 
 ```bash
-make install-agent   # one-time: build + install + start the LaunchAgent
-make reload          # after code changes: build, self-initiated drain via POST /api/shutdown (≤50 min), restart — falls back to `launchctl kill` if the endpoint doesn't answer
+make install-agent   # one-time: install + start the LaunchAgent
+make reload          # after code changes: self-initiated drain via POST /api/shutdown (≤50 min), restart — falls back to `launchctl kill` if the endpoint doesn't answer
 FORCE=1 make reload  # forced abort now, discarding running jobs (read-only ones are re-queued once on boot)
-make build           # frontend only
 ```
 
 `make reload`'s normal drain is long (~50 min) because it's self-initiated — launchd's own
@@ -51,7 +50,7 @@ Logs: `~/Library/Logs/sideclaw.jsonl` (structured, both processes), `sideclaw.{l
 
 | Key | Purpose |
 |-|-|
-| `PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH` | repo roots for the dashboard |
+| `PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH` | repo roots `dispatch` may run in (default of `SIDECLAW_DISPATCH_ROOTS`) |
 | `GITHUB_TOKEN` | fallback GitHub credential for `dispatch` artifacts (primary is `secrets-run read op://mini/github/token`) |
 | `RESEARCH_GATEWAY_URL`, `RESEARCH_GATEWAY_TOKEN` | lets review angle workers validate external claims |
 | `SIDECLAW_MODEL_<TOOL>`, `SIDECLAW_BACKEND_<TOOL>` | per-tool routing override (`iu` \| `max`); a gateway id never lands on `max`, and a backend override on `adversary`/`read_image`/`read_drawing` (fixed `iu-openai` transport) is refused |

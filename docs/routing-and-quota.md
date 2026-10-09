@@ -204,7 +204,7 @@ review angle were closed 2026-10-05:
 
 **Method.** Seven real diffs (sideclaw `39b4cf9`, `71377b5`; warden `afd348d`,
 `fdb5886`; weatherorb `5de4e2d`, `4ea52bf`, `9bcf51b`; 2026-10-05) were replayed
-one angle session at a time by `scripts/ab-review-angles.ts`. The baseline is the
+one angle session at a time by `scripts/ab-review-angles.ts` (since deleted; in git history before the UI/scripts cleanup). The baseline is the
 `review` route (Sonnet on Max); the cheap arm is deepseek-v4.1-flash on the
 opencode harness at `variant: "high"`, read-only with the Wave-4 bash allowlist.
 One blinded Sonnet judge per (case, angle) clusters the two finding lists
@@ -262,7 +262,7 @@ truth beyond the judge. `frontend` ran only the three weatherorb diffs and does
 not meet the >=5-case bar, so its "not adopted" is weaker evidence than the three
 adoptions.
 
-**Re-run.** `bun scripts/ab-review-angles.ts --cases <json> --out <dir>` (cases =
+**Re-run** (restore the script from git history first). `bun scripts/ab-review-angles.ts --cases <json> --out <dir>` (cases =
 `[{ repo, name, base, head }]`; the harness creates and removes a throwaway
 worktree per case — no server, jobs or `make reload`). Needs `IU_API_KEY` and
 `IU_BASE_URL` in the environment; the Keychain is not readable from a headless
@@ -382,7 +382,7 @@ escalation — `dispatch_implement_escalation`, the attempt-3+ retry seat for an
 episode (warden reads `routes.dispatch_implement_escalation.model` from `GET /api/routing`),
 2026-10-05. DeepSeek-V4-Pro over the OpenCode harness, variant `"max"`, no Max fallback (a
 gateway id cannot run there — the caller retries instead). Chosen over gpt-6.1-sol on
-`scripts/probe-implement.ts` (two replayed real implement briefs, one run each):
+`scripts/probe-implement.ts` (deleted since; two replayed real implement briefs, one run each):
 DeepSeek-V4-Pro passed both reference tests, 8/5 turns, 51 s/70 s, $0.061/$0.067; gpt-6.1-sol
 passed both but at 18/19 turns, 1330 s (one run hit the 300 s idle watchdog)/594 s,
 $0.32/$0.39; the deepseek-v4.1-flash baseline passed both at 31 s/97 s, $0.011/$0.016.
