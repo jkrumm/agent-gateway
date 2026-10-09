@@ -376,7 +376,7 @@ export async function runOverview(
 
   const result = await runSession<OverviewWorkerOutput>({
     // No repo tools needed — every fact is already in the prompt. homedir() rather than the
-    // agent-gateway repo root so nothing implies this is a agent-gateway-scoped task.
+    // agent-gateway repo root so nothing implies this is an agent-gateway-scoped task.
     cwd: homedir(),
     prompt,
     tool: "overview",
