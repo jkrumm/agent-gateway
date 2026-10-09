@@ -966,10 +966,10 @@ function routeKey(tool: string, backend: string, model: string): string {
 /** Evict the oldest entry before inserting a genuinely NEW key at capacity. A no-op for
  *  a key already tracked — that call is an update, not a growth, and must not evict
  *  anything just because it happened to run at capacity. */
-function evictOldestIfAtCapacity(key: string): void {
-  if (routeStreaks.has(key) || routeStreaks.size < ROUTE_STREAK_MAX_KEYS) return;
-  const oldestKey = routeStreaks.keys().next().value;
-  if (oldestKey !== undefined) routeStreaks.delete(oldestKey);
+function evictOldestIfAtCapacity(key: string, map: Map<string, unknown> = routeStreaks): void {
+  if (map.has(key) || map.size < ROUTE_STREAK_MAX_KEYS) return;
+  const oldestKey = map.keys().next().value;
+  if (oldestKey !== undefined) map.delete(oldestKey);
 }
 
 /** Record one attempt's outcome against its route's streak. Exported only so
@@ -1008,6 +1008,177 @@ export function routeFailureStreaks(): Record<string, number> {
  *  lifetime and never wants it wiped mid-run. */
 export function __resetRouteStreaksForTests(): void {
   routeStreaks.clear();
+}
+
+// ── Per-route circuit breaker (IU transport failures) ──────────────────────────
+//
+// Measured: `check` fell back from IU to Max 69 of 70 times — every call paid a failed IU
+// attempt plus its same-backend retry before reaching Max, for an outage that was already
+// known. Once a route has failed with a TRANSPORT-class error `ROUTE_STREAK_LIMIT` times in
+// a row, the breaker opens for `BREAKER_COOLDOWN_MS` and a session whose route declares a
+// usable Max fallback starts on the fallback lane directly (`reason: "breaker-open"`, counted
+// by `recordFallback` like every other lane switch). After the cooldown exactly ONE session is
+// let through to the primary as the half-open probe: a success closes the breaker, a transport
+// failure re-opens it for another cooldown.
+//
+// This is NOT the proactive Max-quota pre-check that `resolveBackend`'s history warns about
+// (removed 2026-09-08, must not return): that guessed at exhaustion from a quota reading, this
+// reacts only to failures the primary itself just produced, and a route with no fallback is
+// never short-circuited, so the worst case is one cooldown of sessions running on the lane
+// they would have fallen back to anyway. Process-local and unpersisted, like `routeStreaks`.
+
+const DEFAULT_BREAKER_COOLDOWN_MS = 5 * 60 * 1000;
+
+function parseBreakerCooldownMs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_BREAKER_COOLDOWN_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_BREAKER_COOLDOWN_MS;
+}
+
+/** Read once at module load — a change needs `make reload`. */
+export const BREAKER_COOLDOWN_MS = parseBreakerCooldownMs(
+  process.env.AGENT_GATEWAY_BREAKER_COOLDOWN_MS,
+);
+
+/** `failures`: consecutive transport failures while closed. `openedAt`: when the breaker last
+ *  opened — or last let a probe through, which re-arms the cooldown so concurrent sessions keep
+ *  short-circuiting while the probe runs and a probe that never reports cannot wedge the
+ *  breaker; `null` while closed. */
+export interface BreakerState {
+  failures: number;
+  openedAt: number | null;
+}
+
+export type BreakerVerdict = "closed" | "open" | "probe";
+
+/** Pure: what a new session should do about this route's breaker. */
+export function breakerVerdict(
+  state: BreakerState | undefined,
+  now: number,
+  cooldownMs: number,
+): BreakerVerdict {
+  if (!state || state.openedAt === null) return "closed";
+  return now - state.openedAt < cooldownMs ? "open" : "probe";
+}
+
+/** `transport`: the primary itself failed server-side or at the connection level. `neutral`: no
+ *  verdict either way (a watchdog timeout, missing IU credentials) — leaves the state alone.
+ *  `other`: the gateway answered (a deterministic 4xx, a model-level failure), so the route is
+ *  reachable. */
+export type BreakerOutcome = "ok" | "transport" | "neutral" | "other";
+
+/** Pure: classify a finished attempt for the breaker, reusing the retry ladder's own
+ *  classifiers over TRANSPORT-sourced text only (never model stdout) — 429/5xx/connection
+ *  errors count, a gateway-wrapped client error (`503 [… StatusCode: BadRequest]`) and
+ *  every other 4xx do not. A structured `apiErrorStatus` wins over text. */
+export function classifyBreakerOutcome(result: AttemptOutcome): BreakerOutcome {
+  if (result.ok) return "ok";
+  const text = result.classificationText ?? "";
+  if (result.iuConfigError === true || text.startsWith("Session timed out")) return "neutral";
+  if (WRAPPED_TERMINAL_RE.test(text)) return "other";
+  const status = result.apiErrorStatus;
+  if (typeof status === "number") {
+    return status === 429 || SERVER_ERROR_STATUSES.has(status) ? "transport" : "other";
+  }
+  return isIuServerError({ classificationText: text }) || isRetryableSessionError(text)
+    ? "transport"
+    : "other";
+}
+
+/** Pure: the breaker state after one primary-lane outcome; `undefined` = closed and clean. */
+export function nextBreakerState(
+  state: BreakerState | undefined,
+  outcome: BreakerOutcome,
+  now: number,
+  limit: number = ROUTE_STREAK_LIMIT,
+): BreakerState | undefined {
+  if (outcome === "neutral") return state;
+  if (outcome !== "transport") return undefined;
+  const failures = (state?.failures ?? 0) + 1;
+  // Already open (a failed half-open probe, or a stray in-flight failure): re-open.
+  if (state?.openedAt != null || failures >= limit) return { failures, openedAt: now };
+  return { failures, openedAt: null };
+}
+
+const breakers = new Map<string, BreakerState>();
+
+/** Route keys whose breaker is currently open (including awaiting/running its half-open
+ *  probe). For a health surface; nothing here gates on it. */
+export function openBreakers(): string[] {
+  const open: string[] = [];
+  for (const [key, state] of breakers) {
+    if (state.openedAt !== null) open.push(key);
+  }
+  return open;
+}
+
+/** Test-only: `breakers` is process-global module state (same rationale as
+ *  `__resetRouteStreaksForTests`). */
+export function __resetBreakersForTests(): void {
+  breakers.clear();
+}
+
+/** Record a primary-lane attempt against its route's breaker and log the transitions. */
+function recordBreakerOutcome(
+  tool: string,
+  result: AttemptOutcome & { model?: string },
+  now: number,
+): void {
+  if (result.backend !== "iu") return;
+  const outcome = classifyBreakerOutcome(result);
+  if (outcome === "neutral") return;
+  const key = routeKey(tool, "iu", result.model ?? "unknown");
+  const prev = breakers.get(key);
+  const next = nextBreakerState(prev, outcome, now);
+  const wasOpen = prev?.openedAt != null;
+  if (next === undefined) {
+    breakers.delete(key);
+    if (wasOpen) {
+      runnerLogger().info({ event: "breaker.close", route: key }, "route breaker closed");
+    }
+    return;
+  }
+  evictOldestIfAtCapacity(key, breakers);
+  breakers.set(key, next);
+  if (next.openedAt === null) return;
+  runnerLogger().warn(
+    {
+      event: "breaker.open",
+      route: key,
+      failures: next.failures,
+      cooldownMs: BREAKER_COOLDOWN_MS,
+      reopened: wasOpen,
+      error: result.error,
+    },
+    wasOpen
+      ? "route breaker re-opened after a failed probe"
+      : "route breaker opened after consecutive transport failures",
+  );
+}
+
+/** Should a new session's FIRST attempt skip the primary? Only for an `iu` primary with a
+ *  usable `max` fallback (`fallback` is already null under `AGENT_GATEWAY_WORKER_FALLBACK=none`).
+ *  Claims the half-open probe slot as a side effect when the cooldown has elapsed. */
+function breakerPreempt(
+  tool: string,
+  route: ToolRoute,
+  fallback: RouteFallback | null,
+  now: number,
+): ForcedAttempt | undefined {
+  if (fallback?.backend !== "max" || resolveBackend(route).backend !== "iu") return undefined;
+  const key = routeKey(tool, "iu", route.model);
+  const state = breakers.get(key);
+  const verdict = breakerVerdict(state, now, BREAKER_COOLDOWN_MS);
+  if (verdict === "closed") return undefined;
+  if (verdict === "probe" && state) {
+    breakers.set(key, { ...state, openedAt: now });
+    runnerLogger().info(
+      { event: "breaker.half_open", route: key },
+      "route breaker half-open probe",
+    );
+    return undefined;
+  }
+  return { backend: "max", model: fallback.model ?? route.model, reason: "breaker-open" };
 }
 
 export function resolveBackend(route: ToolRoute): ResolvedBackend {
@@ -1475,7 +1646,7 @@ export class SessionCancelledError extends Error {
 export interface ForcedAttempt {
   backend: Backend;
   model: string;
-  reason: "rate-limited" | "iu-unavailable" | "iu-5xx-after-output";
+  reason: "rate-limited" | "iu-unavailable" | "iu-5xx-after-output" | "breaker-open";
 }
 
 /** Pure: which harness THIS attempt actually spawns. A forced attempt (a fallback lane
@@ -1555,7 +1726,9 @@ async function runSessionAttempt<T = unknown>(
         ? "falling back to iu after a max-quota-flavored failure"
         : forced.reason === "iu-5xx-after-output"
           ? "falling back to max — IU answered with a server error after first output"
-          : "falling back to max — IU produced no output (transport failure, no credentials, or a silent timeout)",
+          : forced.reason === "breaker-open"
+            ? "falling back to max — the route's IU circuit breaker is open"
+            : "falling back to max — IU produced no output (transport failure, no credentials, or a silent timeout)",
     );
   } else {
     runnerLogger().info(
@@ -2400,7 +2573,10 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
   const fallback = WORKER_FALLBACK === "none" ? null : route.fallback;
   let attempt = 0;
   let usedFallback = false;
-  let forced: ForcedAttempt | undefined;
+  // An open breaker starts the session on the fallback lane; `usedFallback` latches like any
+  // other lane switch, so a failure there is never switched again.
+  let forced = breakerPreempt(opts.tool ?? "unknown", route, fallback, Date.now());
+  if (forced) usedFallback = true;
   while (true) {
     attempt++;
     // Checked at the TOP of every iteration — the first attempt and every retry/fallback
@@ -2425,6 +2601,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       result.model ?? "unknown",
       result.ok,
     );
+    if (!forced) recordBreakerOutcome(opts.tool ?? "unknown", result, Date.now());
     // A cancel requested mid-attempt is what most likely made THIS attempt fail — checked
     // again immediately so a cancelled run never even computes `planNextAttempt` (and
     // possibly sleeps for a backoff) before aborting. A race where the attempt actually

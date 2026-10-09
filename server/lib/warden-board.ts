@@ -112,11 +112,43 @@ const WARDEN_BOARD_RAW = z.object({
   truncated: z.boolean().optional(),
 });
 
-/** One `logger.warn` per `ok: false` branch below, so an unreachable/misconfigured warden
- *  shows up in the log stream even though the failure never surfaces as an error to a
- *  caller (every branch degrades silently to `{ ok: false }` — see the module comment). */
+/** One distinct `error` string is logged at most once per window. An unreachable warden made
+ *  this fire on every overview/agents poll — 18.9k identical lines — so the first occurrence
+ *  warns, repeats inside the window are counted, and the next line after the window carries
+ *  that count as `suppressed`. Process-local; bounded because a schema-validation error
+ *  string embeds zod's message and is not a closed set. */
+const UNAVAILABLE_LOG_WINDOW_MS = 5 * 60 * 1000;
+const UNAVAILABLE_LOG_MAX_KEYS = 32;
+const unavailableLog = new Map<string, { loggedAt: number; suppressed: number }>();
+
+/** Test-only: the gate is process-global module state. */
+export function __resetUnavailableLogForTests(): void {
+  unavailableLog.clear();
+}
+
+/** One `logger.warn` per `ok: false` branch below (rate-limited per distinct error, see above),
+ *  so an unreachable/misconfigured warden shows up in the log stream even though the failure
+ *  never surfaces as an error to a caller (every branch degrades silently to `{ ok: false }` —
+ *  see the module comment). `fetchedAt` is the call's injectable clock reading. */
 function unavailable(error: string, fetchedAt: number): WardenBoard {
-  logger.warn({ event: "warden.board_unavailable", error }, "warden board unavailable");
+  const entry = unavailableLog.get(error);
+  if (entry && fetchedAt - entry.loggedAt < UNAVAILABLE_LOG_WINDOW_MS) {
+    entry.suppressed += 1;
+  } else {
+    if (!entry && unavailableLog.size >= UNAVAILABLE_LOG_MAX_KEYS) {
+      const oldest = unavailableLog.keys().next().value;
+      if (oldest !== undefined) unavailableLog.delete(oldest);
+    }
+    unavailableLog.set(error, { loggedAt: fetchedAt, suppressed: 0 });
+    logger.warn(
+      {
+        event: "warden.board_unavailable",
+        error,
+        ...(entry && entry.suppressed > 0 ? { suppressed: entry.suppressed } : {}),
+      },
+      "warden board unavailable",
+    );
+  }
   return { ok: false, error, fetchedAt };
 }
 
@@ -139,6 +171,9 @@ export interface FetchWardenBoardOptions {
   fetchImpl?: FetchLike;
   /** Override for tests. Defaults to `WARDEN_API_URL` env, then the loopback default. */
   baseUrl?: string;
+  /** Override for tests — the clock behind `fetchedAt` and the unavailable-log window.
+   *  Defaults to `Date.now`. */
+  now?: () => number;
 }
 
 /** The subset of the global `fetch` this module actually calls. Typing the injection point to
@@ -151,7 +186,7 @@ export type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Res
  *  outage never delays or fails the overview it's folded into. `items` is already
  *  `updated_at DESC` from warden, so capping to the first `WARDEN_ITEMS_CAP` keeps that order. */
 export async function fetchWardenBoard(opts?: FetchWardenBoardOptions): Promise<WardenBoard> {
-  const fetchedAt = Date.now();
+  const fetchedAt = (opts?.now ?? Date.now)();
   const baseUrl = (opts?.baseUrl ?? process.env.WARDEN_API_URL ?? "http://127.0.0.1:7735").replace(
     /\/+$/,
     "",

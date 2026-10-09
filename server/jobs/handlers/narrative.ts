@@ -3,7 +3,13 @@ import { readdir, stat } from "fs/promises";
 import { homedir } from "os";
 import { basename, join } from "path";
 import { z } from "zod";
-import { runSession, zodValidator, type Backend } from "../../mcp/session-runner.ts";
+import {
+  retryBackoffMs,
+  runSession,
+  zodValidator,
+  type Backend,
+  type SessionResult,
+} from "../../mcp/session-runner.ts";
 import { routeFor, withModel } from "../../lib/routing.ts";
 import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
@@ -566,6 +572,55 @@ async function gatherSessions(
   return { text: entries.join("\n\n"), count: entries.length };
 }
 
+// ── Worker call with its one retry ─────────────────────────────────────────────
+
+/** One worker call, retried ONCE (never twice) on any failure with no usable data:
+ *  - the worker answered but its output was rejected (`noOutput` — prose instead of JSON, schema
+ *    mismatch): the retry appends the JSON-only directive;
+ *  - the session itself failed (non-zero exit, gateway 5xx/429, connection error): the same prompt
+ *    again after the runner's jittered backoff. The directive would be a lie there, and
+ *    `runSession`'s own ladder does not cover a bare `Session exited with code 1` on `max` —
+ *    that error is not retryable and not quota-flavoured, so no lane switch happens either.
+ *  When the retry fails too, its error carries the first attempt's cause: the second failure
+ *  alone made a transport blip look like the whole story. `run` and `sleep` are injectable so
+ *  the policy is testable without a session. */
+export async function runNarrativeWorker(
+  run: (prompt: string) => Promise<SessionResult<NarrativeWorkerOutput>>,
+  prompt: string,
+  project: string,
+  sleep: (ms: number) => Promise<unknown> = (ms) => Bun.sleep(ms),
+): Promise<SessionResult<NarrativeWorkerOutput>> {
+  const first = await run(prompt);
+  if (first.ok && first.data) return first;
+
+  const outputRejected = first.noOutput === true || first.ok;
+  logger.warn(
+    {
+      event: "narrative.retry",
+      tool: "narrative",
+      project,
+      error: first.error,
+      reason: outputRejected ? "invalid-output" : "session-failure",
+      backend: first.backend,
+    },
+    outputRejected
+      ? "narrative output invalid — retrying once with JSON-only directive"
+      : "narrative session failed — retrying once",
+  );
+  if (outputRejected) {
+    const second = await run(prompt + JSON_ONLY_RETRY);
+    return withFirstCause(second, first);
+  }
+  await sleep(retryBackoffMs(1));
+  return withFirstCause(await run(prompt), first);
+}
+
+function withFirstCause<T>(second: SessionResult<T>, first: SessionResult<T>): SessionResult<T> {
+  if (second.ok && second.data) return second;
+  if (!first.error || first.error === second.error) return second;
+  return { ...second, error: `${second.error ?? "no result"} (first attempt: ${first.error})` };
+}
+
 // ── Core ───────────────────────────────────────────────────────────────────────
 
 /** Run the narrative job: deterministic gathering, then one worker call (retried once on
@@ -633,14 +688,7 @@ export async function runNarrative(
       onActivity: onProgress,
     });
 
-  let result = await runWorker(prompt);
-  if (!result.ok || !result.data) {
-    logger.warn(
-      { event: "narrative.retry", tool: "narrative", project: cwd, error: result.error },
-      "narrative output invalid — retrying once with JSON-only directive",
-    );
-    result = await runWorker(prompt + JSON_ONLY_RETRY);
-  }
+  const result = await runNarrativeWorker(runWorker, prompt, cwd);
   const data = unwrap(result, "narrative");
   const backend: Backend | undefined = result.backend;
   const inputs = { commits: commits.count, sessions: sessions.count, sinceUsed };

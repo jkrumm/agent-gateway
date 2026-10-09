@@ -22,6 +22,7 @@ import {
   ROUTE_STREAK_LIMIT,
   ROUTE_STREAK_MAX_KEYS,
   __resetRouteStreaksForTests,
+  __resetBreakersForTests,
   __resetFallbackLogForTests,
   isIdleTimedOut,
   IDLE_TIMEOUT_MS,
@@ -1017,7 +1018,10 @@ describe("runSession — post-output IU 5xx fallback loop", () => {
     model: route.model,
   });
 
-  afterEach(() => __resetAttemptRunnerForTests());
+  afterEach(() => {
+    __resetAttemptRunnerForTests();
+    __resetBreakersForTests(); // three 5xx here would otherwise open `check@iu/…` for later files
+  });
 
   function fake(results: (forced: ForcedAttempt | undefined) => SessionResult<unknown>) {
     const calls: (ForcedAttempt | undefined)[] = [];
