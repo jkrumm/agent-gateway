@@ -3,9 +3,9 @@
 ## Architecture
 
 Bun/Elysia backend (no UI), running natively on the host,
-loopback-only on `:7705`. Reached via Caddy: `https://sideclaw.test` locally
+loopback-only on `:7705`. Reached via Caddy: `https://agent-gateway.test` locally
 — **no tailnet door, deliberately**. `~/.config/caddy-tailnet.ports` carries
-an explicit `exclude sideclaw`: the job API has no auth, so a tailnet twin
+an explicit `exclude agent-gateway`: the job API has no auth, so a tailnet twin
 would let any tag:mac/phone/tablet node `POST /api/jobs` with `dispatch
 implement`. Don't remove that exclusion. (`excalidraw-hydrate.ts` still stamps
 `https://sideclaw.local` as a diagram `source`, a dead localias-proxy convention.)
@@ -14,8 +14,7 @@ implement`. Don't remove that exclusion. (`excalidraw-hydrate.ts` still stamps
 execs it), MCP server and tools `mcp__agent-gateway__*`, env prefix `AGENT_GATEWAY_*` — a
 `SIDECLAW_*` var is still aliased at boot by `server/lib/env-compat.ts` and warned once
 (`env.legacy_prefix`), to be dropped after the deprecation window. Still carrying the old name
-on purpose, each renamed with its owner repo: the `sideclaw-iu` usage sink, the
-`sideclaw.test` Caddy host and its `exclude sideclaw` line. `scripts/rename-codemod.ts`
+on purpose: the persisted usage-tracker data contract (`sideclaw-iu` and `sideclaw-sessions` sinks, `src: "sideclaw"`, `sideclaw:<tool>` lanes), kept on both sides so historical rows stay joinable. The Caddy door is `agent-gateway.test` since 2026-10-09. `scripts/rename-codemod.ts`
 re-runs the rewrite; `scripts/migrate-runtime.sh` (drain, move data/state/logs, new label) and
 `scripts/post-move.sh` (Claude Code state, MCP registration, then the migration) are the
 one-time machine steps.
@@ -109,7 +108,7 @@ Full forensic story (why BTM denies this specific label/executable):
   `files: []`; `bun run typecheck` (part of `make check`) names the project (§Validate).
 - **Logs live in `~/Library/Logs`, never `/tmp`** (§Deploy).
 - **No tailnet door, deliberately** — the job API has no auth; keep the
-  `exclude sideclaw` in `~/.config/caddy-tailnet.ports` (§Architecture).
+  `exclude agent-gateway` in `~/.config/caddy-tailnet.ports` (§Architecture).
 - **Label `com.jkrumm.agent-gateway` + the `scripts/agent-gateway-start.sh` wrapper are
   macOS BTM workarounds** — don't "simplify" them (§Deploy).
 - **Edit the tracked plist, never the live one** — `make install-agent` overwrites it.
