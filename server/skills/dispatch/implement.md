@@ -86,6 +86,7 @@ JSON):
 "summary": "<one sentence, under 200 chars — this is what gets posted to Slack>",
 "rootCause": "<stable kebab-case key, at most 80 chars, e.g. stale-lockfile-after-rename>",
 "decisionQuestion": "<ONLY when nextAction is human: one question naming two options, under 200 chars — otherwise omit this field>",
+"owningRepo": "<optional: the bare repo name that owns the finding when it is not the repo you are reading — otherwise omit this field>",
 "prTitle": "<conventional-commit subject, or \"\" if you changed nothing>",
 "prBody": "<the PR body in markdown, or \"\" if you changed nothing>"
 }

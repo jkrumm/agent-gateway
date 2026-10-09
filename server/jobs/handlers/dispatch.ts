@@ -522,6 +522,7 @@ function sensitiveScanText(output: DispatchOutput): string {
     output.recommendation,
     ...(output.rootCause ? [output.rootCause] : []),
     ...(output.decisionQuestion ? [output.decisionQuestion] : []),
+    ...(output.owningRepo ? [output.owningRepo] : []),
     ...output.evidence.flatMap((e) => [e.file, e.detail]),
   ]
     .filter((s) => s.length > 0)
@@ -558,6 +559,7 @@ function verdictMarkdown(output: DispatchOutput, jobId: string, hits: string[]):
     "",
     ...(output.rootCause ? ["## Root cause", output.rootCause, ""] : []),
     ...(output.decisionQuestion ? ["## Decision question", output.decisionQuestion, ""] : []),
+    ...(output.owningRepo ? ["## Owning repo", output.owningRepo, ""] : []),
   ].join("\n");
 }
 
@@ -599,7 +601,12 @@ export function applySensitiveScan(
     `Verdict withheld: matched ${hits.join(", ")}. The full, unmodified text was saved ` +
     `locally at ${path} (owner-only, mode 0600) — it never left this machine.`;
   // The new free-text fields carry the same unscanned worker text, so they are dropped, not kept.
-  const { rootCause: _rootCause, decisionQuestion: _decisionQuestion, ...rest } = output;
+  const {
+    rootCause: _rootCause,
+    decisionQuestion: _decisionQuestion,
+    owningRepo: _owningRepo,
+    ...rest
+  } = output;
   return {
     ...rest,
     summary: excerpt(notice, 200),
