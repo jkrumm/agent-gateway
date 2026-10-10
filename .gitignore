@@ -4,3 +4,6 @@ node_modules/
 .claude/settings.json
 .claude/settings.local.json
 .out/
+
+# fallow analysis cache — rewritten by every run; tracked, it dirtied the live checkout and parked merges
+.fallow/
