@@ -227,14 +227,32 @@ export const REVIEW_OUTPUT = SYNTHESIS_OUTPUT.extend({
     ),
 });
 
-/** The category rides only on `needs-human`; anything else drops it rather than failing a 12-minute run. */
-export function normalizeEscalationCategory<
-  T extends { outcome: string; escalationCategory?: string },
->(data: T): T {
+/** The category rides only on `needs-human`; anything else drops it rather than failing a 12-minute run.
+ *  Mutates `data` — that is the whole contract. */
+export function normalizeEscalationCategory(data: {
+  outcome: string;
+  escalationCategory?: string;
+}): void {
   if (data.outcome !== "needs-human" && data.escalationCategory !== undefined) {
     delete data.escalationCategory;
   }
-  return data;
+}
+
+/** Runs BEFORE the strict schema: a near-miss ("Data Loss", "other-people") is coerced and an
+ *  unknown value dropped, so one bad enum cannot fail a 12-minute synthesis into the salvage path. */
+export function coerceEscalationCategory(raw: unknown): unknown {
+  if (typeof raw !== "object" || raw === null || !("escalationCategory" in raw)) return raw;
+  const { escalationCategory, ...rest } = raw as Record<string, unknown>;
+  const category =
+    typeof escalationCategory === "string"
+      ? escalationCategory
+          .trim()
+          .toLowerCase()
+          .replace(/[\s-]+/g, "_")
+      : "";
+  return (ESCALATION_CATEGORIES as readonly string[]).includes(category)
+    ? { ...rest, escalationCategory: category }
+    : rest;
 }
 
 const REVIEW_JSON_SCHEMA = z.toJSONSchema(SYNTHESIS_OUTPUT);
@@ -1326,7 +1344,7 @@ export async function runReview(
         jsonSchema: REVIEW_JSON_SCHEMA,
         readOnly: true,
         settingSources: "user,project",
-        validate: zodValidator(SYNTHESIS_OUTPUT),
+        validate: (raw) => zodValidator(SYNTHESIS_OUTPUT)(coerceEscalationCategory(raw)),
         onActivity: (p) => bump(`synthesis: ${p.lastAction}`),
       });
 
@@ -1398,6 +1416,10 @@ export async function runReview(
     }
 
     normalizeEscalationCategory(data);
+    // A reviewer that did not run is a blocker whatever else the synthesis said it was.
+    if (data.outcome === "needs-human" && failedAngles.length > 0 && !data.escalationCategory) {
+      data.escalationCategory = "blocker";
+    }
     if (data.outcome === "needs-human" && !data.escalationCategory) {
       logger.warn(
         { event: "review.needs_human_without_category", tool: "review", project: cwd },
