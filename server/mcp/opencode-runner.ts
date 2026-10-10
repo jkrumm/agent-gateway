@@ -33,17 +33,16 @@ import {
   extractJson,
   isIdleTimedOut,
   runnerLogger,
-  scrubSensitiveEnv,
   SessionCancelledError,
   trackExternalProc,
   unclassifiedOutputFailure,
-  usageLane,
   writeAttribution,
   writeSessionEnv,
   type SessionOptions,
   type SessionProgress,
   type SessionResult,
 } from "./session-runner.ts";
+import { readTrimmedLines, workerBaseEnv } from "./worker-shared.ts";
 
 // ── Binary resolution ─────────────────────────────────────────────────────────
 //
@@ -326,7 +325,7 @@ export interface OpencodeEnvInput {
 
 /** The worker's full spawn env — same credential scrub, `CLAUDE_*` session-var handling and
  *  `USAGE_LANE` tagging as `buildWorkerEnv` (session-runner.ts), via the shared
- *  `scrubSensitiveEnv`/`usageLane` exports, so usage-tracker's claude-code collector still
+ *  `workerBaseEnv` (worker-shared.ts), so usage-tracker's claude-code collector still
  *  finds a coherent env shape from either harness. `IU_KEY`/`IU_OPENAI_BASE` are what
  *  `buildOpencodeConfig`'s `{env:...}` placeholders resolve against — the API key never
  *  touches argv or disk, only this process-local env the child inherits.
@@ -351,15 +350,7 @@ export function buildOpencodeEnv(input: OpencodeEnvInput): Record<string, string
     baseEnv = process.env,
   } = input;
 
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(baseEnv)) {
-    if (v !== undefined) env[k] = v;
-  }
-  delete env.CLAUDE_SESSION_ID;
-  delete env.CLAUDE_PARENT_SESSION_ID;
-  env.CLAUDE_ENTRYPOINT = "worker";
-  env.USAGE_LANE = usageLane(tool);
-  scrubSensitiveEnv(env);
+  const env = workerBaseEnv(baseEnv, tool);
   env.IU_KEY = iuKey;
   env.IU_OPENAI_BASE = iuOpenaiBase;
   // An inherited OPENCODE_CONFIG (a file path) must not coexist with the content env var —
@@ -713,9 +704,6 @@ export async function runOpencodeProcessLifecycle(
   }, IDLE_CHECK_INTERVAL_MS);
 
   const stderrPromise = new Response(proc.stderr).text();
-  const decoder = new TextDecoder();
-  const reader = proc.stdout.getReader();
-  let buf = "";
   const emitActivity = () => {
     if (!ctx.onActivity) return;
     try {
@@ -730,18 +718,14 @@ export async function runOpencodeProcessLifecycle(
   };
 
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      lastChunkAt = Date.now();
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split("\n");
-      buf = lines.pop() ?? "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        const ev = parseOpencodeLine(trimmed);
-        if (!ev) continue;
+    // A trailing partial line (no newline before EOF) is dropped, as before.
+    await readTrimmedLines(proc.stdout, {
+      onChunk: () => {
+        lastChunkAt = Date.now();
+      },
+      onLine: (line) => {
+        const ev = parseOpencodeLine(line);
+        if (!ev) return;
         eventCount++;
         const prevSessionId = accum.sessionId;
         accum = reduceOpencodeEvent(accum, ev);
@@ -756,10 +740,9 @@ export async function runOpencodeProcessLifecycle(
         }
         ctx.turnsRef.current = accum.turns;
         emitActivity();
-      }
-    }
+      },
+    });
   } finally {
-    reader.releaseLock();
     clearInterval(idleWatchdog);
     if (heartbeatHandle !== null) clearInterval(heartbeatHandle);
     // A reader.read() throw (or any other exception escaping the loop above) must not

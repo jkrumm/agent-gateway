@@ -37,8 +37,8 @@ commit, no push, no PR, and resolves no GitHub identity at all.
   `implement`, and any `sensitive` episode — the same "no safe artifact path"
   reasoning as `assertSensitiveTierAllowed`, applied to a mode whose whole
   contract is "no artifact". Concurrency: at most one in-place episode per
-  repo (`tryAcquireInPlaceLock`, an in-process map keyed on the canonical
-  root, released in `runDispatch`'s `finally`) — exact for the single-process
+  repo (`tryAcquireRepoLease`, an in-process map keyed on the canonical
+  root, released by the job store when the job finishes) — exact for the single-process
   server launchd guarantees, cleared by a crash with the process.
 - **Attribution, not isolation.** Pre-existing dirty state is normal and never
   a refusal: `snapshotInPlace` records HEAD, the branch, `git stash create`'s

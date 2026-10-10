@@ -78,6 +78,9 @@ export type DispatchTier = (typeof DISPATCH_TIERS)[number];
 export const DISPATCH_WORKSPACES = ["worktree", "in-place"] as const;
 export type DispatchWorkspace = (typeof DISPATCH_WORKSPACES)[number];
 
+export const DISPATCH_KINDS = ["code", "editorial"] as const;
+export type DispatchKind = (typeof DISPATCH_KINDS)[number];
+
 export interface DispatchCommand {
   kind: "dispatch";
   brief: string;
@@ -85,6 +88,10 @@ export interface DispatchCommand {
   tier?: DispatchTier;
   workspace?: DispatchWorkspace;
   revisionOf?: string;
+  branch?: string;
+  prTitle?: string;
+  /** The `kind` dispatch param (the command's own `kind` is its discriminant). */
+  episodeKind?: DispatchKind;
   model?: string;
   context?: ContextSpec;
   sensitive: boolean;
@@ -319,6 +326,9 @@ function parseDispatch(args: string[]): DispatchCommand {
       "--tier": "value",
       "--workspace": "value",
       "--revision-of": "value",
+      "--branch": "value",
+      "--pr-title": "value",
+      "--kind": "value",
       "--model": "value",
       "--context": "value",
       "--sensitive": "boolean",
@@ -358,6 +368,22 @@ function parseDispatch(args: string[]): DispatchCommand {
   const revisionOf = flagValue(flags, "--revision-of");
   if (revisionOf !== undefined) command.revisionOf = revisionOf;
 
+  const branch = flagValue(flags, "--branch");
+  if (branch !== undefined) command.branch = branch;
+
+  const prTitle = flagValue(flags, "--pr-title");
+  if (prTitle !== undefined) command.prTitle = prTitle;
+
+  const kind = flagValue(flags, "--kind");
+  if (kind !== undefined) {
+    if (!(DISPATCH_KINDS as readonly string[]).includes(kind)) {
+      throw new CliUsageError(
+        `agw dispatch: --kind must be one of ${DISPATCH_KINDS.join("|")}, got: ${kind}`,
+      );
+    }
+    command.episodeKind = kind as DispatchKind;
+  }
+
   const model = flagValue(flags, "--model");
   if (model !== undefined) command.model = model;
 
@@ -376,8 +402,7 @@ function parseCheck(args: string[]): CheckCommand {
     { "--repo": "value", "--commands": "value" },
     "check",
   );
-  if (positionals.length > 0)
-    throw new CliUsageError("agw check takes no positional arguments");
+  if (positionals.length > 0) throw new CliUsageError("agw check takes no positional arguments");
 
   const command: CheckCommand = { kind: "check", repo: parseRepo(flagValue(flags, "--repo")) };
   const commands = flagValue(flags, "--commands");
@@ -397,8 +422,7 @@ function parseReview(args: string[]): ReviewCommand {
     { "--repo": "value", "--scope": "value", "--pr": "value", "--branch": "value" },
     "review",
   );
-  if (positionals.length > 0)
-    throw new CliUsageError("agw review takes no positional arguments");
+  if (positionals.length > 0) throw new CliUsageError("agw review takes no positional arguments");
 
   const scope = flagValue(flags, "--scope");
   const prRaw = flagValue(flags, "--pr");
@@ -440,22 +464,18 @@ function parseTriage(args: string[]): TriageCommand {
     { "--prompt-file": "value", "--schema-file": "value" },
     "triage",
   );
-  if (positionals.length > 0)
-    throw new CliUsageError("agw triage takes no positional arguments");
+  if (positionals.length > 0) throw new CliUsageError("agw triage takes no positional arguments");
   const promptFile = flagValue(flags, "--prompt-file");
   const schemaFile = flagValue(flags, "--schema-file");
   if (promptFile === undefined || schemaFile === undefined) {
-    throw new CliUsageError(
-      "agw triage requires --prompt-file <file> and --schema-file <file>",
-    );
+    throw new CliUsageError("agw triage requires --prompt-file <file> and --schema-file <file>");
   }
   return { kind: "triage", promptFile, schemaFile };
 }
 
 function parseJobs(args: string[]): JobsCommand {
   const { flags, positionals } = parseFlags(args, { "--running": "boolean" }, "jobs");
-  if (positionals.length > 0)
-    throw new CliUsageError("agw jobs takes no positional arguments");
+  if (positionals.length > 0) throw new CliUsageError("agw jobs takes no positional arguments");
   return { kind: "jobs", running: flags.has("--running") };
 }
 
@@ -480,6 +500,9 @@ export function requestBody(
       if (command.tier !== undefined) params.tier = command.tier;
       if (command.workspace !== undefined) params.workspace = command.workspace;
       if (command.revisionOf !== undefined) params.revisionOf = command.revisionOf;
+      if (command.branch !== undefined) params.branch = command.branch;
+      if (command.prTitle !== undefined) params.prTitle = command.prTitle;
+      if (command.episodeKind !== undefined) params.kind = command.episodeKind;
       if (command.model !== undefined) params.model = command.model;
       if (resolved.context !== undefined) params.context = resolved.context;
       if (command.sensitive) params.sensitive = true;
@@ -606,6 +629,7 @@ export function renderVerdictResult(r: DispatchOutput): string {
   lines.push(`recommendation: ${r.recommendation}`);
   if (typeof r.artifactUrl === "string") lines.push(`artifact: ${r.artifactUrl}`);
   if (typeof r.branch === "string") lines.push(`branch: ${r.branch}`);
+  if (typeof r.fallbackWithheld === "string") lines.push(`fallbackWithheld: ${r.fallbackWithheld}`);
   if (Array.isArray(r.changedFiles) && r.changedFiles.length > 0) {
     lines.push(`changed: ${r.changedFiles.join(", ")}`);
   }
@@ -710,6 +734,8 @@ interface JobView {
   progress: { turns: number; lastAction: string } | null;
   elapsedMs: number;
   idleMs: number | null;
+  /** Set on a pending implement-class job queued behind the repo's running episode. */
+  queuedBehind?: string;
 }
 
 async function submitJob(fetchFn: FetchLike, base: string, body: RequestBody): Promise<string> {
@@ -790,7 +816,9 @@ async function fetchPolicy(fetchFn: FetchLike, base: string): Promise<{ roots: s
 
 function progressLine(job: JobView): string {
   const elapsed = formatDuration(job.elapsedMs);
-  if (job.status === "pending") return `[${elapsed}] queued`;
+  if (job.status === "pending") {
+    return `[${elapsed}] queued${job.queuedBehind ? ` behind ${job.queuedBehind}` : ""}`;
+  }
   const turns = job.progress?.turns ?? 0;
   const action = job.progress?.lastAction ?? "starting";
   const idle = job.idleMs !== null ? formatDuration(job.idleMs) : "—";
@@ -798,7 +826,7 @@ function progressLine(job: JobView): string {
 }
 
 function progressSig(job: JobView): string {
-  return `${job.status}|${job.progress?.turns ?? 0}|${job.progress?.lastAction ?? ""}`;
+  return `${job.status}|${job.queuedBehind ?? ""}|${job.progress?.turns ?? 0}|${job.progress?.lastAction ?? ""}`;
 }
 
 // ── Execution ────────────────────────────────────────────────────────────────────
@@ -1027,6 +1055,7 @@ function sleep(ms: number): Promise<void> {
 
 function renderJob(job: JobView): string {
   const lines = [`${job.id}  ${job.tool}  ${job.status}  ${formatDuration(job.elapsedMs)}`];
+  if (job.queuedBehind) lines.push(`queuedBehind: ${job.queuedBehind}`);
   if (job.progress !== null) {
     lines.push(`turns=${job.progress.turns} lastAction=${job.progress.lastAction}`);
   }
@@ -1117,6 +1146,11 @@ Flags:
   --tier <tier>         investigate | author | implement (default investigate)
   --workspace <ws>      worktree | in-place (default worktree, implement tier only)
   --revision-of <branch>  implement only: continue this dispatch/* branch and update its PR
+  --branch <slug>       implement only: push as exactly dispatch/<slug> (charset [a-z0-9._/-],
+                        refused if the name is taken; not with --revision-of)
+  --pr-title <title>    implement only: the PR/MR title and commit subject (the body stays the worker's)
+  --kind <kind>         code | editorial (default code). editorial = AGENTS.md/docs/README/prose:
+                        runs on the Claude harness (route dispatch_editorial), never auto-detected
   --model <id>          model override (e.g. claude-opus-5[1m])
   --context <text|@file>  raw supporting material, passed as data (leading @ reads a file)
   --sensitive           mark the repo secret-bearing; the server refuses this outside the

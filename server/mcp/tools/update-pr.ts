@@ -18,7 +18,7 @@ export function registerUpdatePrTool(server: McpServer): void {
 
 WHEN TO CALL: a dispatch PR's base moved and it must be brought up to date before merge (the merge-train step). NOT for conflict resolution — a conflict is reported, and the caller re-dispatches the work (implement with \`revisionOf\`, or fresh) from the new base.
 ASYNC: returns { jobId }. Then call job_wait({ jobId }) to block until it finishes and read the result.
-SIDE EFFECTS: force-with-lease push to the PR's own dispatch/* branch only (never the default branch, never a fork); refused for a closed PR, a non-dispatch/* head, a base other than the default branch, and sensitive repos. Serializes per repo with every other implement episode.
+SIDE EFFECTS: force-with-lease push to the PR's own dispatch/* branch only (never the default branch, never a fork); refused for a closed PR, a non-dispatch/* head, a base other than the default branch, and sensitive repos. Serializes per repo with every other implement episode: when the repo is busy the job stays pending (queuedBehind) and starts by itself, first-come-first-served, rather than being refused.
 CWD: absolute path of the repo (directly under a dispatch root), same policy as dispatch implement.
 OUTPUT: \`status\` (updated | up_to_date | conflict), \`headSha\` (the new PR head), \`previousHeadSha\`, \`baseSha\`, \`checks\` { passed, summary, failed? } from the rebased tree (pushed even when red — the train decides), \`prUrl\`.`,
   });

@@ -9,6 +9,7 @@ import { processKind } from "../lib/process-context.ts";
 import { getIuConfig } from "../lib/iu-openai.ts";
 import { IDLE_TIMEOUT_MS } from "../lib/idle-timeout.ts";
 import { runOpencodeAttempt } from "./opencode-runner.ts";
+import { readTrimmedLines, usageLane, workerBaseEnv } from "./worker-shared.ts";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import {
@@ -36,6 +37,8 @@ const CLAUDE_BIN = existsSync(join(homedir(), ".local/bin/claude"))
 // home of this constant) so server/lib/iu-openai.ts's own idle-guarded streaming calls reuse
 // the same number without a circular import back into this module.
 export { IDLE_TIMEOUT_MS };
+// Moved to ./worker-shared.ts (shared with opencode-runner.ts); re-exported for existing importers.
+export { scrubSensitiveEnv, usageLane } from "./worker-shared.ts";
 // How often the idle watchdog checks `lastChunkAt` — cheap enough to run every tick of a
 // multi-minute session without mattering to the measurement.
 const IDLE_CHECK_INTERVAL_MS = 5_000;
@@ -89,30 +92,6 @@ const WORKER_FALLBACK: "iu" | "none" =
   process.env.AGENT_GATEWAY_WORKER_FALLBACK === "none" ? "none" : "iu";
 
 const CLAUDE_LOG_DIR = join(homedir(), ".claude", "logs");
-
-/** Env var names that look like a credential. Matched case-insensitively against the
- *  inherited environment and deleted before the worker is spawned. Deliberately broad —
- *  a false positive costs a worker a variable it almost certainly did not need, while a
- *  false negative hands a live token to a session whose prompt may be attacker-written. */
-const SENSITIVE_ENV_RE =
-  /(TOKEN|SECRET|PASSWORD|PASSWD|_KEY|APIKEY|API_KEY|CREDENTIAL|BEARER|SESSION_ID)/i;
-
-/** Exempt from the scrub: the CLI's own auth path. On the `max` backend the inherited
- *  OAuth profile is how the worker authenticates at all, so scrubbing it would break
- *  every session rather than harden it. The `iu` backend sets its own ANTHROPIC_*
- *  vars after this point regardless. */
-const ALWAYS_KEEP_ENV = new Set(["CLAUDE_CODE_OAUTH_TOKEN"]);
-
-/** Delete every credential-shaped key (`SENSITIVE_ENV_RE`, less `ALWAYS_KEEP_ENV`) from an
- *  env object IN PLACE. Factored out of `buildWorkerEnv` so `opencode-runner.ts`'s
- *  `buildOpencodeEnv` can apply the identical scrub without duplicating the regex/exemption
- *  pair — see `buildWorkerEnv`'s inline comment for why this must run before either harness
- *  writes its own backend credentials. */
-export function scrubSensitiveEnv(env: Record<string, string>): void {
-  for (const key of Object.keys(env)) {
-    if (SENSITIVE_ENV_RE.test(key) && !ALWAYS_KEEP_ENV.has(key)) delete env[key];
-  }
-}
 
 /** Pure: the `data` object of a `session_env` line — split out of `writeSessionEnv` so the
  *  `lane`/`harness` shape is unit-testable without touching `~/.claude/logs`. */
@@ -417,6 +396,10 @@ export interface SessionResult<T = unknown> {
    *  does not catch it — `planNextAttempt` must gate on this field instead. Unset on the
    *  timeout path and on `!envelope` (no result event ever arrived to carry it). */
   apiErrorStatus?: number;
+  /** Set by `runSession` (never by an attempt) when a write-tier session failed with an IU
+   *  server error AFTER producing output and the Max fallback was therefore NOT run — its
+   *  worktree may already hold half-applied edits. See `planNextAttempt` rule 3. */
+  fallbackWithheld?: "write-tier-after-output";
 }
 
 /** Live progress snapshot emitted via `onActivity` as stream-json events arrive. */
@@ -742,22 +725,6 @@ export interface WorkerEnvInput {
   baseEnv?: Record<string, string | undefined>;
 }
 
-/**
- * The `USAGE_LANE` value for a routed tool — `sideclaw:<tool>`, coarsened to the part
- * before the first `:` in `tool` itself. `review`'s sub-steps (`review:router`,
- * `review:angle`, `review:adversary`, `review:synthesis`) pass their own sub-tool label
- * through `SessionOptions.tool` for logging/attribution, but usage-tracker's `sub_tool`
- * column is a flat string with no sub-lane concept (`report.ts`'s grouping is a plain
- * `coalesce`, nothing wildcard-aware) — one lane per Max-lane worker keeps
- * `stats --by sub_tool` a single `sideclaw:review` row instead of four fragments. Single
- * chokepoint so every spawn path (all of them already route through `buildWorkerEnv`)
- * gets this for free rather than each call site coarsening its own `tool` string.
- */
-export function usageLane(tool: string | undefined): string {
-  const base = (tool ?? "unknown").split(":")[0];
-  return `sideclaw:${base}`;
-}
-
 /** The worker's full spawn env. Split out of `runSessionAttempt` so `USAGE_LANE` and the
  *  sensitive-env scrub around it are assertable without spawning anything — same reasoning as
  *  `buildSessionArgs` above. Order matters and is preserved exactly: copy the inherited env,
@@ -778,16 +745,7 @@ export function buildWorkerEnv(input: WorkerEnvInput): Record<string, string> {
     baseEnv = process.env,
   } = input;
 
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(baseEnv)) {
-    if (v !== undefined) env[k] = v;
-  }
-  delete env.CLAUDE_SESSION_ID;
-  delete env.CLAUDE_PARENT_SESSION_ID;
-  env.CLAUDE_ENTRYPOINT = "worker";
-  // Read by usage-tracker's claude-code collector (via hooks/notify.ts's session_env
-  // log line) to attribute this Max-lane worker's cost to its routed tool.
-  env.USAGE_LANE = usageLane(tool);
+  // Copy, strip session identity, tag USAGE_LANE — see `workerBaseEnv`.
   // The worker env is copied from this process wholesale, so it carries whatever the
   // LaunchAgent was started with — including live credentials the worker has no reason
   // to hold. Scrub them BEFORE the switch below writes the session's own auth
@@ -804,7 +762,7 @@ export function buildWorkerEnv(input: WorkerEnvInput): Record<string, string> {
   // these sessions, so `env` is one command away. Tools that genuinely need a credential
   // pass it explicitly via `extraEnv` (review does this for the research-gateway),
   // applied after all of this and therefore still winning.
-  scrubSensitiveEnv(env);
+  const env = workerBaseEnv(baseEnv, tool);
   // ANTHROPIC_API_KEY is deleted in every branch: it is rejected by claude v2.x
   // ("Not logged in") and would shadow ANTHROPIC_AUTH_TOKEN.
   delete env.ANTHROPIC_API_KEY;
@@ -1977,37 +1935,21 @@ async function runSessionAttempt<T = unknown>(
     }
   };
 
-  const decoder = new TextDecoder();
-  const reader = proc.stdout.getReader();
-  let buf = "";
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      lastChunkAt = Date.now(); // idle watchdog liveness — stderr never resets this
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split("\n");
-      buf = lines.pop() ?? ""; // keep the trailing partial line
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          handleEvent(JSON.parse(trimmed) as StreamEvent);
-        } catch {
-          /* skip non-JSON noise (shouldn't occur with stream-json) */
-        }
-      }
+  const parseLine = (line: string): void => {
+    try {
+      handleEvent(JSON.parse(line) as StreamEvent);
+    } catch {
+      /* skip non-JSON noise (shouldn't occur with stream-json) */
     }
-    if (buf.trim()) {
-      try {
-        handleEvent(JSON.parse(buf.trim()) as StreamEvent);
-      } catch {
-        /* ignore trailing garbage */
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
+  };
+  const trailing = await readTrimmedLines(proc.stdout, {
+    // idle watchdog liveness — stderr never resets this
+    onChunk: () => {
+      lastChunkAt = Date.now();
+    },
+    onLine: parseLine,
+  });
+  if (trailing.trim()) parseLine(trailing.trim());
 
   // Fallback: if no system/result event carried session_id during the stream,
   // check the envelope one more time before giving up on IU-native telemetry.
@@ -2423,7 +2365,12 @@ export interface NextAttemptInput {
 }
 
 export type NextAttemptPlan =
-  | { kind: "return" }
+  | {
+      kind: "return";
+      /** The post-output IU-server-error fallback was declined only because the worker is a
+       *  write tier — surfaced as `SessionResult.fallbackWithheld`. */
+      withheld?: true;
+    }
   | { kind: "retry" }
   | { kind: "fallback"; forced: ForcedAttempt };
 
@@ -2539,9 +2486,22 @@ export function planNextAttempt(input: NextAttemptInput): NextAttemptPlan {
     };
   }
 
+  if (
+    !result.ok &&
+    !usedFallback &&
+    !isLastAttempt &&
+    !noOutputYet &&
+    !sideEffectFree &&
+    result.backend === "iu" &&
+    fallback?.backend === "max" &&
+    isIuServerError(result)
+  ) {
+    return { kind: "return", withheld: true };
+  }
+
   const canRetry =
     !result.ok && !isLastAttempt && noOutputYet && !noCredentials && isRetryableSessionError(error);
-  return { kind: canRetry ? "retry" : "return" };
+  return canRetry ? { kind: "retry" } : { kind: "return" };
 }
 
 /** Generic call signature for `runSessionAttempt` — a plain `let` binding can't otherwise hold
@@ -2641,7 +2601,12 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       continue;
     }
     if (plan.kind === "return") {
-      return { ...result, attempts: attempt, retried: attempt > 1 };
+      return {
+        ...result,
+        attempts: attempt,
+        retried: attempt > 1,
+        ...(plan.withheld ? { fallbackWithheld: "write-tier-after-output" as const } : {}),
+      };
     }
     runnerLogger().warn(
       {

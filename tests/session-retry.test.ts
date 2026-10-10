@@ -963,8 +963,37 @@ describe("planNextAttempt — post-output IU 5xx", () => {
     );
   });
 
-  test("a write tier never falls back after output", () => {
-    expect(planNextAttempt({ ...input, readOnly: false }).kind).toBe("return");
+  test("a write tier never falls back after output — it returns, flagged as withheld", () => {
+    expect(planNextAttempt({ ...input, readOnly: false })).toEqual({
+      kind: "return",
+      withheld: true,
+    });
+  });
+
+  test("withheld is set only when the fallback would otherwise have qualified", () => {
+    const write = { ...input, readOnly: false };
+    const plain = { kind: "return" as const };
+    // no output yet, a non-5xx failure, no Max fallback, already switched, other backend
+    expect(
+      planNextAttempt({
+        ...write,
+        noOutputYet: true,
+        result: { ...input.result, error: "x", classificationText: "x", apiErrorStatus: undefined },
+      }),
+    ).toEqual(plain);
+    expect(
+      planNextAttempt({
+        ...write,
+        result: { ...input.result, apiErrorStatus: 429, classificationText: "IU 429: slow" },
+      }),
+    ).toEqual(plain);
+    expect(planNextAttempt({ ...write, fallback: null })).toEqual(plain);
+    expect(planNextAttempt({ ...write, usedFallback: true })).toEqual(plain);
+    expect(
+      planNextAttempt({ ...write, result: { ...input.result, backend: "max" as const } }),
+    ).toEqual(plain);
+    expect(planNextAttempt({ ...write, attempt: MAX_SESSION_ATTEMPTS })).toEqual(plain);
+    expect(planNextAttempt({ ...write, result: { ...input.result, ok: true } })).toEqual(plain);
   });
 
   test("a non-5xx failure after output does not fall back", () => {
@@ -1065,6 +1094,20 @@ describe("runSession — post-output IU 5xx fallback loop", () => {
     const r = await runSession(opts);
     expect(r.ok).toBe(false);
     expect(calls).toHaveLength(2);
+  });
+
+  test("a write-tier 5xx after output is returned with fallbackWithheld set, after one attempt", async () => {
+    const calls = fake(() => iuFail("IU 503: overloaded", 503));
+    const r = await runSession({ ...opts, readOnly: false });
+    expect(r.ok).toBe(false);
+    expect(r.fallbackWithheld).toBe("write-tier-after-output");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("a read-only run never carries fallbackWithheld", async () => {
+    fake(() => iuFail("IU 429: slow down", 429));
+    const r = await runSession(opts);
+    expect("fallbackWithheld" in r).toBe(false);
   });
 
   test("a non-5xx failure after output returns after a single attempt", async () => {

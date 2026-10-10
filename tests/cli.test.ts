@@ -41,6 +41,40 @@ describe("wave 2 additions", () => {
     });
   });
 
+  test("dispatch --branch / --pr-title / --kind map to params.branch / prTitle / kind", () => {
+    expect(
+      bodyFor([
+        "dispatch",
+        "--tier",
+        "implement",
+        "--branch",
+        "fix/lockfile",
+        "--pr-title",
+        "Fix the lockfile",
+        "--kind",
+        "editorial",
+        "reword",
+      ]),
+    ).toEqual({
+      tool: "dispatch",
+      params: {
+        cwd: "/repo",
+        brief: "reword",
+        tier: "implement",
+        branch: "fix/lockfile",
+        prTitle: "Fix the lockfile",
+        kind: "editorial",
+      },
+    });
+  });
+
+  test("dispatch --kind rejects an unknown value as a usage error", () => {
+    expect(() => parseArgs(["dispatch", "--kind", "bogus", "x"])).toThrow(
+      /--kind must be one of code\|editorial, got: bogus/,
+    );
+    expect(() => parseArgs(["dispatch", "--kind"])).toThrow();
+  });
+
   test("update-pr maps to the update_pr job", () => {
     expect(bodyFor(["update-pr", "--pr", "42"])).toEqual({
       tool: "update_pr",
@@ -633,7 +667,7 @@ describe("human-readable rendering", () => {
       confidence: "high" as const,
       nextAction: "none" as const,
       outcome: "verdict_only" as const,
-      schemaVersion: 5 as const,
+      schemaVersion: 6 as const,
     };
     const text = renderVerdictResult(verdict);
     expect(text).toContain("one line");
@@ -650,7 +684,7 @@ describe("human-readable rendering", () => {
       confidence: "high" as const,
       nextAction: "human" as const,
       outcome: "verdict_only" as const,
-      schemaVersion: 5 as const,
+      schemaVersion: 6 as const,
       rootCause: "stale-lockfile-after-rename",
       decisionQuestion: "Drop the column or keep it? A: drop. B: keep.",
       owningRepo: "warden",

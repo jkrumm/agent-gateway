@@ -810,6 +810,103 @@ export function slugify(text: string, max = 40): string {
   return s || "work";
 }
 
+/** Longest slug the AUTO-named branch (`dispatch/<slug>-<jobId8>`) carries from the brief. */
+export const AUTO_SLUG_MAX = 32;
+
+/** The default branch slug for a brief: `slugify`, capped at `AUTO_SLUG_MAX` and cut at a word
+ *  boundary where one exists, so a long brief yields `remove-openspec-scaffolding` rather than
+ *  `remove-openspec-scaffolding-from-prom`. Falls back to a hard cut when the first word alone
+ *  is longer than half the cap. */
+export function autoBranchSlug(brief: string): string {
+  const full = slugify(brief, 200);
+  if (full.length <= AUTO_SLUG_MAX) return full;
+  const window = full.slice(0, AUTO_SLUG_MAX + 1);
+  const boundary = window.lastIndexOf("-");
+  return boundary >= AUTO_SLUG_MAX / 2 ? window.slice(0, boundary) : slugify(brief, AUTO_SLUG_MAX);
+}
+
+/** Longest caller-chosen branch slug (`branch` dispatch param, without the `dispatch/` prefix). */
+export const BRANCH_SLUG_MAX = 64;
+
+const BRANCH_SLUG_CHARSET_RE = /^[a-z0-9][a-z0-9._/-]*$/;
+const READ_THROWAWAY_SLUG_RE = /^read-[0-9a-f]{8}$/;
+
+/** Why `slug` cannot be the tail of a `dispatch/<slug>` branch, or null when it can. The
+ *  charset `[a-z0-9._/-]` is wider than `slugify`'s, so the ref-name hazards git cares about
+ *  are rejected here explicitly: `..`, an empty or dot-led path component, a `.lock` suffix,
+ *  and a trailing `.` or `/`. None of `~^:?*[\@{` or whitespace is in the charset at all. */
+export function branchSlugProblem(slug: string): string | null {
+  if (slug.length === 0) return "must not be empty";
+  if (slug.length > BRANCH_SLUG_MAX) return `must be at most ${BRANCH_SLUG_MAX} characters`;
+  if (!BRANCH_SLUG_CHARSET_RE.test(slug)) {
+    return "may only contain lowercase letters, digits and . _ / - and must start with a letter or digit";
+  }
+  if (slug.includes("..")) return "must not contain '..'";
+  if (slug.endsWith("/") || slug.endsWith(".")) return "must not end with '/' or '.'";
+  for (const part of slug.split("/")) {
+    if (part.length === 0) return "must not contain an empty path component ('//')";
+    if (part.startsWith(".")) return "no path component may start with '.'";
+    if (part.endsWith(".lock")) return "no path component may end with '.lock'";
+  }
+  if (READ_THROWAWAY_SLUG_RE.test(slug)) return "collides with the read tiers' throwaway names";
+  return null;
+}
+
+/** A refs-safe prefix chain for `dispatch/a/b/c`: `dispatch/a`, `dispatch/a/b` — a ref cannot
+ *  be both a branch and a directory of branches, so each one is also a collision candidate. */
+function branchAncestors(branch: string): string[] {
+  const parts = branch.split("/");
+  return parts.slice(1, -1).map((_, i) => parts.slice(0, i + 2).join("/"));
+}
+
+/** Hang guard for the submit-time `ls-remote` — must stay well under the MCP client's 10 s
+ *  submit abort (`server/mcp/job-client.ts`), or a slow origin turns a submit into a client error. */
+const LS_REMOTE_TIMEOUT_MS = 5_000;
+
+/**
+ * Does the caller-chosen `branch` (`dispatch/<slug>`) collide with an existing branch — the
+ * same name, one nested under it, or an ancestor path git could not hold alongside it? Looks at
+ * the repo's local `refs/heads` (a leftover would break `worktree add -b`) and at `origin` itself
+ * via `git ls-remote` — deliberately NOT at `refs/remotes/origin/*`, which goes stale after a
+ * merged branch is deleted remotely and would refuse a name that is free again. An unreachable
+ * origin is not a collision (the push surfaces it). Returns the colliding name, or null.
+ *
+ * Called twice: by the submit route (a synchronous 400) and by the handler right before the
+ * worktree, because a queued job's name can be taken in the meantime.
+ */
+export async function findBranchCollision(cwd: string, branch: string): Promise<string | null> {
+  const ancestors = branchAncestors(branch);
+  // for-each-ref patterns match by path prefix: the name itself AND anything nested under it.
+  const local = await git(
+    ["for-each-ref", "--format=%(refname:short)", `refs/heads/${branch}`],
+    cwd,
+  );
+  const localHit = local.ok ? local.stdout.trim().split("\n")[0] : "";
+  if (localHit) return localHit;
+  for (const ancestor of ancestors) {
+    // Exact match only: a sibling under the same parent is fine.
+    if ((await git(["show-ref", "--verify", "--quiet", `refs/heads/${ancestor}`], cwd)).ok) {
+      return ancestor;
+    }
+  }
+  // ls-remote patterns are tail-matched globs: exact for the name and its ancestors, `/*` for
+  // anything nested under the name.
+  const remote = await git(
+    [
+      "ls-remote",
+      "--heads",
+      "origin",
+      ...[branch, ...ancestors].map((n) => `refs/heads/${n}`),
+      `refs/heads/${branch}/*`,
+    ],
+    cwd,
+    LS_REMOTE_TIMEOUT_MS,
+  );
+  if (!remote.ok) return null;
+  const line = remote.stdout.trim().split("\n")[0];
+  return line ? (line.split("\t")[1] ?? line).replace(/^refs\/heads\//, "") : null;
+}
+
 /**
  * Create an isolated worktree on a fresh `dispatch/…` branch.
  *
@@ -824,9 +921,11 @@ export async function createWorktree(
   slug: string,
   defaultBranch: string,
   revisionOf?: string,
+  /** A caller-chosen slug: the branch is exactly `dispatch/<branchSlug>` (no job-id suffix). */
+  branchSlug?: string,
 ): Promise<DispatchWorktree> {
   if (revisionOf) return createRevisionWorktree(cwd, jobKey, revisionOf);
-  const branch = `dispatch/${slug}-${jobKey.slice(0, 8)}`;
+  const branch = branchSlug ? `dispatch/${branchSlug}` : `dispatch/${slug}-${jobKey.slice(0, 8)}`;
   const root = worktreeRoot();
   const path = join(root, jobKey);
   mkdirSync(root, { recursive: true });
@@ -873,13 +972,16 @@ export async function createWorktree(
   return { path, branch, base: baseOid, baseRef: base, pushable: true };
 }
 
-/** Branches this tool owns and a revision/`update_pr` may continue: `dispatch/<slug>`, never
- *  a read tier's `dispatch/read-<8 hex>` throwaway (an implement slug that merely starts with
- *  "read-" always carries its own `-<jobKey>` suffix, so it is not caught), and a charset that cannot express a ref-name hazard. */
-const REVISABLE_BRANCH_RE = /^dispatch\/(?!read-[0-9a-f]{8}$)[a-z0-9][a-z0-9-]*$/;
-
+/** Branches this tool owns and a revision/`update_pr` may continue: `dispatch/<slug>` where the
+ *  slug passes `branchSlugProblem` (a charset and component rules that cannot express a ref-name
+ *  hazard), never a read tier's `dispatch/read-<8 hex>` throwaway (an implement slug that merely
+ *  starts with "read-" always carries its own `-<jobKey>` suffix, so it is not caught). Wider than
+ *  the auto-named `dispatch/<slug>-<jobId8>` shape on purpose: a caller-chosen `branch` param is
+ *  revisable too. */
 export function isRevisableBranch(branch: string): boolean {
-  return REVISABLE_BRANCH_RE.test(branch);
+  return (
+    branch.startsWith("dispatch/") && branchSlugProblem(branch.slice("dispatch/".length)) === null
+  );
 }
 
 /**

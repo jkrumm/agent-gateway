@@ -163,7 +163,14 @@ const PR_FIELDS = {
 // (an infrastructure failure a re-run fixes), as distinct from a real red suite. A consumer
 // that must re-dispatch rather than send a human at phantom failures reads this instead of
 // substring-matching the verdict prose.
-export const DISPATCH_SCHEMA_VERSION = 5;
+// Bumped 5 → 6: added the optional `fallbackWithheld` field (the session runner declined the
+// reactive Max fallback for a write-tier episode that had already produced output). Shipped with
+// the new dispatch INPUT params `branch`, `prTitle` and `kind` — inputs, not output shape, but a
+// consumer pinned to 5 should re-read the contract before it starts sending them. Also true as of
+// this version, with no output-shape change: a busy repo QUEUES an implement job (`pending`,
+// `queuedBehind`) instead of failing it, and every statically knowable refusal is a synchronous
+// HTTP 400 from `POST /api/jobs` with no job row.
+export const DISPATCH_SCHEMA_VERSION = 6;
 
 /** Machine-readable classification of how this episode ended — the sixteen ways `runDispatch`
  *  can return, so a consumer never has to substring-match `artifactNote`'s prose to tell them
@@ -282,6 +289,15 @@ export const DISPATCH_OUTPUT = z.strictObject({
     .describe(
       "workspace 'in-place' only: repo-relative paths the episode changed in the live " +
         "checkout, uncommitted. Absent on every other outcome.",
+    ),
+  // Set by the HANDLER, never by the worker.
+  fallbackWithheld: z
+    .enum(["write-tier-after-output"])
+    .optional()
+    .describe(
+      "Present only when the reactive Max fallback was withheld: a write-tier episode's IU " +
+        "attempt had already produced output when it failed, so it was NOT re-run on another " +
+        "backend (a second writer could clobber the first's edits). The verdict says so too.",
     ),
 });
 

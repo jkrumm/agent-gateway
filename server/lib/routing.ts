@@ -10,11 +10,16 @@
 // token, serves Claude AND gateway ids like DeepSeek-V4-Flash) and `max` (the inherited
 // Claude Code OAuth profile — the Max subscription, Claude ids only).
 //
-// Harness: `claude` (default — spawns `claude -p`, `session-runner.ts`) or `opencode`
-// (spawns `opencode run`, `server/mcp/opencode-runner.ts`) — ONLY `dispatch`,
+// Harness: `claude` (spawns `claude -p`, `session-runner.ts`) or `opencode` (spawns
+// `opencode run`, `server/mcp/opencode-runner.ts`) — ONLY `dispatch`,
 // `dispatch_implement` and `dispatch_implement_escalation` (the AGENT_OC/
 // AGENT_OC_IMPLEMENT/AGENT_OC_ESCALATION tiers below) plus the measured review angles
-// (ANGLE_OC) run on `opencode` — every other tool stays on `claude`. A route's
+// (ANGLE_OC) run on `opencode` — every other tool stays on `claude`. The dispatch family
+// defaults to `opencode`; the `claude` harness is an explicit opt-in there, reachable ONLY via
+// `AGENT_GATEWAY_HARNESS_DISPATCH=claude` (paired with a Claude `AGENT_GATEWAY_MODEL_DISPATCH`),
+// the caller-selected `dispatch_editorial` route (a dispatch param `kind: "editorial"`, below),
+// or the reactive `iu`→`max` reverse fallback after an IU failure — the one AUTOMATIC Claude
+// path a dispatch episode has. A route's
 // `variant` (opencode's `--variant`, a reasoning-effort knob) is only meaningful when
 // `harness: "opencode"`. A fallback attempt (the `iu`→`max` reverse lane) ALWAYS runs the
 // `claude` harness, regardless of the primary route's harness — Max only ever serves a
@@ -109,6 +114,7 @@ export const ROUTED_TOOLS = [
   "dispatch",
   "dispatch_implement",
   "dispatch_implement_escalation",
+  "dispatch_editorial",
   "otel",
   "excalidraw",
   "read_image",
@@ -179,7 +185,10 @@ export const DEEPSEEK_PRO = "DeepSeek-V4-Pro";
 //   dispatch_implement and its attempt-3+ escalation on the OpenCode harness — cheaper and
 //   faster than the retired `claude -p` agent tiers; `variant` is the reasoning-effort split
 //   (higher for the write tiers). The escalation route carries no Max fallback — a gateway
-//   model cannot run there, so the caller retries instead.
+//   model cannot run there, so the caller retries instead. The `claude` harness is NOT a
+//   default of any dispatch route: it is reached only by an explicit AGENT_GATEWAY_HARNESS_DISPATCH=claude
+//   (+ Claude model) override, by `dispatch_editorial` below, or — automatically — by the Max
+//   reverse fallback after an IU failure (the only automatic Claude path).
 const AGENT_OC: ToolRoute = {
   model: DEEPSEEK_V41_FLASH,
   backend: "iu",
@@ -221,8 +230,10 @@ const ANGLE_OC: ToolRoute = {
 //   otel) — a cheap model was measured failing on review's synthesis, and a non-Claude model
 //   would drop the Max fallback. The three ANGLE_OC angles moved off it 2026-10-05 on measured
 //   A/B recall; do not move the rest without new measured evidence.
-// PROSE: editorial/generative work (narrative, excalidraw) — Claude on Max (flat fee), IU as the
-//   reverse fallback.
+// PROSE: editorial/generative work (narrative, excalidraw, and `dispatch_editorial` — a dispatch
+//   episode whose caller passed `kind: "editorial"` for AGENTS.md/docs/README/prose briefs, never
+//   auto-detected from the brief) — Claude on Max (flat fee), IU as the reverse fallback. Same
+//   shape as JUDGE; kept as its own name because the reason it stays on Claude is prose quality.
 // VISION: the IU OpenAI vision transport (read_image, read_drawing) — no runSession, no fallback.
 // SINGLE_SHOT: `triage` and review's angle router — one tool-less JSON completion over the
 //   iu-openai transport, no session overhead, no Max lane, `harness` inert.
@@ -295,6 +306,7 @@ const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
   dispatch: AGENT_OC,
   dispatch_implement: AGENT_OC_IMPLEMENT,
   dispatch_implement_escalation: AGENT_OC_ESCALATION,
+  dispatch_editorial: PROSE,
   otel: JUDGE,
   excalidraw: PROSE,
   read_image: VISION,

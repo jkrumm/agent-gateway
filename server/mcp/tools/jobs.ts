@@ -62,6 +62,12 @@ const JOB_STATE_OUTPUT = z.object({
     .describe(
       "Most recent worker action, e.g. 'Edit store.ts' or 'Bash: bun test'. Null before the first event.",
     ),
+  queuedBehind: z
+    .string()
+    .optional()
+    .describe(
+      "Present only on a 'pending' implement-class job (an implement dispatch or update_pr) whose repo is busy: the jobId of the episode it is queued behind. It starts on its own, first-come-first-served per repo, when that job finishes — keep waiting (or job_cancel it). Absent on a pending job that is simply waiting for a concurrency slot.",
+    ),
   result: z
     .unknown()
     .nullable()
@@ -92,7 +98,7 @@ const JOB_CANCEL_OUTPUT = JOB_STATE_OUTPUT.extend({
 
 type JobCancelState = z.infer<typeof JOB_CANCEL_OUTPUT>;
 
-function toState(view: JobView): JobState {
+export function toState(view: JobView): JobState {
   return {
     jobId: view.id,
     tool: view.tool,
@@ -102,6 +108,7 @@ function toState(view: JobView): JobState {
     idleMs: view.idleMs,
     turns: view.progress?.turns ?? null,
     lastAction: view.progress?.lastAction ?? null,
+    ...(view.queuedBehind ? { queuedBehind: view.queuedBehind } : {}),
     result: view.result,
     error: view.error,
   };
@@ -151,7 +158,7 @@ export function registerJobStatusTool(server: McpServer): void {
       title: "Job Status (one-shot)",
       description: `Return the current state of a background job by id, without waiting. Prefer job_wait when you actually want the result — this is for a quick non-blocking peek (e.g. checking on a long review while doing other work).
 
-OUTPUT: \`status\` (pending/running/done/failed/interrupted/cancelled) and \`stillRunning\`. While running, \`turns\`/\`lastAction\` show live worker activity and \`idleMs\` is ms since its last event — a large/growing \`idleMs\` is the wedge signal (peek at git status rather than waiting forever). When status is "done", \`result\` holds the tool's structured output; when "failed"/"interrupted"/"cancelled", \`error\` explains why. To stop a job, call job_cancel.`,
+OUTPUT: \`status\` (pending/running/done/failed/interrupted/cancelled) and \`stillRunning\`. While running, \`turns\`/\`lastAction\` show live worker activity and \`idleMs\` is ms since its last event — a large/growing \`idleMs\` is the wedge signal (peek at git status rather than waiting forever). When status is "done", \`result\` holds the tool's structured output; when "failed"/"interrupted"/"cancelled", \`error\` explains why. A pending implement job (or update_pr) whose repo is busy carries \`queuedBehind\` (the running jobId) and starts by itself when that job finishes. To stop a job, call job_cancel.`,
       inputSchema: {
         jobId: z.string().describe("The job id returned by check/review."),
       },

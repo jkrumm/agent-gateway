@@ -1,8 +1,9 @@
 import { Elysia, t } from "elysia";
 import { cancelJob, createJob, getJob, listJobs, queueStats } from "../jobs/store.ts";
 import { isJobTool } from "../jobs/types.ts";
-import { DEFAULT_DISPATCH_TIER, resolveDispatchTarget } from "../lib/dispatch-policy.ts";
+import { resolveDispatchTarget } from "../lib/dispatch-policy.ts";
 import { computeHealth } from "../lib/health.ts";
+import { dispatchSubmitRefusal } from "../jobs/handlers/dispatch.ts";
 import { validateModel } from "../lib/routing.ts";
 
 // HTTP surface for the async job system. The MCP tools are thin clients of these
@@ -11,20 +12,20 @@ import { validateModel } from "../lib/routing.ts";
 
 export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
   // Submit a job — returns immediately with the job id. Execution starts when a
-  // concurrency slot is free; poll GET /:id (or the MCP job_wait) for the result.
+  // concurrency slot is free (and, for an implement-class job, the repo's lease — a busy repo
+  // keeps it `pending` with `queuedBehind`); poll GET /:id (or the MCP job_wait) for the result.
   .post(
     "/",
-    ({ body, set }) => {
+    async ({ body, set }) => {
       if (!isJobTool(body.tool)) {
         set.status = 400;
         return { ok: false as const, error: `unknown tool: ${body.tool}` };
       }
-      // Same check `runDispatch` runs (server/jobs/handlers/dispatch.ts), applied here too so
-      // a refused repo/tier never even creates a job row. The handler's copy stays regardless —
-      // the MCP client, and any future submitter, must not be able to reach execution by
-      // skipping this route. Only engages for `dispatch`, and only when `cwd`/`tier` parse as
-      // plain strings — anything else falls through to the handler's own zod validation, whose
-      // "invalid params" error shape is out of scope here.
+      // `update_pr` takes the same repo-policy gate as an implement dispatch, so a refused repo
+      // never creates a job row. (`dispatch` is gated by `dispatchSubmitRefusal` below, which
+      // owns its policy check.) The handlers repeat each check — the MCP client, and any future
+      // submitter, must not be able to reach execution by skipping this route. Only engages when
+      // `cwd` parses as a plain string; anything else falls through to the handler's own zod.
       if (body.tool === "update_pr") {
         const cwd = (body.params as Record<string, unknown> | undefined)?.cwd;
         if (typeof cwd === "string") {
@@ -32,18 +33,6 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
           if (!decision.ok) {
             set.status = 400;
             return { ok: false as const, error: `update_pr refused: ${decision.reason}` };
-          }
-        }
-      }
-      if (body.tool === "dispatch") {
-        const params = (body.params ?? {}) as Record<string, unknown>;
-        const cwd = params.cwd;
-        const tierRaw = "tier" in params ? params.tier : DEFAULT_DISPATCH_TIER;
-        if (typeof cwd === "string" && typeof tierRaw === "string") {
-          const decision = resolveDispatchTarget({ cwd, tier: tierRaw });
-          if (!decision.ok) {
-            set.status = 400;
-            return { ok: false as const, error: `dispatch refused: ${decision.reason}` };
           }
         }
       }
@@ -58,6 +47,17 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
           ok: false as const,
           error: `${body.tool} refused: model ${model} is not a verified registry model`,
         };
+      }
+      // Everything knowable without running the episode (the repo/tier policy, malformed
+      // params, in-place and sensitive combinations, revisionOf shape, branch/prTitle validity,
+      // a branch name already taken) refuses here too, so the caller gets a 400 now instead of a
+      // job that is accepted and fails a moment later. The handler repeats each check.
+      if (body.tool === "dispatch") {
+        const refusal = await dispatchSubmitRefusal((body.params ?? {}) as Record<string, unknown>);
+        if (refusal) {
+          set.status = 400;
+          return { ok: false as const, error: refusal };
+        }
       }
       const job = createJob(body.tool, body.params ?? {});
       return { ok: true as const, job };

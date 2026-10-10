@@ -14,7 +14,7 @@ import {
   type DispatchOutput,
   type WorkerOutput,
 } from "./dispatch-verdict.ts";
-import { routeFor, type Harness } from "../../lib/routing.ts";
+import { routeFor, withModel, type Harness, type RoutedTool } from "../../lib/routing.ts";
 import {
   DEFAULT_DISPATCH_TIER,
   DEFAULT_DISPATCH_WORKSPACE,
@@ -33,12 +33,17 @@ import {
   type RepoCheckContext,
 } from "./repo-check.ts";
 import {
+  AUTO_SLUG_MAX,
+  BRANCH_SLUG_MAX,
+  autoBranchSlug,
+  branchSlugProblem,
   commitCount,
   commitPendingWork,
   createReadWorktree,
   createWorktree,
   currentHeadState,
   diffRefusalReason,
+  findBranchCollision,
   findOpenPullRequest,
   isRevisableBranch,
   GIT_DENY_CREDENTIALS_ENV,
@@ -54,7 +59,6 @@ import {
   restoreStrippedSettings,
   salvageWorktree,
   scanForSecrets,
-  slugify,
   snapshotInPlace,
   stripProjectSettings,
   summarizeDiff,
@@ -66,8 +70,10 @@ import {
 } from "./dispatch-git.ts";
 
 // A dispatch is a bounded episode: an automated observer (today: Hermes) found something it
-// cannot handle without reading a repo, and hands it to a Claude Code session that has that
-// repo's AGENTS.md / CLAUDE.md / rules / skills. One episode, one verdict, no steering.
+// cannot handle without reading a repo, and hands it to a worker session (an OpenCode one by
+// default; the Claude harness only via `kind: "editorial"`, an explicit env override, or the
+// reactive Max fallback after an IU failure) that has that repo's AGENTS.md / CLAUDE.md / rules
+// / skills. One episode, one verdict, no steering.
 //
 // Three tiers, one pipeline, one record. They differ only in the session's permission
 // profile and in what the HANDLER does afterwards:
@@ -87,6 +93,14 @@ import {
  *  constrain the episode. 8k chars is far more than a real triage question needs. */
 const MAX_BRIEF_CHARS = 8000;
 const MAX_CONTEXT_CHARS = 16000;
+/** Same cap the worker's own `prTitle` is held to (dispatch-verdict.ts PR_FIELDS). */
+const MAX_PR_TITLE_CHARS = 200;
+
+/** What the episode's output is: `code` (default) runs on the route the tier selects; `editorial`
+ *  (AGENTS.md, docs, README, prose) runs on the `dispatch_editorial` route — a Claude model on the
+ *  claude harness. Chosen by the CALLER; never detected from the brief text. */
+const DISPATCH_KINDS = ["code", "editorial"] as const;
+export type DispatchKind = (typeof DISPATCH_KINDS)[number];
 
 export const DISPATCH_INPUT = z.object({
   cwd: z
@@ -167,6 +181,38 @@ export const DISPATCH_INPUT = z.object({
         "PR is updated — no new PR per revision. Refused for any other tier/workspace, for a " +
         "name outside `dispatch/` and when the branch is not on origin.",
     ),
+  branch: z
+    .string()
+    .max(BRANCH_SLUG_MAX)
+    .optional()
+    .describe(
+      "Implement tier (workspace 'worktree', not with revisionOf) only: a slug for the pushed " +
+        "branch, which becomes exactly dispatch/<branch> (no job-id suffix). Charset " +
+        `[a-z0-9._/-], must start with a letter or digit, at most ${BRANCH_SLUG_MAX} characters, ` +
+        "no '..', no empty or dot-led path component, no '.lock' suffix. Refused when it " +
+        "collides with an existing local or remote branch (the same name, one nested under it, or " +
+        "an ancestor path). Default: dispatch/<slugified brief, at most " +
+        `${AUTO_SLUG_MAX} chars>-<jobId8>.`,
+    ),
+  prTitle: z
+    .string()
+    .max(MAX_PR_TITLE_CHARS)
+    .optional()
+    .describe(
+      "Implement tier (workspace 'worktree') only: the PR/MR title AND the commit subject, " +
+        `overriding the worker's own (one line, at most ${MAX_PR_TITLE_CHARS} characters). The ` +
+        "PR body stays the worker's. Refused for any other tier/workspace rather than ignored.",
+    ),
+  kind: z
+    .enum(DISPATCH_KINDS)
+    .default("code")
+    .describe(
+      "What the episode produces. 'code' (default) = the tier's normal route (the cheap " +
+        "OpenCode worker). 'editorial' = AGENTS.md, docs, README or other prose: routes the " +
+        "episode to the Claude harness on a Claude model (route dispatch_editorial, " +
+        "Sonnet on Max with the IU reverse fallback — see GET /api/routing). Chosen by you; " +
+        "never inferred from the brief. A per-job `model` still overrides.",
+    ),
   base: z
     .enum(["default", "head"])
     .default("default")
@@ -225,8 +271,8 @@ export const TIERS: Record<DispatchTier, TierProfile> = {
 /** Hardening suffix for the one retry after the worker failed to produce a schema-valid
  *  verdict. Mirrors review's synthesis salvage in purpose, but NOT in wording: review
  *  retries a synthesis step whose inputs are all in the prompt, so "just serialize what you
- *  found" is true there. Here it would be a lie — `runSession` spawns a fresh `claude -p`
- *  with no `--resume` and deletes CLAUDE_SESSION_ID, so the retry has never read anything.
+ *  found" is true there. Here it would be a lie — `runSession` spawns a fresh worker session
+ *  with no `--resume`, so the retry has never read anything.
  *  Telling it to serialize findings it does not have is an instruction to invent them, and
  *  the result would validate cleanly and reach Slack as a confident verdict. So the retry
  *  re-does the work on a reduced budget and is told exactly that. */
@@ -373,6 +419,20 @@ function readBaseNote(wt: DispatchWorktree): string {
   );
 }
 
+/** The session runner declined the reactive `iu`→`max` fallback because this was a write-tier
+ *  episode that had already produced output on the primary route: a second writer on another
+ *  backend could clobber the first's edits, so the failure stands. */
+export type FallbackWithheld = "write-tier-after-output";
+
+const FALLBACK_WITHHELD_NOTE =
+  " The reactive Max fallback was withheld: this write-tier episode had already produced " +
+  "output on the primary route, so it was not re-run on another backend.";
+
+/** The session runner's typed `fallbackWithheld`, narrowed to the one value this handler knows. */
+export function fallbackWithheldOf(r: SessionResult<WorkerOutput>): FallbackWithheld | undefined {
+  return r.fallbackWithheld === "write-tier-after-output" ? r.fallbackWithheld : undefined;
+}
+
 /** Is this failure worth retrying and salvaging? Only a SERIALIZATION failure is: the
  *  session ran, produced something, and merely failed to shape it. Everything else — a
  *  timeout, a non-zero exit, an unreachable worker backend, a missing result event — means the
@@ -508,6 +568,134 @@ export function assertInPlaceOpencodeConfigAllowed(cwd: string, harness: Harness
         `worktree to strip it from first. Use the default worktree workspace instead.`,
     );
   }
+}
+
+/** The route key an episode runs on: the tier's own, or `dispatch_editorial` for an editorial
+ *  brief at any tier. */
+export function dispatchRouteKey(tier: DispatchTier, kind: DispatchKind): RoutedTool {
+  if (kind === "editorial") return "dispatch_editorial";
+  return tier === "implement" ? "dispatch_implement" : "dispatch";
+}
+
+/** The harness the episode will actually spawn, per-job `model` included (a Claude override
+ *  forces the claude harness, `withModel`). Decides the in-place opencode-config refusal. */
+function episodeHarness(
+  tier: DispatchTier,
+  kind: DispatchKind,
+  model: string | undefined,
+): Harness {
+  return withModel(routeFor(dispatchRouteKey(tier, kind)), model).harness;
+}
+
+/** Caller-chosen naming (`branch`, `prTitle`): only meaningful for an implement episode in a
+ *  worktree, so anything else is refused up front rather than silently ignored (the caller would
+ *  read the default name as the one it asked for). `branch` additionally cannot accompany
+ *  `revisionOf`, which names its branch itself. Collision with an existing branch is a runtime
+ *  question (`findBranchCollision`), asked at submit and again before the worktree. */
+export function assertNamingAllowed(input: {
+  tier: DispatchTier;
+  workspace: DispatchWorkspace;
+  revisionOf?: string;
+  branch?: string;
+  prTitle?: string;
+}): void {
+  const { tier, workspace, revisionOf, branch, prTitle } = input;
+  const writes = tier === "implement" && workspace === "worktree";
+  if (branch !== undefined) {
+    if (!writes || revisionOf !== undefined) {
+      throw new Error(
+        `dispatch refused: branch is only valid with tier 'implement', workspace 'worktree' and ` +
+          `no revisionOf (a revision continues its own branch)`,
+      );
+    }
+    const problem = branchSlugProblem(branch);
+    if (problem) throw new Error(`dispatch refused: invalid branch '${branch}' — ${problem}`);
+  }
+  if (prTitle !== undefined) {
+    if (!writes) {
+      throw new Error(
+        `dispatch refused: prTitle is only valid with tier 'implement' and workspace 'worktree'`,
+      );
+    }
+    const title = prTitle.trim();
+    if (title.length === 0 || title.length > MAX_PR_TITLE_CHARS) {
+      throw new Error(
+        `dispatch refused: prTitle must be 1-${MAX_PR_TITLE_CHARS} characters (got ${title.length})`,
+      );
+    }
+    // eslint-disable-next-line no-control-regex
+    if (/[\u0000-\u001f\u007f]/.test(title)) {
+      throw new Error(`dispatch refused: prTitle must be a single line without control characters`);
+    }
+  }
+}
+
+type DispatchInput = z.infer<typeof DISPATCH_INPUT>;
+
+/** Every refusal that depends only on the parameters (and, for the opencode-config probe, the
+ *  repo root) — run by `POST /api/jobs` (a synchronous 400, no job row) AND again by
+ *  `runDispatch` as belt and suspenders. Throws the `dispatch refused: …` message. */
+export function assertDispatchRequestAllowed(
+  input: DispatchInput,
+  effectiveSensitive: boolean,
+): void {
+  const { cwd, tier, workspace, revisionOf, kind, model } = input;
+  assertSensitiveTierAllowed(tier, effectiveSensitive);
+  if (workspace === "in-place") {
+    assertInPlaceAllowed(tier, effectiveSensitive);
+    // The resolved route decides which harness the episode would spawn.
+    assertInPlaceOpencodeConfigAllowed(cwd, episodeHarness(tier, kind, model));
+  }
+  assertRevisionAllowed(tier, workspace, revisionOf);
+  assertNamingAllowed(input);
+}
+
+/** Why a dispatch submission must be refused before a job row exists, or null. The single gate
+ *  for everything the caller can learn without running the episode: malformed params, the repo/tier
+ *  policy, the static refusals above, and a `branch` that already exists (local refs + origin, the
+ *  one network call here). The `model` check stays in `server/routes/jobs.ts`, ahead of this. */
+export async function dispatchSubmitRefusal(raw: Record<string, unknown>): Promise<string | null> {
+  const parsed = DISPATCH_INPUT.safeParse(raw);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((i) => `${i.path.join(".") || "params"}: ${i.message}`)
+      .join("; ");
+    return `dispatch refused: invalid params — ${issues}`;
+  }
+  const input = parsed.data;
+  const decision = resolveDispatchTarget({ cwd: input.cwd, tier: input.tier });
+  if (!decision.ok) return `dispatch refused: ${decision.reason}`;
+  try {
+    assertDispatchRequestAllowed(input, decision.sensitive || input.sensitive);
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+  if (input.branch === undefined || !existsSync(join(input.cwd, ".git"))) return null;
+  return branchCollisionRefusal(input.cwd, input.branch);
+}
+
+/** `dispatch refused: …` when `dispatch/<slug>` already exists, else null. */
+async function branchCollisionRefusal(cwd: string, slug: string): Promise<string | null> {
+  // Fails soft: a collision probe that throws must not turn a submit into a 500 — the push
+  // surfaces a real collision later.
+  let hit: string | null;
+  try {
+    hit = await findBranchCollision(cwd, `dispatch/${slug}`);
+  } catch (err) {
+    logger.warn(
+      {
+        event: "dispatch.branch_collision_check_failed",
+        tool: "dispatch",
+        project: cwd,
+        error: String(err),
+      },
+      "branch collision check failed — admitting",
+    );
+    return null;
+  }
+  return hit === null
+    ? null
+    : `dispatch refused: branch dispatch/${slug} collides with the existing branch '${hit}' — choose another name`;
 }
 
 /** Every free-text field of the verdict that reaches the caller. `confidence` and
@@ -682,10 +870,9 @@ export async function runDispatch(
   isCancelled?: (jobId: string) => boolean,
   resumeCtx?: DispatchResumeContext,
 ): Promise<DispatchOutput> {
-  const { cwd, brief, tier, context, model, sensitive, workspace, base, revisionOf } = parseParams(
-    DISPATCH_INPUT,
-    rawParams,
-  );
+  const input = parseParams(DISPATCH_INPUT, rawParams);
+  const { cwd, brief, tier, context, model, sensitive, workspace, base, revisionOf } = input;
+  const { kind, branch: branchSlug, prTitle: callerPrTitle } = input;
   // Checked before the filesystem checks below — the repo policy (server/lib/dispatch-policy.ts)
   // is the boundary on which repo and which tier this handler may run at all, so a refused
   // combination costs nothing beyond validating the input and reveals nothing about the local
@@ -702,17 +889,10 @@ export async function runDispatch(
     throw new Error(`Not a git repository (no .git): ${cwd}`);
   }
   // Checked before anything else — no worktree, no session, no GitHub identity lookup — so a
-  // refused combination costs nothing beyond validating the input.
-  assertSensitiveTierAllowed(tier, effectiveSensitive);
+  // refused combination costs nothing beyond validating the input. server/routes/jobs.ts runs
+  // the same checks at submit (`dispatchSubmitRefusal`); this copy stays for a direct caller.
+  assertDispatchRequestAllowed(input, effectiveSensitive);
   const inPlace = tier === "implement" && workspace === "in-place";
-  if (workspace === "in-place") {
-    assertInPlaceAllowed(tier, effectiveSensitive);
-    // Checked before anything runs, same as the assertion above — implement always resolves
-    // dispatch_implement's route, which is what actually decides the harness this episode
-    // would spawn.
-    assertInPlaceOpencodeConfigAllowed(cwd, routeFor("dispatch_implement").harness);
-  }
-  assertRevisionAllowed(tier, workspace, revisionOf);
   // A resumed row never re-runs this: the store refuses to resume an in-place row (see the
   // runDispatch doc comment), so `resuming` and `inPlace` cannot both be true.
   const resuming = resumeCtx?.resume !== undefined;
@@ -735,7 +915,7 @@ export async function runDispatch(
     "dispatch episode start",
   );
 
-  // The retry is a second `claude -p`, and runSession restarts its turn counter at 0 for
+  // The retry is a second worker session, and runSession restarts its turn counter at 0 for
   // it. A caller watching `turns` fall from 60 to 0 mid-job reads that as a wedged or
   // restarted worker, so offset the retry's counts instead of passing them through raw.
   // Same shape as review's shared `bump` across its parallel angle sessions.
@@ -791,16 +971,21 @@ export async function runDispatch(
   const resumingWorktree = resuming && !inPlace;
   let worktree: DispatchWorktree | undefined;
   let snapshot: InPlaceSnapshot | undefined;
-  // True only once `tryAcquireRepoLease` below actually succeeds for THIS invocation — the
-  // finally must release the lock it took, never a lock another job holds. Taken inside the
-  // try (rather than before it, as before) so a throw between acquiring it and setting this
-  // flag is impossible by construction: the two happen on the same line.
+  // True only when THIS invocation took the lease itself (a direct caller with no job store) —
+  // the finally must release the lock it took, never a lock another job holds. A stored job
+  // arrives with the lease already held under its own id (`store.ts`'s `promote()` takes it at
+  // admission, and a busy repo keeps the job `pending` instead): that re-entry is `reentrant`
+  // and the store releases it. Taken inside the try so a throw between acquiring it and setting
+  // this flag is impossible by construction: the two happen on the same line.
   let lockHeld = false;
+  // Set when the session runner declined the reactive Max fallback for this write-tier episode
+  // (it had already produced output on the primary route). Surfaced in the verdict + a field.
+  let fallbackWithheld: FallbackWithheld | undefined;
   try {
     if (tier === "implement") {
       const lease = tryAcquireRepoLease(cwd, jobKey);
       if (!lease.ok) throw new Error(repoLeaseRefusal(lease.holder));
-      lockHeld = true;
+      lockHeld = !lease.reentrant;
     }
     if (inPlace) {
       // Recorded before the session starts — the snapshot is the in-place run's only
@@ -823,12 +1008,18 @@ export async function runDispatch(
       }
       note(`resuming ${worktree.branch}`);
     } else if (tier === "implement" && identity) {
+      // The name was free at submit, but this job may have queued behind others since.
+      if (branchSlug !== undefined) {
+        const refusal = await branchCollisionRefusal(cwd, branchSlug);
+        if (refusal) throw new Error(refusal);
+      }
       worktree = await createWorktree(
         cwd,
         jobKey,
-        slugify(brief),
+        autoBranchSlug(brief),
         identity.defaultBranch,
         revisionOf,
+        branchSlug,
       );
       note(`worktree ${worktree.branch}`);
     } else {
@@ -879,7 +1070,7 @@ export async function runDispatch(
     // comment above this block for the "in-place run records a marker instead" reasoning).
     resumeCtx?.onWorktreeReady?.(worktreeMeta);
     if (strippedSettings.length > 0) note(`stripped ${strippedSettings.join(", ")}`);
-    const runEpisode = (p: string, opts: { resumeSessionId?: string } = {}) =>
+    const spawnEpisode = (p: string, opts: { resumeSessionId?: string } = {}) =>
       runSession<WorkerOutput>({
         cwd: sessionCwd,
         prompt: p,
@@ -887,9 +1078,10 @@ export async function runDispatch(
         tool: "dispatch",
         jobId,
         isCancelled,
-        // implement gets its own (pricier) default model — investigate/author stay on the
-        // cheaper AGENT route. See routing.ts's AGENT_IMPLEMENT comment for why.
-        route: routeFor(tier === "implement" ? "dispatch_implement" : "dispatch"),
+        // implement gets its own default route — investigate/author stay on the AGENT one
+        // (both opencode by default); an editorial brief runs on the claude-harness
+        // `dispatch_editorial` route. See routing.ts.
+        route: routeFor(dispatchRouteKey(tier, kind)),
         model,
         jsonSchema: z.toJSONSchema(WORKER_OUTPUT[tier]),
         readOnly: profile.readOnly,
@@ -905,6 +1097,11 @@ export async function runDispatch(
         onActivity: relayProgress,
         onSessionId: resumeCtx?.onSessionId,
       });
+    const runEpisode = async (p: string, opts: { resumeSessionId?: string } = {}) => {
+      const r = await spawnEpisode(p, opts);
+      fallbackWithheld ??= fallbackWithheldOf(r);
+      return r;
+    };
 
     // A resume attaches to the existing transcript with a short continuation nudge instead of
     // re-sending the original (already-seen) brief prompt; everything past this first call —
@@ -922,12 +1119,16 @@ export async function runDispatch(
     const firstRawText = result.rawText;
 
     if (!result.ok || !result.data) {
-      if (!isSalvageable(result)) {
+      // A withheld fallback means a write-tier session died on a transport error AFTER writing:
+      // a fresh JSON-only session would re-run the whole implementation over its half-applied
+      // edits, so an implement episode fails here with the withheld note instead.
+      if (!isSalvageable(result) || (tier === "implement" && fallbackWithheld)) {
         // Fail the job outright. The store turns this into status:"failed" with the message,
         // which is a truthful "the tool broke" the caller can act on — unlike a degraded
         // verdict, which reads as "the investigation concluded and needs a human".
         throw new Error(
-          `dispatch episode did not complete: ${result.error ?? "unknown session failure"}`,
+          `dispatch episode did not complete: ${result.error ?? "unknown session failure"}` +
+            (fallbackWithheld ? FALLBACK_WITHHELD_NOTE : ""),
         );
       }
       logger.warn(
@@ -941,7 +1142,8 @@ export async function runDispatch(
       result = await runEpisode(prompt + JSON_ONLY_RETRY);
       if (!result.ok && !isSalvageable(result)) {
         throw new Error(
-          `dispatch retry did not complete: ${result.error ?? "unknown session failure"}`,
+          `dispatch retry did not complete: ${result.error ?? "unknown session failure"}` +
+            (fallbackWithheld ? FALLBACK_WITHHELD_NOTE : ""),
         );
       }
     }
@@ -967,7 +1169,7 @@ export async function runDispatch(
         await salvage(
           result,
           firstRawText,
-          { cwd, tier, brief, startMs },
+          { cwd, tier, brief, startMs, fallbackWithheld },
           worktree,
           identity,
           note,
@@ -1060,10 +1262,14 @@ export async function runDispatch(
           throw new Error("internal: repo identity or worktree missing for the implement tier");
         }
         assertNoGithubForSensitive(effectiveSensitive, "openPullRequest");
-        const deposit = await depositBranch(worktree, identity, data, note, {
-          jobId,
-          isCancelled,
-        });
+        const deposit = await depositBranch(
+          worktree,
+          identity,
+          data,
+          note,
+          { jobId, isCancelled },
+          callerPrTitle,
+        );
         artifactUrl = deposit.artifactUrl;
         branch = deposit.branch;
         artifactNote = deposit.note;
@@ -1099,7 +1305,12 @@ export async function runDispatch(
       ...(artifactUrl ? { artifactUrl } : {}),
       ...(branch ? { branch } : {}),
       ...(changedFiles ? { changedFiles } : {}),
-      ...(artifactNote ? { verdict: data.verdict + artifactNote } : {}),
+      ...(fallbackWithheld ? { fallbackWithheld } : {}),
+      ...(artifactNote || fallbackWithheld
+        ? {
+            verdict: data.verdict + artifactNote + (fallbackWithheld ? FALLBACK_WITHHELD_NOTE : ""),
+          }
+        : {}),
       // A red check is never a PR, and a consumer must not read this as the worker's own
       // "no human needed" verdict — forced the same way `applySensitiveScan` forces it for
       // `withheld`. `forceHumanInPlace` is the in-place equivalent: nothing was published
@@ -1282,9 +1493,12 @@ export async function depositBranch(
   data: WorkerOutput,
   note: (s: string) => void,
   checkCtx: RepoCheckContext = {},
+  /** The caller's `prTitle` param: wins over the worker's as PR/MR title and commit subject. */
+  callerPrTitle?: string,
 ): Promise<{ artifactUrl?: string; branch?: string; outcome: DispatchOutcome; note: string }> {
-  const text = artifactText(data.prTitle, data.prBody);
-  const subject = text?.title ?? `chore: dispatched change on ${worktree.branch}`;
+  const callerTitle = callerPrTitle?.trim() || undefined;
+  const text = artifactText(callerTitle ?? data.prTitle, data.prBody);
+  const subject = text?.title ?? callerTitle ?? `chore: dispatched change on ${worktree.branch}`;
 
   note("committing");
   await commitPendingWork(worktree, `${subject}\n\n${data.verdict}`);
@@ -1492,7 +1706,13 @@ export async function depositBranch(
 export async function salvage(
   result: SessionResult<WorkerOutput>,
   firstRawText: string | undefined,
-  meta: { cwd: string; tier: DispatchTier; brief: string; startMs: number },
+  meta: {
+    cwd: string;
+    tier: DispatchTier;
+    brief: string;
+    startMs: number;
+    fallbackWithheld?: FallbackWithheld;
+  },
   worktree: DispatchWorktree | undefined,
   identity: RepoIdentity | undefined,
   note: (s: string) => void,
@@ -1551,11 +1771,13 @@ export async function salvage(
     outcome: "salvaged",
     schemaVersion: DISPATCH_SCHEMA_VERSION,
     ...(branch ? { branch } : {}),
+    ...(meta.fallbackWithheld ? { fallbackWithheld: meta.fallbackWithheld } : {}),
     verdict:
       "The episode ran but did not return a structured verdict, twice. Its raw output is " +
       "preserved below for manual triage — this is a TOOL failure, not a finding about " +
       "the repo, so do not read the text below as a conclusion." +
       branchNote +
+      (meta.fallbackWithheld ? FALLBACK_WITHHELD_NOTE : "") +
       "\n\n" +
       (raw.slice(0, 3000) || "(no worker text was captured)"),
     confidence: "low",

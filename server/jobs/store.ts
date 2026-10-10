@@ -5,6 +5,13 @@ import { basename, dirname, join } from "node:path";
 import { appLogger as logger } from "../logger.ts";
 import { terminateSessionsForJob } from "../mcp/session-runner.ts";
 import {
+  __resetRepoLeasesForTests,
+  releaseRepoLease,
+  repoLeaseCwdFor,
+  repoLeaseHolder,
+  tryAcquireRepoLease,
+} from "../lib/repo-lease.ts";
+import {
   isTerminal,
   type JobProgress,
   type JobRecord,
@@ -168,6 +175,14 @@ db.run(`
 // concurrency gate cheaply without re-querying on every promotion tick.
 const runningIds = new Set<string>();
 
+/** Jobs that hold a per-repo implement lease (`server/lib/repo-lease.ts`), job id → the `cwd`
+ *  it was taken under. Acquired by `promote()` the instant a job is admitted, released by
+ *  `releaseJobLease()` on every terminal path (before the next `promote()`, so the next queued
+ *  job for that repo starts in the same tick). */
+const leasedCwdByJob = new Map<string, string>();
+/** Jobs already logged as queued behind a lease holder, so a long wait logs once, not per tick. */
+const leaseQueueLogged = new Set<string>();
+
 let executor: JobExecutor | null = null;
 /** Set on SIGTERM: a job finishing inside the grace window must not pull the next pending
  *  row into `running`, where the deadline would kill it and burn its one re-queue. Pending
@@ -242,6 +257,9 @@ export function __resetForTests(): void {
   drainKilledIds.clear();
   cancelRequested.clear();
   runningIds.clear();
+  leasedCwdByJob.clear();
+  leaseQueueLogged.clear();
+  __resetRepoLeasesForTests();
   executor = null;
   onDone = null;
   db.run("DELETE FROM jobs");
@@ -402,12 +420,32 @@ export function createJob(tool: JobTool, params: Record<string, unknown>): JobVi
   promote();
   // Re-read so the view reflects any immediate promotion to running.
   const row = fetchRow(id);
-  return toJobView(row ? rowToRecord(row) : fallbackRecord(id, tool, params, now));
+  return viewOf(row ? rowToRecord(row) : fallbackRecord(id, tool, params, now));
 }
 
 export function getJob(id: string): JobView | null {
   const row = fetchRow(id);
-  return row ? toJobView(rowToRecord(row)) : null;
+  return row ? viewOf(rowToRecord(row)) : null;
+}
+
+/** The job holding the repo lease a `pending` job is waiting on, or undefined when it is not
+ *  lease-blocked (not pending, needs no lease, lease free, or held by itself). */
+function leaseBlockerOf(
+  record: Pick<JobRecord, "id" | "tool" | "params" | "status">,
+): string | undefined {
+  if (record.status !== "pending") return undefined;
+  const cwd = repoLeaseCwdFor(record.tool, record.params);
+  if (cwd === null) return undefined;
+  const holder = repoLeaseHolder(cwd);
+  return holder !== undefined && holder !== record.id ? holder : undefined;
+}
+
+/** `toJobView` plus `queuedBehind` — the id of the lease holder a `pending` implement-class job
+ *  is waiting on, so a caller can tell "queued behind job X" from "waiting for a slot". */
+function viewOf(record: JobRecord): JobView {
+  const view = toJobView(record);
+  const blocker = leaseBlockerOf(record);
+  return blocker === undefined ? view : { ...view, queuedBehind: blocker };
 }
 
 /** Cancel one job by id (`POST /api/jobs/:id/cancel`). Unknown id → 404; already-terminal
@@ -438,7 +476,7 @@ export function cancelJob(
   if (record.status === "pending") {
     finish(record, "cancelled", { error: "cancelled by request" });
     const updated = fetchRow(id);
-    return { ok: true, job: toJobView(updated ? rowToRecord(updated) : record) };
+    return { ok: true, job: viewOf(updated ? rowToRecord(updated) : record) };
   }
 
   // running, already requested — no duplicate SIGTERM/SIGKILL timer.
@@ -461,7 +499,7 @@ export function listJobs(limit = 50): JobView[] {
   const rows = db
     .query<JobRow, [number]>("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?")
     .all(limit);
-  return rows.map((r) => toJobView(rowToRecord(r)));
+  return rows.map((r) => viewOf(rowToRecord(r)));
 }
 
 /**
@@ -510,8 +548,13 @@ export interface JobHealthStats {
   pending: number;
   failedLastHour: number;
   interruptedLastHour: number;
-  /** Age of the oldest `pending` row, or null when nothing is queued. */
+  /** Age of the oldest `pending` row that is waiting for a concurrency slot, or null when none
+   *  is. A row queued behind a per-repo implement lease (`leaseQueued`) is NOT counted: it is
+   *  waiting for a legitimately long-running episode (30 min+), not for a wedged queue. */
   oldestPendingAgeMs: number | null;
+  /** `pending` rows waiting on a per-repo implement lease (`queuedBehind` on the job view). They
+   *  are excluded from `oldestPendingAgeMs`, so the >15 min page rule never fires for them. */
+  leaseQueued: number;
   lastFailure: { tool: JobTool; at: number; error: string | null } | null;
   /** True while a SIGTERM/SIGINT drain is in progress (`setDraining()` below) — `promote()`
    *  refuses new `pending → running` transitions during a drain, so the queue backs up as a
@@ -558,11 +601,14 @@ export function jobHealth(now = Date.now()): JobHealth {
         "SELECT COUNT(*) AS n FROM jobs WHERE status = ? AND finished_at >= ?",
       )
       .get(status, hourAgo)?.n ?? 0;
-  const oldestPending = db
-    .query<{ created_at: number }, []>(
-      "SELECT created_at FROM jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1",
-    )
-    .get();
+  const pendingRows = db
+    .query<JobRow, []>("SELECT * FROM jobs WHERE status = 'pending' ORDER BY created_at ASC")
+    .all();
+  // A lease-queued row is waiting on a running episode, not on the queue — see
+  // `JobHealthStats.leaseQueued`. The first row that is NOT lease-blocked is the oldest one a
+  // wedged queue could be holding back.
+  const slotWaiting = pendingRows.filter((r) => leaseBlockerOf(rowToRecord(r)) === undefined);
+  const oldestPending = slotWaiting[0];
   const lastFailed = db
     .query<JobRow, []>(
       "SELECT * FROM jobs WHERE status = 'failed' ORDER BY finished_at DESC LIMIT 1",
@@ -573,6 +619,7 @@ export function jobHealth(now = Date.now()): JobHealth {
     failedLastHour: count("failed"),
     interruptedLastHour: count("interrupted"),
     oldestPendingAgeMs: oldestPending ? Math.max(0, now - oldestPending.created_at) : null,
+    leaseQueued: pendingRows.length - slotWaiting.length,
     lastFailure: lastFailed
       ? {
           tool: lastFailed.tool as JobTool,
@@ -588,16 +635,23 @@ export function jobHealth(now = Date.now()): JobHealth {
 
 // ── Scheduler ────────────────────────────────────────────────────────────────
 
-/** Promote pending jobs to running while concurrency slots remain — never while draining. */
+/** Promote pending jobs to running while concurrency slots remain — never while draining.
+ *
+ *  Oldest first, with ONE exception: an implement-class job (`repoLeaseCwdFor`) whose repo's
+ *  lease another job holds is skipped, not started — it stays `pending` (`queuedBehind` on its
+ *  view) and a younger job for a different repo may pass it. Per repo the order is still FIFO:
+ *  the rows are walked oldest first and the lease is taken at the moment of admission, so the
+ *  oldest waiter for a repo is always the one that gets it when the holder finishes. The lease
+ *  is acquired only after the concurrency check, so a full queue never strands a lease. */
 function promote(): void {
   if (!executor || draining) return;
-  while (runningIds.size < MAX_CONCURRENT) {
-    const row = db
-      .query<JobRow, []>(
-        "SELECT * FROM jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1",
-      )
-      .get();
-    if (!row) return;
+  if (runningIds.size >= MAX_CONCURRENT) return;
+  const rows = db
+    .query<JobRow, []>("SELECT * FROM jobs WHERE status = 'pending' ORDER BY created_at ASC")
+    .all();
+  for (const row of rows) {
+    if (runningIds.size >= MAX_CONCURRENT) return;
+    if (!acquireJobLease(row)) continue;
 
     const now = Date.now();
     db.run(
@@ -605,6 +659,7 @@ function promote(): void {
       [now, row.id],
     );
     runningIds.add(row.id);
+    leaseQueueLogged.delete(row.id);
     const job = rowToRecord({
       ...row,
       status: "running",
@@ -617,6 +672,51 @@ function promote(): void {
     );
     void execute(job);
   }
+}
+
+/** Take the per-repo implement lease for `row` if it needs one. False = the repo is busy, leave
+ *  the row `pending`. A path that cannot be resolved needs no gate (nothing else can hold a
+ *  lease on it): the job starts and its handler fails with its own message. */
+function acquireJobLease(row: JobRow): boolean {
+  let cwd: string | null;
+  try {
+    cwd = repoLeaseCwdFor(row.tool, JSON.parse(row.params) as Record<string, unknown>);
+  } catch {
+    return true;
+  }
+  if (cwd === null) return true;
+  try {
+    const lease = tryAcquireRepoLease(cwd, row.id);
+    if (!lease.ok) {
+      if (!leaseQueueLogged.has(row.id)) {
+        leaseQueueLogged.add(row.id);
+        logger.info(
+          { event: "job.lease_queued", jobId: row.id, tool: row.tool, queuedBehind: lease.holder },
+          "implement job queued behind the repo's running episode",
+        );
+      }
+      return false;
+    }
+    leasedCwdByJob.set(row.id, cwd);
+    return true;
+  } catch (err) {
+    // Fail open: a lease probe that throws must not wedge the queue. Logged so the admission
+    // without a lease (and the concurrent-writer risk that implies) is visible.
+    logger.warn(
+      { event: "job.lease_unavailable", jobId: row.id, tool: row.tool, error: String(err) },
+      "repo lease unavailable — admitting without it",
+    );
+    return true;
+  }
+}
+
+/** Release the per-repo lease `promote()` took for this job, if any. Called before the next
+ *  `promote()` on every path a running job can leave by (terminal `finish`, drain abandon). */
+function releaseJobLease(jobId: string): void {
+  const cwd = leasedCwdByJob.get(jobId);
+  if (cwd === undefined) return;
+  leasedCwdByJob.delete(jobId);
+  releaseRepoLease(cwd, jobId);
 }
 
 async function execute(job: JobRecord): Promise<void> {
@@ -664,6 +764,7 @@ async function execute(job: JobRecord): Promise<void> {
       // — the exact false-alarm class that route exists to avoid.
       drainKilledIds.delete(job.id);
       runningIds.delete(job.id);
+      releaseJobLease(job.id);
       logger.warn(
         {
           event: "job.shutdown_abandoned",
@@ -880,6 +981,8 @@ function finish(
   ]);
   recordJobStats(job.id);
   runningIds.delete(job.id);
+  releaseJobLease(job.id);
+  leaseQueueLogged.delete(job.id);
   logger.info(jobFinishLogFields(job, status, outcome, now), `job ${status}`);
   if (status === "done" && onDone) {
     const row = fetchRow(job.id);

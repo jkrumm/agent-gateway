@@ -68,7 +68,7 @@ describe("worker schema — old shape and new fields", () => {
   });
 
   test("the schema version stays at the value warden pins", () => {
-    expect(DISPATCH_SCHEMA_VERSION).toBe(5);
+    expect(DISPATCH_SCHEMA_VERSION).toBe(6);
   });
 
   test("rootCause must be kebab-case and at most 80 chars", () => {

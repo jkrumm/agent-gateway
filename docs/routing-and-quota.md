@@ -376,6 +376,10 @@ the module header's Harness paragraph), so a lane switch here is model AND harne
 transport all changing at once, same as it already was reaching Max from AGENT/
 AGENT_IMPLEMENT's IU-native-Anthropic primary.
 
+### dispatch_editorial
+
+dispatch_editorial — 2026-10-10. `kind: "editorial"` on a dispatch routes the episode to the Claude harness on Sonnet (Max, IU reverse fallback), the PROSE shape: AGENTS.md, docs and prose briefs are editorial judgment a cheap model was not measured on. Claude on `dispatch` itself is otherwise opt-in only (`AGENT_GATEWAY_HARNESS_DISPATCH=claude` plus a Claude `AGENT_GATEWAY_MODEL_DISPATCH`).
+
 ### escalation
 
 escalation — `dispatch_implement_escalation`, the attempt-3+ retry seat for an implement

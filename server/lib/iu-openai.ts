@@ -4,6 +4,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { z } from "zod";
 import { logger } from "../mcp/logger.ts";
 import { IDLE_TIMEOUT_MS } from "./idle-timeout.ts";
+import { readTrimmedLines } from "../mcp/worker-shared.ts";
 
 // ── IU OpenAI transport ───────────────────────────────────────────────────────
 //
@@ -232,26 +233,17 @@ async function iuFetch(
  * not just on the initial connect. */
 async function readSseStream(res: Response, onChunk: () => void): Promise<IuStreamResult> {
   if (!res.body) throw new Error("IU stream response had no body");
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
   let text = "";
   let usage: IuUsage | undefined;
   let id: string | undefined;
   let model: string | undefined;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    onChunk();
-    buf += decoder.decode(value, { stream: true });
-    const lines = buf.split("\n");
-    buf = lines.pop() ?? "";
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
+  await readTrimmedLines(res.body, {
+    onChunk,
+    onLine: (trimmed) => {
+      if (!trimmed.startsWith("data:")) return;
       const payload = trimmed.slice("data:".length).trim();
-      if (!payload || payload === "[DONE]") continue;
+      if (!payload || payload === "[DONE]") return;
       const chunk = JSON.parse(payload) as {
         id?: string;
         model?: string;
@@ -263,8 +255,8 @@ async function readSseStream(res: Response, onChunk: () => void): Promise<IuStre
       const delta = chunk.choices?.[0]?.delta?.content;
       if (delta) text += delta;
       if (chunk.usage) usage = normalizeUsage(chunk.usage);
-    }
-  }
+    },
+  });
 
   return { text, usage, id, model };
 }

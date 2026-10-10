@@ -72,12 +72,16 @@ describe("dispatch `model` refusal", () => {
     expect(body.ok).toBe(true);
   });
 
-  test("a non-string model falls through to the handler's own validation", async () => {
-    const { status } = await post({
+  test("a non-string model is refused as invalid params", async () => {
+    const before = listJobs().length;
+    const { status, body } = await post({
       tool: "dispatch",
       params: { cwd: repo, tier: "investigate", brief: "x", model: 7 },
     });
-    expect(status).toBe(200);
+    expect(status).toBe(400);
+    expect(body.error).toContain("dispatch refused: invalid params");
+    expect(body.error).toContain("model");
+    expect(listJobs().length).toBe(before);
   });
 
   test("other tools are untouched, and triage is a known tool", async () => {

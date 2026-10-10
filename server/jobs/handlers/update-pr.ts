@@ -101,8 +101,12 @@ export async function runUpdatePr(
   }
 
   const jobKey = jobId ?? randomUUID();
+  // A stored job already holds the lease (`store.ts`'s `promote()` takes it at admission, so a
+  // busy repo keeps the job `pending`); the re-entry is then a no-op the store releases. Only a
+  // direct caller takes — and so releases — it here.
   const lease = tryAcquireRepoLease(cwd, jobKey);
   if (!lease.ok) throw new Error(repoLeaseRefusal(lease.holder, "update_pr"));
+  const lockHeld = !lease.reentrant;
   let worktree: DispatchWorktree | undefined;
   try {
     note(`fetching ${info.headRef}`);
@@ -169,6 +173,6 @@ export async function runUpdatePr(
     });
   } finally {
     if (worktree) await removeWorktree(cwd, worktree);
-    releaseRepoLease(cwd);
+    if (lockHeld) releaseRepoLease(cwd);
   }
 }

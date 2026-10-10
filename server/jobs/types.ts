@@ -162,6 +162,13 @@ export interface JobView {
    * (omitted) when no cancel was ever requested.
    */
   cancelRequested?: boolean;
+  /**
+   * Set only on a `pending` implement-class job (an `implement` dispatch or `update_pr`) whose
+   * repo's per-repo lease another job holds: that job's id. The job starts, FIFO per repo, when
+   * the holder finishes; `job_cancel` works on it like on any pending job. Omitted otherwise —
+   * a pending job without it is waiting for a concurrency slot instead.
+   */
+  queuedBehind?: string;
 }
 
 export function toJobView(job: JobRecord): JobView {

@@ -168,7 +168,9 @@ request destabilizes the stdio transport (and the SDK's 60s client timeout).
 Instead:
 
 1. The MCP tool **submits a job** to the always-on HTTP server
-   (`POST /api/jobs`) and returns `{ jobId, status }` immediately.
+   (`POST /api/jobs`) and returns `{ jobId, status }` immediately. (Submit still runs the
+   synchronous refusals; a `dispatch` with `branch` adds one `git ls-remote` against origin,
+   capped at 5 s, under the MCP client's 10 s submit abort.)
 2. The HTTP server (LaunchAgent, durable) runs the job in the background and
    persists state to **bun:sqlite** (`~/.local/share/agent-gateway/jobs.db`), not
    `/tmp` for the same sweep reason as the logs (`server/jobs/store.ts`). The
@@ -268,11 +270,12 @@ failed/interrupted → `failed`, cancelled → `cancelled`.
 
 Job lifecycle events log to `~/Library/Logs/agent-gateway.jsonl` (`job.create` /
 `job.start` / `job.done` / `job.fail` / `job.cancelled` / `job.recover` /
-`job.requeue` / `job.shutdown_abandoned`). Inspect the queue:
+`job.requeue` / `job.shutdown_abandoned` / `job.lease_unavailable`). Inspect the queue:
 `curl -s localhost:7705/api/jobs | jq`.
 **`GET /api/jobs/health`** → `{ ok, running, pending, failedLastHour,
-interruptedLastHour, oldestPendingAgeMs, lastFailure, draining, sinceBootMs,
-recoveredFromDrain }`, `ok: false` when ≥3 jobs failed in the last hour, or
+interruptedLastHour, oldestPendingAgeMs, leaseQueued, lastFailure, draining, sinceBootMs,
+recoveredFromDrain }` (`leaseQueued` counts pending rows waiting behind a per-repo implement
+lease; they are excluded from `oldestPendingAgeMs`), `ok: false` when ≥3 jobs failed in the last hour, or
 the oldest pending job has waited >15 min **and neither grace applies**: a
 drain intentionally stalls promotion, so queue backup alone never trips it
 while one is in flight (`draining: true`); the same backlog also gets a
@@ -450,8 +453,11 @@ re-queues it once, like `check`. `review`'s angle router runs on the same helper
 ### Dispatch — bounded episodes inside another repo
 
 The `dispatch` job hands ONE episode to a worker session running inside a named
-repo — an OpenCode worker by default (harness per route, see `GET /api/routing`;
-`claude -p` only on a Claude-id route or the Max fallback) — so it works with that
+repo — an OpenCode worker by default (harness per route, see `GET /api/routing`).
+The Claude harness (`claude -p`) is explicit opt-in: `AGENT_GATEWAY_HARNESS_DISPATCH=claude`
+paired with a Claude `AGENT_GATEWAY_MODEL_DISPATCH`, the `kind: "editorial"` param (route
+`dispatch_editorial`: AGENTS.md/docs/prose briefs run on a Claude model), or the automatic
+Max reverse fallback after an IU failure — so it works with that
 repo's own `AGENTS.md`/`CLAUDE.md`/rules/skills in context. Callers are warden and
 interactive sessions; an observer like Hermes files work through `warden run`, not
 directly. One episode, one verdict, no steering (mid-run redirection is an
@@ -499,9 +505,9 @@ updated|up_to_date|conflict, headSha, checks}`; checks are skipped when nothing 
 red result is still pushed (the merge train reads `checks`). **One implement-class episode
 per repo at a time, across every caller** (`server/lib/repo-lease.ts`, in-process map —
 exact because the server is single-process): worktree, in-place and `update_pr` all take it;
-a second is refused with the holder's job id. `DISPATCH_SCHEMA_VERSION` is 5 since
-`checks_tool_failed` (the repo's `check` tool threw before it could grade the diff —
-an infrastructure failure, re-run the dispatch) split out from `checks_failed`; warden's
+a second **queues** (`pending`, `queuedBehind: <holder jobId>`, FIFO per repo, promoted when the holder finishes; lease-queued rows are excluded from `oldestPendingAgeMs`). Static refusals (policy, in-place/sensitive/`revisionOf` rules, bad `branch`/`prTitle`) are synchronous 400s at `POST /api/jobs` with no job row. Callers may set `branch` (`dispatch/<slug>`) and `prTitle`. `DISPATCH_SCHEMA_VERSION` is 6 (new optional `fallbackWithheld` output field and `branch`/`prTitle`/`kind` inputs; 5 introduced
+`checks_tool_failed`, the repo's `check` tool throwing before it could grade the diff —
+an infrastructure failure, re-run the dispatch — split out from `checks_failed`); warden's
 pin moves with it.
 
 **`sensitive`** opens `investigate` for secret-bearing repos (`dotfiles-private`,

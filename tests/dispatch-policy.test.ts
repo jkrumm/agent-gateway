@@ -554,10 +554,10 @@ describe("POST /api/jobs refuses at submit, before a job row exists", () => {
     rmSync(ruled, { recursive: true, force: true });
   });
 
-  test("a non-string cwd falls through to the handler's own validation, unrefused here", async () => {
-    // Deliberate: the route only engages when it can positively determine a violation. A
-    // malformed `cwd` is zod's error to report at execution, and reshaping that error is not
-    // this gate's job — but the fallthrough must be a real, tested path, not an accident.
+  test("a non-string cwd is refused as invalid params, before a job row exists", async () => {
+    // The policy gate cannot judge a malformed `cwd`, but the param-shape check right behind it
+    // can: a submission that would only fail zod at execution is a synchronous 400 now.
+    const before = listJobs().length;
     const res = await jobsRoutes.handle(
       new Request("http://localhost/api/jobs", {
         method: "POST",
@@ -565,9 +565,12 @@ describe("POST /api/jobs refuses at submit, before a job row exists", () => {
         body: JSON.stringify({ tool: "dispatch", params: { cwd: 42, tier: "implement" } }),
       }),
     );
-    expect(res.status).not.toBe(400);
-    const body = (await res.json()) as { ok: boolean };
-    expect(body.ok).toBe(true);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("dispatch refused: invalid params");
+    expect(body.error).toContain("cwd");
+    expect(listJobs().length).toBe(before);
   });
 });
 

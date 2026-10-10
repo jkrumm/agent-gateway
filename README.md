@@ -5,7 +5,7 @@ loopback only, LaunchAgent `com.jkrumm.agent-gateway`) that hosts a durable job 
 plus an MCP stdio server (`server/mcp.ts`) that every Claude Code session spawns to submit
 work to it. Tools: `check`, `review`, `dispatch`, `overview`, `narrative`, `otel`,
 `read_image`, `read_drawing`, `excalidraw_diagram`, `job_status`/`job_wait`. Each long tool
-runs as a background job in a worker session (`claude -p` or OpenCode, per the route's
+runs as a background job in a worker session (OpenCode by default for dispatch, `claude -p` elsewhere, per the route's
 harness) on the model and backend the routing table assigns it. Mini-only by design — see the dotfiles global CLAUDE.md.
 
 ## Install / reload

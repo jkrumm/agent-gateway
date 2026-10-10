@@ -125,6 +125,7 @@ describe("evaluateJobHealth", () => {
     failedLastHour: 0,
     interruptedLastHour: 0,
     oldestPendingAgeMs: null,
+    leaseQueued: 0,
     lastFailure: null,
     draining: false,
     sinceBootMs: BOOT_HEALTH_GRACE_MS + 1,
