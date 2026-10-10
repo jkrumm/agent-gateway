@@ -414,6 +414,19 @@ mode and silently ends the session, so there is no "ask and it just works"
 here, unlike an interactive opencode session. **Never `--pure`** — measured
 2026-09-24 to hang.
 
+**A dead IU endpoint must never hang an opencode run.** `opencode run` retries connect errors
+and 5xx forever. `runOpencodeAttempt` therefore probes the IU OpenAI base (`fetch`, abort after
+`AGENT_GATEWAY_OPENCODE_PREFLIGHT_MS`, default 5000; any HTTP response counts as reachable)
+before every spawn and, on failure, returns a connection-class error without spawning — the
+existing retry ladder, Max fallback and circuit breaker read it as a transport failure
+(`opencode-runner.ts`, `preflightIuEndpoint`). Mid-run there is no extra budget: the measured
+NDJSON streams carry no retry event (only terminal `error` events), retry chatter goes to
+stderr, which never resets the idle clock, so the 5 min idle watchdog is the backstop. Any
+manual or worker probe uses **`opencode-safe`** (`scripts/opencode-safe`, linked by `make
+install-cli`): `curl --max-time 5` against the IU base (`IU_OPENAI_BASE`, else `IU_BASE_URL`,
+else the `claude-sdk-base-url` Keychain item), then `exec timeout ${OPENCODE_SAFE_TIMEOUT:-120}
+opencode …`; exit 75 when unreachable. Never a bare `opencode run`.
+
 **`otel` also injects the real ClickStack/HyperDX MCP** (bearer-authed
 `http` server) into its own worker session — key resolution fails soft
 (local `.env`, then `HYPERDX_PROD_ACCESS_KEY`, then `secrets-run` — never a

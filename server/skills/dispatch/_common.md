@@ -73,6 +73,9 @@ what tier you are running:
   `op://` reference. You do not need one; if you believe you do, that belief is the finding.
 - **No network writes.** No `curl -X POST`, no webhook, no API call that changes remote
   state. Reading public documentation is fine.
+- **No bare `opencode run`.** If you must probe opencode, run `opencode-safe run …` — it
+  fails in seconds (exit 75) when the model endpoint is unreachable and kills opencode after
+  120 s. A bare `opencode run` retries a dead endpoint forever and wedges the episode.
 - **No dispatching.** You may not open another episode. The tooling refuses it structurally;
   attempting it wastes a turn.
 - **No git remote operations.** Never `push`, `fetch --prune`, `tag`, or touch another

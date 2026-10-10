@@ -63,6 +63,8 @@ Logs: `~/Library/Logs/agent-gateway.jsonl` (structured, both processes), `agent-
 | `AGENT_GATEWAY_KUMA_PUSH_URL` (else `~/.config/uptime-kuma/agent-gateway-push-url`, chmod 600) | full Uptime Kuma push-monitor URL (`https://<kuma-host>/api/push/<token>`); each tick pushes `down` + reason when a route is degraded or the queue unhealthy, else `up`. Unset = no push, one warn, Kuma's missed-heartbeat alert fires |
 | `AGENT_GATEWAY_KUMA_PUSH_INTERVAL_MS` (60000) | Kuma heartbeat interval |
 | `AGENT_GATEWAY_BREAKER_COOLDOWN_MS` (300000) | how long a tripped `tool@iu/model` circuit breaker sends the first attempt straight to the route's fallback before one probe retries the primary |
+| `AGENT_GATEWAY_OPENCODE_PREFLIGHT_MS` (5000) | abort budget of the IU reachability probe run before every `opencode run` spawn; unreachable = attempt fails without spawning (transport failure for the retry/fallback/breaker ladder) |
+| `OPENCODE_SAFE_TIMEOUT` (120) | seconds before `scripts/opencode-safe` (installed as `opencode-safe` by `make install-cli`) kills the opencode it wraps; reads `IU_OPENAI_BASE`/`IU_BASE_URL`/Keychain for its 5 s preflight, exits 75 when unreachable |
 | `ARGO_URL` | Argo API base for the overview push (default `https://argo.jkrumm.com/api`) |
 
 The HTTP server gets `.env` from Bun's cwd auto-load; the MCP process reads the same file

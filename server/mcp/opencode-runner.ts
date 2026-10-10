@@ -65,6 +65,9 @@ const DB_LOCK_MAX_ATTEMPTS = 3;
 /** Full jitter range for a db-lock retry's backoff — see `dbLockRetryDelayMs`. */
 const DB_LOCK_RETRY_MIN_MS = 1_000;
 const DB_LOCK_RETRY_JITTER_MS = 3_000;
+/** Reachability-probe budget before any `opencode run` spawn — see `preflightIuEndpoint`.
+ *  Override: `AGENT_GATEWAY_OPENCODE_PREFLIGHT_MS` (read per call, so no reload for a test). */
+const DEFAULT_PREFLIGHT_MS = 5_000;
 
 /** `Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe", env })` (no explicit `stdin`, which
  *  defaults to `"ignore"`) is what every spawn site in this file actually produces — this
@@ -582,6 +585,50 @@ export function computeOpencodeCostUsd(
   );
 }
 
+// ── Endpoint preflight ──────────────────────────────────────────────────────────
+//
+// `opencode run` retries connect errors and 5xx forever (a stuck run once sat ~14 h against an
+// unreachable endpoint). The 5 min idle watchdog in `runOpencodeProcessLifecycle` is the only
+// mid-run bound — the measured NDJSON streams (tests/fixtures/opencode-events*.jsonl) carry NO
+// retry/progress-less event type, only terminal `error` events, and opencode's retry chatter
+// goes to stderr, which never resets the idle clock (only stdout chunks do) — so there is no
+// separate "retries without progress" budget to add. The unbounded case is a dead endpoint AT
+// SPAWN, which this probe closes in seconds: any HTTP response (401/404 included) = reachable,
+// only a connect error or the abort timeout = unreachable.
+
+export type IuPreflight = (
+  iuOpenaiBase: string,
+  timeoutMs: number,
+) => Promise<{ ok: true } | { ok: false; reason: string }>;
+
+/** The production probe. A fresh `fetch` per call (no cache): a reachable endpoint answers in
+ *  milliseconds, and a cached "reachable" is exactly what a mid-day outage would outlive. The
+ *  reason carries a connection-class token (`ETIMEDOUT` / `ECONNREFUSED` / `fetch failed`) so
+ *  `isRetryableSessionError`, `isIuServerError` and the circuit breaker
+ *  (`classifyBreakerOutcome`) all treat the failed attempt as a transport failure. */
+export const preflightIuEndpoint: IuPreflight = async (iuOpenaiBase, timeoutMs) => {
+  try {
+    const res = await fetch(iuOpenaiBase, {
+      method: "GET",
+      redirect: "manual",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    await res.body?.cancel();
+    return { ok: true };
+  } catch (err) {
+    if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+      return { ok: false, reason: `ETIMEDOUT after ${timeoutMs}ms` };
+    }
+    const code = (err as { code?: string } | null)?.code;
+    return { ok: false, reason: code === "ECONNREFUSED" ? code : "fetch failed (connect error)" };
+  }
+};
+
+function preflightBudgetMs(): number {
+  const raw = Number(process.env.AGENT_GATEWAY_OPENCODE_PREFLIGHT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_PREFLIGHT_MS;
+}
+
 // ── Concurrency: the shared opencode.db can report itself locked under concurrent starts ──
 
 const DB_LOCKED_RE = /database is locked/i;
@@ -767,6 +814,12 @@ export interface OpencodeAttemptContext {
   variant?: string;
 }
 
+/** Test seams — production passes nothing. */
+export interface OpencodeAttemptDeps {
+  preflight?: IuPreflight;
+  spawn?: (argv: string[], options: Parameters<typeof Bun.spawn>[1]) => OpencodeSubprocess;
+}
+
 /** One opencode session launch — the harness counterpart to `runSessionAttempt`'s claude
  *  path, called from there when `resolveHarness()` resolves `"opencode"`. Always the PRIMARY
  *  attempt: a forced (fallback) attempt is never opencode (`resolveHarness`'s doc comment),
@@ -776,6 +829,7 @@ export async function runOpencodeAttempt<T>(
   opts: SessionOptions<T>,
   turnsRef: { current: number },
   ctx: OpencodeAttemptContext,
+  deps: OpencodeAttemptDeps = {},
 ): Promise<SessionResult<T>> {
   const {
     cwd,
@@ -875,6 +929,25 @@ export async function runOpencodeAttempt<T>(
     };
   }
 
+  // Never spawn against a dead endpoint: `opencode run` would retry it forever. Classified as
+  // a transport failure (connection-class text, no `iuConfigError` — the breaker must count it).
+  const probe = await (deps.preflight ?? preflightIuEndpoint)(iuOpenaiBase, preflightBudgetMs());
+  if (!probe.ok) {
+    const error = `IU endpoint unreachable before opencode spawn: ${probe.reason}`;
+    runnerLogger().error(
+      { event: "session.opencode_preflight_failed", project: cwd, ...errCtx, reason: probe.reason },
+      "IU endpoint unreachable — opencode not spawned",
+    );
+    return {
+      ok: false,
+      error,
+      classificationText: error,
+      hadApiRetry: false,
+      backend,
+      model,
+    };
+  }
+
   const opencodeConfigContent = JSON.stringify(buildOpencodeConfig({ model, readOnly }));
   const env = buildOpencodeEnv({ tool, extraEnv, iuKey, iuOpenaiBase, opencodeConfigContent });
 
@@ -913,7 +986,9 @@ export async function runOpencodeAttempt<T>(
     if (jobId !== undefined && isCancelled?.(jobId)) {
       throw new SessionCancelledError(jobId);
     }
-    const proc = Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe", env });
+    const proc = deps.spawn
+      ? deps.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe", env })
+      : Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe", env });
     const streamResult = await runOpencodeProcessLifecycle(proc, {
       jobId,
       cwd,

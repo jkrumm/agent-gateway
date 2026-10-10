@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# opencode-safe — `opencode` that cannot hang on a dead model endpoint.
+#
+# `opencode run` retries connect errors and 5xx forever. This wrapper (1) probes the IU
+# OpenAI base with `curl --max-time 5` first and (2) runs opencode under `timeout`.
+# Any HTTP response (401/404 included) counts as reachable; only a connect error or the
+# 5 s timeout does not.
+#
+# Reads (first hit wins), the same sources server/lib/iu-openai.ts + the runner use:
+#   IU_OPENAI_BASE    the OpenAI base the runner hands every opencode worker (…/openai/v1)
+#   IU_BASE_URL       the Anthropic base (…/anthropic) — rewritten to …/openai/v1
+#   Keychain item     `claude-sdk-base-url` (macOS `security`), same rewrite
+# Tunables:
+#   OPENCODE_SAFE_TIMEOUT   seconds before opencode is killed (default 120)
+#
+# Exit 75 (EX_TEMPFAIL) + one stderr line when the endpoint is unreachable or its base
+# cannot be resolved. Otherwise exits with opencode's own status (124 = timed out).
+# Worker use: never run a bare `opencode run` as a probe — use `opencode-safe run …`.
+set -euo pipefail
+
+fail() {
+  echo "opencode-safe: $1" >&2
+  exit 75
+}
+
+derive_openai_base() {
+  local raw="$1"
+  if [[ "$raw" == */anthropic || "$raw" == */anthropic/ ]]; then
+    raw="${raw%/}"
+    echo "${raw%/anthropic}/openai/v1"
+  else
+    echo "$raw"
+  fi
+}
+
+base="${IU_OPENAI_BASE:-}"
+if [[ -z "$base" && -n "${IU_BASE_URL:-}" ]]; then
+  base="$(derive_openai_base "$IU_BASE_URL")"
+fi
+if [[ -z "$base" ]] && command -v security >/dev/null 2>&1; then
+  raw="$(security find-generic-password -s claude-sdk-base-url -w 2>/dev/null || true)"
+  [[ -n "$raw" ]] && base="$(derive_openai_base "$raw")"
+fi
+[[ -n "$base" ]] || fail "IU base URL not resolvable (set IU_OPENAI_BASE or IU_BASE_URL) — not running opencode"
+
+curl --silent --output /dev/null --max-time 5 "$base" ||
+  fail "IU endpoint unreachable (no HTTP response within 5s) — not running opencode"
+
+if command -v timeout >/dev/null 2>&1; then
+  tmo=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+  tmo=gtimeout
+else
+  fail "no timeout/gtimeout binary on PATH — refusing to run opencode unbounded"
+fi
+
+exec "$tmo" "${OPENCODE_SAFE_TIMEOUT:-120}" opencode "$@"
