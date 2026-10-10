@@ -30,6 +30,11 @@ whatever needs rewriting so the page reads as if it had always said this.
 - Business/product level, not implementation trivia. "Added retries for the weather API" is
   usually not narrative-worthy; "the service now survives the upstream provider's outages" is,
   if that's genuinely a shift in what the project can do.
+- Describe the system as it is now. Old commit messages and previous pages can carry terms for
+  things since deleted. Warden has no merge-approval gate (removed 2026-10-02): it lands PRs
+  through its own merge train (rebase, checks and review on the SHA, squash, deploy, verify,
+  auto-revert). A term that describes a deleted mechanism goes into `howItGotHere` as removed,
+  or out of the page; it never stays in `whereItStands` or `whatItIs`.
 - No filler, no praise, no hedging, no AI phrasing ("it's worth noting", "in today's fast-paced
   world", "this represents a significant step"). State the fact.
 
