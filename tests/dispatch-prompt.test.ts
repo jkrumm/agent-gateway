@@ -324,7 +324,8 @@ describe("TIERS", () => {
       const prompt = await loadSkillPrompt(tier);
       expect(prompt).toContain("Choosing `human`");
       expect(prompt).toContain("reversible");
-      expect(prompt).toContain("A `human` verdict must carry a `decisionQuestion`");
+      expect(prompt).toContain("`human` verdict must carry a `decisionQuestion`");
+      expect(prompt).toContain("`escalationCategory`");
     }
   });
 });

@@ -293,7 +293,7 @@ left to do, rather than starting over or duplicating work already present.
 Your entire final message must be a single JSON object (optionally wrapped in one
 \`\`\`json fence) — no preamble such as "Here's what I found", no markdown headings, no
 commentary before or after, and never a tool call. Include \`rootCause\` (a kebab-case key),
-and \`decisionQuestion\` only when \`nextAction\` is \`human\`. If you set \`owningRepo\`, \`nextAction\` must still be \`human\` (with a \`decisionQuestion\`). \`summary\` must be under 200 characters, \`verdict\` under 600
+and \`decisionQuestion\` plus \`escalationCategory\` only when \`nextAction\` is \`human\`. If you set \`owningRepo\`, \`nextAction\` must still be \`human\` (with a \`decisionQuestion\`). \`summary\` must be under 200 characters, \`verdict\` under 600
 and \`recommendation\` under 400, and \`confidence\` / \`nextAction\` must be one of the listed values
 exactly. If your reduced budget only supports a partial answer, say so in \`verdict\` and set
 \`confidence: "low"\` — an honest thin verdict is correct, a fabricated thorough one is not.`;
@@ -792,6 +792,7 @@ export function applySensitiveScan(
   const {
     rootCause: _rootCause,
     decisionQuestion: _decisionQuestion,
+    escalationCategory: _escalationCategory,
     owningRepo: _owningRepo,
     ...rest
   } = output;
@@ -1188,6 +1189,12 @@ export async function runDispatch(
           tier,
         },
         "worker returned nextAction human without a decisionQuestion",
+      );
+    }
+    if (data.nextAction === "human" && !data.escalationCategory) {
+      logger.warn(
+        { event: "dispatch.human_without_category", tool: "dispatch", project: cwd, tier },
+        "worker returned nextAction human without an escalationCategory",
       );
     }
     let artifactUrl: string | undefined;

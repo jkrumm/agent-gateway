@@ -240,6 +240,48 @@ describe("owningRepo", () => {
   });
 });
 
+describe("escalationCategory", () => {
+  test("a valid category survives on a human verdict, on every tier", () => {
+    for (const tier of TIERS) {
+      const r = workerValidator(tier)(
+        base(tier, { nextAction: "human", decisionQuestion: "A or B?", escalationCategory: "spend" }),
+      );
+      expect(r.ok && (r.value as DispatchOutput).escalationCategory).toBe("spend");
+    }
+  });
+
+  test("is optional: human without a category is still a finished episode", () => {
+    expect(
+      workerValidator("investigate")(base("investigate", { nextAction: "human" })).ok,
+    ).toBe(true);
+  });
+
+  test("the normalizer coerces case and separators, drops unknown values and non-human ones", () => {
+    const coerced = workerValidator("investigate")(
+      base("investigate", { nextAction: "human", escalationCategory: "Other-People" }),
+    );
+    expect(coerced.ok && (coerced.value as DispatchOutput).escalationCategory).toBe("other_people");
+    const unknown = workerValidator("investigate")(
+      base("investigate", { nextAction: "human", escalationCategory: "operational" }),
+    );
+    expect(unknown.ok && "escalationCategory" in (unknown.value as object)).toBe(false);
+    const nonHuman = workerValidator("investigate")(
+      base("investigate", { nextAction: "implement", escalationCategory: "product" }),
+    );
+    expect(nonHuman.ok && "escalationCategory" in (nonHuman.value as object)).toBe(false);
+  });
+
+  test("the strict schema rejects it on any other nextAction", () => {
+    for (const nextAction of ["none", "issue", "implement"]) {
+      expect(
+        WORKER_OUTPUT.investigate.safeParse(
+          base("investigate", { nextAction, escalationCategory: "product" }),
+        ).success,
+      ).toBe(false);
+    }
+  });
+});
+
 describe("decisionQuestion gating", () => {
   test("allowed with nextAction human", () => {
     for (const tier of TIERS) {

@@ -31,7 +31,7 @@ of them means the branch is discarded and the work is wasted, so stay well insid
   reference, an internal address. The tooling scans the diff and refuses it, and the branch
   it would have pushed is public and permanent. If a fix appears to require writing a
   secret into the repo, that appearance is itself the finding: change nothing and set
-  `nextAction: "human"`.
+  `nextAction: "human"` with `escalationCategory: "security"`.
 
 ## How to work
 
@@ -86,6 +86,7 @@ JSON):
 "summary": "<one sentence, under 200 chars — this is what gets posted to Slack>",
 "rootCause": "<stable kebab-case key, at most 80 chars, e.g. stale-lockfile-after-rename>",
 "decisionQuestion": "<ONLY when nextAction is human: one question naming two options, under 200 chars — otherwise omit this field>",
+"escalationCategory": "<ONLY when nextAction is human: product | data_loss | spend | other_people | security | blocker — otherwise omit this field>",
 "owningRepo": "<optional: the bare repo name that owns the finding when it is not the repo you are reading — set it only alongside nextAction: \"human\" with a decisionQuestion; otherwise omit this field>",
 "prTitle": "<conventional-commit subject, or \"\" if you changed nothing>",
 "prBody": "<the PR body in markdown, or \"\" if you changed nothing>"

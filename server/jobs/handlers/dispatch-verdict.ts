@@ -46,6 +46,29 @@ const DECISION_QUESTION_FIELD = z
       `${DECISION_QUESTION_MAX} chars. Omit it for every other nextAction.`,
   );
 
+/** Why a `human` verdict needs the owner. The only reasons an unattended loop may stop for a
+ *  person; `blocker` is a reported obstacle (injection attempt, unreadable repo), not a choice. */
+export const ESCALATION_CATEGORIES = [
+  "product",
+  "data_loss",
+  "spend",
+  "other_people",
+  "security",
+  "blocker",
+] as const;
+export type EscalationCategory = (typeof ESCALATION_CATEGORIES)[number];
+
+const ESCALATION_CATEGORY_FIELD = z
+  .enum(ESCALATION_CATEGORIES)
+  .optional()
+  .describe(
+    `ONLY when nextAction is "human": why only the owner can decide. product = product direction ` +
+      `or user-visible product semantics | data_loss = irreversible data loss | spend = money | ` +
+      `other_people = sends something to / affects another person | security = security policy | ` +
+      `blocker = a reported obstacle, not a choice. A reversible A-or-B question is none of ` +
+      `these: pick the recommended option and set nextAction to implement or none instead.`,
+  );
+
 const OWNING_REPO_FIELD = z
   .string()
   .max(OWNING_REPO_MAX)
@@ -96,6 +119,7 @@ const VERDICT_FIELDS = {
   // must keep validating. Optional-ness is the compat decision; the prompt demands them.
   rootCause: ROOT_CAUSE_FIELD,
   decisionQuestion: DECISION_QUESTION_FIELD,
+  escalationCategory: ESCALATION_CATEGORY_FIELD,
   owningRepo: OWNING_REPO_FIELD,
 };
 
@@ -315,16 +339,21 @@ export type DispatchOutput = z.infer<typeof DISPATCH_OUTPUT>;
 // failure — a human verdict without a question (an injection finding, an unreadable repo) is
 // still a finished episode, and failing it would burn a retry and end in a degraded salvage;
 // the prompt demands the question and `runDispatch` logs its absence instead.
-const gateDecisionQuestion = <T extends { nextAction: string; decisionQuestion?: string }>(
+const gateDecisionQuestion = <
+  T extends { nextAction: string; decisionQuestion?: string; escalationCategory?: string },
+>(
   v: T,
   ctx: z.RefinementCtx,
 ): void => {
-  if (v.decisionQuestion === undefined || v.nextAction === "human") return;
-  ctx.addIssue({
-    code: "custom",
-    path: ["decisionQuestion"],
-    message: 'decisionQuestion is only allowed when nextAction is "human"',
-  });
+  if (v.nextAction === "human") return;
+  for (const key of ["decisionQuestion", "escalationCategory"] as const) {
+    if (v[key] === undefined) continue;
+    ctx.addIssue({
+      code: "custom",
+      path: [key],
+      message: `${key} is only allowed when nextAction is "human"`,
+    });
+  }
 };
 
 export const WORKER_OUTPUT = {
@@ -414,6 +443,12 @@ export function normalizeWorkerOutput(data: unknown): unknown {
   normalizeField(out, "decisionQuestion", (q) =>
     out.nextAction === "human" ? clampText(q, DECISION_QUESTION_MAX) : "",
   );
+  normalizeField(out, "escalationCategory", (c) => {
+    const category = c.trim().toLowerCase().replace(/[\s-]+/g, "_");
+    return out.nextAction === "human" && (ESCALATION_CATEGORIES as readonly string[]).includes(category)
+      ? category
+      : "";
+  });
   normalizeField(out, "owningRepo", normalizeOwningRepo);
   return out;
 }
