@@ -614,12 +614,25 @@ export const preflightIuEndpoint: IuPreflight = async (iuOpenaiBase, timeoutMs) 
       signal: AbortSignal.timeout(timeoutMs),
     });
     await res.body?.cancel();
+    // A gateway that answers with a server error is as dead to `opencode run` as a refused
+    // connection (it retries 5xx forever), so the closed 5xx set counts as unreachable.
+    // 4xx/2xx/3xx (an unauthenticated GET on the base is normally 401/404) is reachable.
+    if (
+      res.status === 500 ||
+      res.status === 502 ||
+      res.status === 503 ||
+      res.status === 504 ||
+      res.status === 529
+    ) {
+      return { ok: false, reason: `HTTP ${res.status}` };
+    }
     return { ok: true };
   } catch (err) {
     if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
       return { ok: false, reason: `ETIMEDOUT after ${timeoutMs}ms` };
     }
-    const code = (err as { code?: string } | null)?.code;
+    // fetch rejects with `TypeError: fetch failed`; the errno lives on `cause`.
+    const code = (err as { cause?: { code?: string } }).cause?.code;
     return { ok: false, reason: code === "ECONNREFUSED" ? code : "fetch failed (connect error)" };
   }
 };
@@ -931,6 +944,7 @@ export async function runOpencodeAttempt<T>(
 
   // Never spawn against a dead endpoint: `opencode run` would retry it forever. Classified as
   // a transport failure (connection-class text, no `iuConfigError` — the breaker must count it).
+  if (jobId !== undefined && isCancelled?.(jobId)) throw new SessionCancelledError(jobId);
   const probe = await (deps.preflight ?? preflightIuEndpoint)(iuOpenaiBase, preflightBudgetMs());
   if (!probe.ok) {
     const error = `IU endpoint unreachable before opencode spawn: ${probe.reason}`;
@@ -938,6 +952,18 @@ export async function runOpencodeAttempt<T>(
       { event: "session.opencode_preflight_failed", project: cwd, ...errCtx, reason: probe.reason },
       "IU endpoint unreachable — opencode not spawned",
     );
+    writeAttribution({
+      sessionId: sessionUuid,
+      tool: tool ?? "unknown",
+      project: cwd,
+      model,
+      backend,
+      harness: "opencode",
+      tsStart,
+      tsEnd: new Date().toISOString(),
+      outcome: "error",
+      reason: "opencode_preflight_failed",
+    });
     return {
       ok: false,
       error,

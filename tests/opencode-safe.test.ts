@@ -1,4 +1,4 @@
-// scripts/opencode-safe: preflight curl + `exec timeout … opencode`. Exit 75 on an
+// scripts/opencode-safe: preflight curl + `exec opencode` (timeout only when OPENCODE_SAFE_TIMEOUT is set). Exit 75 on an
 // unreachable/unresolvable IU base; otherwise opencode's own behaviour. No real opencode:
 // a stub on PATH records its argv.
 
@@ -46,6 +46,28 @@ describe("scripts/opencode-safe", () => {
     expect(ms).toBeLessThan(10_000);
     expect(stderr.trim().split("\n")).toHaveLength(1);
     expect(stderr).toContain("opencode-safe: IU endpoint unreachable");
+  });
+
+  test("a 503 from the endpoint exits 75, never runs opencode", async () => {
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => new Response("down", { status: 503 }),
+    });
+    try {
+      const { code, stderr } = await run({
+        IU_OPENAI_BASE: `http://127.0.0.1:${server.port}/openai/v1`,
+      });
+      expect(code).toBe(75);
+      expect(stderr).toContain("HTTP 503");
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("no resolvable base exits 78 (config, not a retryable outage)", async () => {
+    const { code } = await run({});
+    expect(code).toBe(78);
   });
 
   test("reachable (404 counts): execs opencode with the original argv and its exit code", async () => {

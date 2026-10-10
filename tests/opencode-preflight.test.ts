@@ -119,7 +119,25 @@ describe("runOpencodeAttempt — endpoint preflight", () => {
 });
 
 describe("preflightIuEndpoint — real loopback sockets", () => {
-  test("any HTTP response (even 404) counts as reachable", async () => {
+  test("a 5xx answer counts as unreachable (opencode would retry it forever)", async () => {
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => new Response("down", { status: 503 }),
+    });
+    try {
+      expect(await preflightIuEndpoint(`http://127.0.0.1:${server.port}/openai/v1`, 2_000)).toEqual(
+        {
+          ok: false,
+          reason: "HTTP 503",
+        },
+      );
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("any non-5xx HTTP response (even 404) counts as reachable", async () => {
     const server = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
