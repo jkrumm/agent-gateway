@@ -43,6 +43,14 @@ Phase 3 — Synthesis (single session on the `review` route's model, ~15s)
 └── Deduplicates, resolves conflicts, classifies findings
 ```
 
+Each Phase 2 angle session is **retried once** on failure (`ANGLE_MAX_ATTEMPTS = 2`).
+`session-runner`'s own ladder retries only transport-class errors, so a non-transport
+failure — an idle-watchdog kill on the claude/Max route, a malformed final message — is
+returned as final and would otherwise force the whole review to `needs-human`/`blocker`
+on a single flaky attempt; the retry is logged as `review.angle_retry`. A **second**
+failure stands: the angle is recorded as failed and the post-synthesis safety net
+escalates the review to `needs-human`/`blocker`.
+
 ## Agent Selection
 
 Selection has two layers. A **deterministic floor** is picked from changed file
@@ -125,11 +133,11 @@ External tools run in parallel with agents:
 
 ### Outcome Values
 
-| Outcome       | Means                                              | Action                          |
-| ------------- | -------------------------------------------------- | ------------------------------- |
-| `clean`       | Zero findings                                      | Ship it                         |
-| `actionable`  | Has blocking/improvements/testGaps, no discussions | Apply fixes, then ship          |
-| `needs-human` | Has owner-only discussions, or a reviewer failed   | Human reviews discussions first |
+| Outcome       | Means                                                                  | Action                          |
+| ------------- | ---------------------------------------------------------------------- | ------------------------------- |
+| `clean`       | Zero findings                                                          | Ship it                         |
+| `actionable`  | Has blocking/improvements/testGaps, no discussions                     | Apply fixes, then ship          |
+| `needs-human` | Has owner-only discussions, or a reviewer failed (after its one retry) | Human reviews discussions first |
 
 ## Rule Loading
 
