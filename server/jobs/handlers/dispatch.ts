@@ -1186,7 +1186,12 @@ export async function runDispatch(
       for (const field of ["decisionQuestion", "escalationCategory"] as const) {
         if (data[field]) continue;
         logger.warn(
-          { event: `dispatch.human_without_${field === "decisionQuestion" ? "question" : "category"}`, tool: "dispatch", project: cwd, tier },
+          {
+            event: `dispatch.human_without_${field === "decisionQuestion" ? "question" : "category"}`,
+            tool: "dispatch",
+            project: cwd,
+            tier,
+          },
           `worker returned nextAction human without a ${field}`,
         );
       }

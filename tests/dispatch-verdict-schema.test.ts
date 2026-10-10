@@ -244,16 +244,20 @@ describe("escalationCategory", () => {
   test("a valid category survives on a human verdict, on every tier", () => {
     for (const tier of TIERS) {
       const r = workerValidator(tier)(
-        base(tier, { nextAction: "human", decisionQuestion: "A or B?", escalationCategory: "spend" }),
+        base(tier, {
+          nextAction: "human",
+          decisionQuestion: "A or B?",
+          escalationCategory: "spend",
+        }),
       );
       expect(r.ok && (r.value as DispatchOutput).escalationCategory).toBe("spend");
     }
   });
 
   test("is optional: human without a category is still a finished episode", () => {
-    expect(
-      workerValidator("investigate")(base("investigate", { nextAction: "human" })).ok,
-    ).toBe(true);
+    expect(workerValidator("investigate")(base("investigate", { nextAction: "human" })).ok).toBe(
+      true,
+    );
   });
 
   test("the normalizer coerces case and separators, drops unknown values and non-human ones", () => {

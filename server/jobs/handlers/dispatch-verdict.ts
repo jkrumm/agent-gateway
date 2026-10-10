@@ -446,8 +446,12 @@ export function normalizeWorkerOutput(data: unknown): unknown {
     out.nextAction === "human" ? clampText(q, DECISION_QUESTION_MAX) : "",
   );
   normalizeField(out, "escalationCategory", (c) => {
-    const category = c.trim().toLowerCase().replace(/[\s-]+/g, "_");
-    return out.nextAction === "human" && (ESCALATION_CATEGORIES as readonly string[]).includes(category)
+    const category = c
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, "_");
+    return out.nextAction === "human" &&
+      (ESCALATION_CATEGORIES as readonly string[]).includes(category)
       ? category
       : "";
   });
