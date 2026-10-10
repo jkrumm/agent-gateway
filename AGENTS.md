@@ -518,7 +518,7 @@ updated|up_to_date|conflict, headSha, checks}`; checks are skipped when nothing 
 red result is still pushed (the merge train reads `checks`). **One implement-class episode
 per repo at a time, across every caller** (`server/lib/repo-lease.ts`, in-process map —
 exact because the server is single-process): worktree, in-place and `update_pr` all take it;
-a second **queues** (`pending`, `queuedBehind: <holder jobId>`, FIFO per repo, promoted when the holder finishes; lease-queued rows are excluded from `oldestPendingAgeMs`). Static refusals (policy, in-place/sensitive/`revisionOf` rules, bad `branch`/`prTitle`) are synchronous 400s at `POST /api/jobs` with no job row. Callers may set `branch` (`dispatch/<slug>`) and `prTitle`. `DISPATCH_SCHEMA_VERSION` is 6 (new optional `fallbackWithheld` output field and `branch`/`prTitle`/`kind` inputs; 5 introduced
+a second **queues** (`pending`, `queuedBehind: <holder jobId>`, FIFO per repo, promoted when the holder finishes; lease-queued rows are excluded from `oldestPendingAgeMs`). Static refusals (policy, in-place/sensitive/`revisionOf` rules, bad `branch`/`prTitle`) are synchronous 400s at `POST /api/jobs` with no job row. Callers may set `branch` (`dispatch/<slug>`) and `prTitle`. `DISPATCH_SCHEMA_VERSION` is 7 (7 added the optional `escalationCategory`, `human` verdicts only: product | data_loss | spend | other_people | security | blocker; 6 added the optional `fallbackWithheld` output field and `branch`/`prTitle`/`kind` inputs; 5 introduced
 `checks_tool_failed`, the repo's `check` tool throwing before it could grade the diff —
 an infrastructure failure, re-run the dispatch — split out from `checks_failed`); warden's
 pin moves with it.

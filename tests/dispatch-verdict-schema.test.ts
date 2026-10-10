@@ -68,7 +68,7 @@ describe("worker schema — old shape and new fields", () => {
   });
 
   test("the schema version stays at the value warden pins", () => {
-    expect(DISPATCH_SCHEMA_VERSION).toBe(6);
+    expect(DISPATCH_SCHEMA_VERSION).toBe(7);
   });
 
   test("rootCause must be kebab-case and at most 80 chars", () => {
@@ -279,6 +279,31 @@ describe("escalationCategory", () => {
         ).success,
       ).toBe(false);
     }
+  });
+});
+
+describe("escalationCategory in the output and JSON schema", () => {
+  test("DISPATCH_OUTPUT accepts a human verdict carrying it", () => {
+    const r = DISPATCH_OUTPUT.safeParse({
+      ...(base("investigate", { nextAction: "human", escalationCategory: "spend" }) as object),
+      outcome: "verdict_only",
+      schemaVersion: DISPATCH_SCHEMA_VERSION,
+    });
+    expect(r.success).toBe(true);
+  });
+
+  test("the worker JSON schema advertises the enum", () => {
+    const js = JSON.stringify(z.toJSONSchema(WORKER_OUTPUT.investigate));
+    for (const c of ["product", "data_loss", "spend", "other_people", "security", "blocker"]) {
+      expect(js).toContain(`"${c}"`);
+    }
+  });
+
+  test("an empty value is dropped by the normalizer", () => {
+    const r = workerValidator("investigate")(
+      base("investigate", { nextAction: "human", escalationCategory: "  " }),
+    );
+    expect(r.ok && "escalationCategory" in (r.value as object)).toBe(false);
   });
 });
 

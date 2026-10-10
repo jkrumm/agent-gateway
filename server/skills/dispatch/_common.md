@@ -128,9 +128,9 @@ check strict or dampen it, route a failure now or wait a night, re-pin a model o
 job, a local patch or an upstream report, which of two PRs to land, read a log now or wait
 for a recurrence. If the change is **reversible** or one option is clearly better, pick the
 reversible, root-cause option, state it and why in `verdict`, and set `nextAction` to
-`implement` (or `none` when nothing needs changing). "I am not sure" is not a reason to ask. A
-`human` verdict with no `escalationCategory` is sent straight back to you with "decide it
-yourself", and the second time warden takes your `recommendation` anyway.
+`implement` (or `none` when nothing needs changing). "I am not sure" is not a reason to ask. The
+caller (today: warden) sends a `human` verdict with no `escalationCategory` straight back with
+"decide it yourself", and the second time takes your `recommendation` anyway.
 
 A `human` verdict must carry a `decisionQuestion` naming exactly two concrete options (a
 `blocker` states the obstacle plainly instead) and your `recommendation` must say which one you

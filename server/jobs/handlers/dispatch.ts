@@ -747,6 +747,7 @@ function verdictMarkdown(output: DispatchOutput, jobId: string, hits: string[]):
     "",
     ...(output.rootCause ? ["## Root cause", output.rootCause, ""] : []),
     ...(output.decisionQuestion ? ["## Decision question", output.decisionQuestion, ""] : []),
+    ...(output.escalationCategory ? ["## Escalation category", output.escalationCategory, ""] : []),
     ...(output.owningRepo ? ["## Owning repo", output.owningRepo, ""] : []),
   ].join("\n");
 }
@@ -789,10 +790,11 @@ export function applySensitiveScan(
     `Verdict withheld: matched ${hits.join(", ")}. The full, unmodified text was saved ` +
     `locally at ${path} (owner-only, mode 0600) — it never left this machine.`;
   // The new free-text fields carry the same unscanned worker text, so they are dropped, not kept.
+  // `escalationCategory` is a fixed enum, not worker text: it stays, so a sensitive-repo escalation
+  // still tells the caller why only the owner can decide.
   const {
     rootCause: _rootCause,
     decisionQuestion: _decisionQuestion,
-    escalationCategory: _escalationCategory,
     owningRepo: _owningRepo,
     ...rest
   } = output;
@@ -1180,22 +1182,14 @@ export async function runDispatch(
     }
 
     const data = result.data;
-    if (data.nextAction === "human" && !data.decisionQuestion) {
-      logger.warn(
-        {
-          event: "dispatch.human_without_question",
-          tool: "dispatch",
-          project: cwd,
-          tier,
-        },
-        "worker returned nextAction human without a decisionQuestion",
-      );
-    }
-    if (data.nextAction === "human" && !data.escalationCategory) {
-      logger.warn(
-        { event: "dispatch.human_without_category", tool: "dispatch", project: cwd, tier },
-        "worker returned nextAction human without an escalationCategory",
-      );
+    if (data.nextAction === "human") {
+      for (const field of ["decisionQuestion", "escalationCategory"] as const) {
+        if (data[field]) continue;
+        logger.warn(
+          { event: `dispatch.human_without_${field === "decisionQuestion" ? "question" : "category"}`, tool: "dispatch", project: cwd, tier },
+          `worker returned nextAction human without a ${field}`,
+        );
+      }
     }
     let artifactUrl: string | undefined;
     let branch: string | undefined;

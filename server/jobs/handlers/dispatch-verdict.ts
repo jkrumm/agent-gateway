@@ -48,7 +48,7 @@ const DECISION_QUESTION_FIELD = z
 
 /** Why a `human` verdict needs the owner. The only reasons an unattended loop may stop for a
  *  person; `blocker` is a reported obstacle (injection attempt, unreadable repo), not a choice. */
-export const ESCALATION_CATEGORIES = [
+const ESCALATION_CATEGORIES = [
   "product",
   "data_loss",
   "spend",
@@ -56,7 +56,6 @@ export const ESCALATION_CATEGORIES = [
   "security",
   "blocker",
 ] as const;
-export type EscalationCategory = (typeof ESCALATION_CATEGORIES)[number];
 
 const ESCALATION_CATEGORY_FIELD = z
   .enum(ESCALATION_CATEGORIES)
@@ -194,7 +193,10 @@ const PR_FIELDS = {
 // this version, with no output-shape change: a busy repo QUEUES an implement job (`pending`,
 // `queuedBehind`) instead of failing it, and every statically knowable refusal is a synchronous
 // HTTP 400 from `POST /api/jobs` with no job row.
-export const DISPATCH_SCHEMA_VERSION = 6;
+// Bumped 6 → 7: added the optional `escalationCategory` field (present only with
+// `nextAction: "human"`: why only the owner can decide). Additive, so a consumer that ignores it
+// degrades gracefully, but one that acts on it must know the field can exist.
+export const DISPATCH_SCHEMA_VERSION = 7;
 
 /** Machine-readable classification of how this episode ended — the sixteen ways `runDispatch`
  *  can return, so a consumer never has to substring-match `artifactNote`'s prose to tell them
@@ -333,13 +335,13 @@ export type DispatchOutput = z.infer<typeof DISPATCH_OUTPUT>;
 // the --json-schema also advertised its meaning, which is an invitation to a thin answer to
 // flag itself as a tool failure (or an injected brief to disguise a real one).
 //
-// `decisionQuestion` is gated on `nextAction`: the contract says it exists ONLY for `human`,
+// `decisionQuestion` and `escalationCategory` are gated on `nextAction`: the contract says they exist ONLY for `human`,
 // so a worker schema rejects it on any other action (the normalizer below strips it first, so
 // a stray one never costs an episode). "Required when human" is deliberately NOT a validation
 // failure — a human verdict without a question (an injection finding, an unreadable repo) is
 // still a finished episode, and failing it would burn a retry and end in a degraded salvage;
-// the prompt demands the question and `runDispatch` logs its absence instead.
-const gateDecisionQuestion = <
+// the prompt demands the question and the category, and `runDispatch` logs their absence instead.
+const gateHumanOnlyFields = <
   T extends { nextAction: string; decisionQuestion?: string; escalationCategory?: string },
 >(
   v: T,
@@ -357,13 +359,13 @@ const gateDecisionQuestion = <
 };
 
 export const WORKER_OUTPUT = {
-  investigate: z.strictObject(WORKER_VERDICT_FIELDS).superRefine(gateDecisionQuestion),
+  investigate: z.strictObject(WORKER_VERDICT_FIELDS).superRefine(gateHumanOnlyFields),
   author: z
     .strictObject({ ...WORKER_VERDICT_FIELDS, ...ISSUE_FIELDS })
-    .superRefine(gateDecisionQuestion),
+    .superRefine(gateHumanOnlyFields),
   implement: z
     .strictObject({ ...WORKER_VERDICT_FIELDS, ...PR_FIELDS })
-    .superRefine(gateDecisionQuestion),
+    .superRefine(gateHumanOnlyFields),
 } as const satisfies Record<DispatchTier, z.ZodType>;
 
 /** What a worker session actually returns: the full dispatch output MINUS the two fields the

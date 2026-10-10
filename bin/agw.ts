@@ -625,6 +625,7 @@ export function renderVerdictResult(r: DispatchOutput): string {
   lines.push(`nextAction: ${r.nextAction}`);
   if (typeof r.rootCause === "string") lines.push(`rootCause: ${r.rootCause}`);
   if (typeof r.decisionQuestion === "string") lines.push(`decisionQuestion: ${r.decisionQuestion}`);
+  if (typeof r.escalationCategory === "string") lines.push(`escalationCategory: ${r.escalationCategory}`);
   if (typeof r.owningRepo === "string") lines.push(`owningRepo: ${r.owningRepo}`);
   lines.push(`recommendation: ${r.recommendation}`);
   if (typeof r.artifactUrl === "string") lines.push(`artifact: ${r.artifactUrl}`);

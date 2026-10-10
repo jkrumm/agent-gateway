@@ -667,7 +667,7 @@ describe("human-readable rendering", () => {
       confidence: "high" as const,
       nextAction: "none" as const,
       outcome: "verdict_only" as const,
-      schemaVersion: 6 as const,
+      schemaVersion: 7 as const,
     };
     const text = renderVerdictResult(verdict);
     expect(text).toContain("one line");
@@ -684,11 +684,13 @@ describe("human-readable rendering", () => {
       confidence: "high" as const,
       nextAction: "human" as const,
       outcome: "verdict_only" as const,
-      schemaVersion: 6 as const,
+      schemaVersion: 7 as const,
       rootCause: "stale-lockfile-after-rename",
       decisionQuestion: "Drop the column or keep it? A: drop. B: keep.",
+      escalationCategory: "data_loss" as const,
       owningRepo: "warden",
     });
+    expect(text).toContain("escalationCategory: data_loss");
     expect(text).toContain("rootCause: stale-lockfile-after-rename");
     expect(text).toContain("decisionQuestion: Drop the column or keep it?");
     expect(text).toContain("owningRepo: warden");
