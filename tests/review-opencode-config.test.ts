@@ -100,6 +100,10 @@ const SYNTHESIS = {
 let fx: Fixture;
 let seen: SeenSession[];
 let sessionSpy: ReturnType<typeof spyOn> | undefined;
+// Per-angle-session scripted responses, consumed in call order. Empty = every angle
+// session succeeds. Lets a test drive the pipeline's one-shot angle retry without
+// reaching into runSession's internals.
+let angleResponses: Array<{ ok: boolean; error?: string }> = [];
 const savedEnv: Record<string, string | undefined> = {};
 
 function installSessionStub(): void {
@@ -112,7 +116,13 @@ function installSessionStub(): void {
       harness: opts.route.harness ?? "claude",
       configAtCall: opencodeRepoConfigPresent(opts.cwd),
     });
-    if (opts.tool === "review:synthesis") return { ok: true, data: SYNTHESIS };
+    if (opts.tool === "review:synthesis") return { ok: true, data: structuredClone(SYNTHESIS) };
+    // The floor always includes architect (claude route); script only the opencode-route
+    // angle (senior-dev), so the response queue cannot be consumed by architect.
+    if (opts.tool === "review:angle" && (opts.route.harness ?? "claude") === "opencode") {
+      const scripted = angleResponses.shift();
+      if (scripted && !scripted.ok) return { ok: false, error: scripted.error };
+    }
     return { ok: true, data: { findings: [] } };
   }) as unknown as typeof sessionRunner.runSession);
 }
@@ -128,6 +138,7 @@ beforeEach(async () => {
   process.env.AGENT_GATEWAY_REVIEW_CODERABBIT = "0";
   process.env.AGENT_GATEWAY_REVIEW_ADVERSARY = "false";
   seen = [];
+  angleResponses = [];
   fx = await makeFixture();
   installSessionStub();
 });
@@ -143,6 +154,12 @@ afterEach(() => {
 
 function angleSessions(): SeenSession[] {
   return seen.filter((s) => s.tool === "review:angle");
+}
+
+/** The opencode-route angle (senior-dev) — the one the retry tests script. The floor's
+ *  architect angle always runs too, on the claude route. */
+function opencodeAngleSessions(): SeenSession[] {
+  return angleSessions().filter((s) => s.harness === "opencode");
 }
 
 describe("runReview scope mode — live checkout is never stripped", () => {
@@ -225,5 +242,46 @@ describe("runReview ref mode — opencode config stripped from the throwaway wor
     // master never had the config; ref mode must not have created any in the live root.
     expect(existsSync(join(fx.repo, "opencode.json"))).toBe(false);
     expect(existsSync(join(fx.repo, ".opencode"))).toBe(false);
+  });
+});
+
+// ── one-shot angle retry ─────────────────────────────────────────────────────
+//
+// A single angle failure must not escalate the whole review: the pipeline re-runs a
+// failed angle once (the failure session-runner itself won't retry — e.g. an
+// idle-watchdog kill on the claude/Max route), and only a second failure stands.
+
+describe("runReview angle retry", () => {
+  test("a failed angle session is retried once", async () => {
+    fx.write("src/app.ts", "export const changed = 1;\n");
+    angleResponses = [{ ok: false, error: "Session timed out after 300000ms of inactivity" }];
+
+    const result = await runReview({ cwd: fx.repo, scope: "uncommitted", angles: ["senior-dev"] });
+
+    expect(opencodeAngleSessions().length).toBe(2);
+    expect(result.outcome).toBe("clean");
+  });
+
+  test("an angle that fails twice stays failed and forces needs-human/blocker", async () => {
+    fx.write("src/app.ts", "export const changed = 1;\n");
+    angleResponses = [
+      { ok: false, error: "Session timed out after 300000ms of inactivity" },
+      { ok: false, error: "Session timed out after 300000ms of inactivity" },
+    ];
+
+    const result = await runReview({ cwd: fx.repo, scope: "uncommitted", angles: ["senior-dev"] });
+
+    expect(opencodeAngleSessions().length).toBe(2);
+    expect(result.outcome).toBe("needs-human");
+    expect(result.escalationCategory).toBe("blocker");
+  });
+
+  test("a successful angle session is never re-run", async () => {
+    fx.write("src/app.ts", "export const changed = 1;\n");
+
+    const result = await runReview({ cwd: fx.repo, scope: "uncommitted", angles: ["senior-dev"] });
+
+    expect(opencodeAngleSessions().length).toBe(1);
+    expect(result.outcome).toBe("clean");
   });
 });

@@ -45,7 +45,7 @@ You have received findings from these sources (some may be empty):
 **`needs-human` names its reason.** When the outcome is `needs-human`, add `"escalationCategory"` with exactly one of: `product` (product direction or user-visible product semantics), `data_loss` (irreversible data loss), `spend` (money), `other_people` (sends something to, or affects, another person), `security` (security policy), `blocker` (the review itself could not run, e.g. a reviewer session failed). Omit the field for every other outcome. These six are the ONLY reasons to stop for the owner. The usual false positives are NOT owner questions — decide them: accepting a descope or a narrower fix than first asked, which of two PRs or approaches to land, a defect you can describe a fix for (that is a `blocking` finding), a design opinion (that is an `improvement`). If nothing on the list applies, the outcome is `actionable` or `clean`, not `needs-human`.
 
 **CRITICAL — reviewer session failures:**
-If any specialist reviewer's input begins with `⚠️ SESSION FAILED`, that reviewer did NOT examine the diff. Their absence is missing input, not approval. In that case:
+If any specialist reviewer's input begins with `⚠️ SESSION FAILED`, that reviewer did NOT examine the diff. (The pipeline already retries each angle session once, so a failure reaching you here means the reviewer failed twice.) Their absence is missing input, not approval. In that case:
 
 - The outcome MUST be `needs-human` (never `clean`).
 - Set `escalationCategory` to `blocker`.

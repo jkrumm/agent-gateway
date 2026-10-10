@@ -599,7 +599,12 @@ security/performance/concurrency/data-migration/api-contract/resilience
 against an ISO 25010 checklist, plus a non-agentic adversary
 critic) → synthesis (a Claude model, classifies into
 `blocking`/`improvements`/`discussions`/`testGaps`). `outcome`: `"clean"` /
-`"actionable"` / `"needs-human"`. Full pipeline docs, angle tables and cost
+`"actionable"` / `"needs-human"`. Each angle session gets **one pipeline-level
+retry** on failure (`ANGLE_MAX_ATTEMPTS = 2`), because `session-runner` retries
+only transport-class errors — an idle-watchdog kill on the claude/Max review
+route would otherwise be final and force the whole review to
+`needs-human`/`blocker` on a single flaky attempt; only a second failure stands
+(logged `review.angle_retry`). Full pipeline docs, angle tables and cost
 profile: `server/skills/review/README.md`.
 
 **OpenCodeReview (OCR):** one more phase-1 input, started right after Phase 1

@@ -34,6 +34,13 @@ const ANGLE_CONCURRENCY = 3;
 // slots. Bounds cost and wall time (more angles = more concurrency waves).
 const MAX_ANGLES = 8;
 
+// One pipeline-level retry for an angle session before the pipeline gives up on it.
+// session-runner's own ladder retries only transport-class errors, so a non-transport
+// failure reached here as final — an idle-watchdog kill on the claude/Max review route,
+// a malformed final message — would otherwise force the whole review to needs-human/blocker
+// on a single flaky attempt. Read-only sessions, so a retry is safe; a second failure stands.
+const ANGLE_MAX_ATTEMPTS = 2;
+
 // Appended to every angle prompt when the research-gateway is configured
 // (RESEARCH_GATEWAY_URL + RESEARCH_GATEWAY_TOKEN in env). Lets a read-only angle
 // worker validate an external library/API/version claim before filing it, via a
@@ -1209,39 +1216,58 @@ export async function runReview(
           angleRoute = routeFor("review");
         }
 
-        const result = await runSession<AngleOutput>({
-          cwd: effectiveCwd,
-          prompt,
-          tool: "review:angle",
-          jobId,
-          isCancelled,
-          route: angleRoute,
-          model,
-          jsonSchema: ANGLE_JSON_SCHEMA,
-          readOnly: true,
-          settingSources: "user,project",
-          extraEnv: researchEnv,
-          validate: zodValidator(ANGLE_OUTPUT),
-          onActivity: (p) => bump(`${agent.angle}: ${p.lastAction}`),
-        });
+        // Retry a failed angle once — session-runner does not retry a non-transport failure,
+        // so an idle-watchdog kill here would otherwise be final and force needs-human/blocker
+        // for the whole review (see ANGLE_MAX_ATTEMPTS).
+        let failureReason: string | undefined;
+        for (let attempt = 1; attempt <= ANGLE_MAX_ATTEMPTS; attempt++) {
+          const result = await runSession<AngleOutput>({
+            cwd: effectiveCwd,
+            prompt,
+            tool: "review:angle",
+            jobId,
+            isCancelled,
+            route: angleRoute,
+            model,
+            jsonSchema: ANGLE_JSON_SCHEMA,
+            readOnly: true,
+            settingSources: "user,project",
+            extraEnv: researchEnv,
+            validate: zodValidator(ANGLE_OUTPUT),
+            onActivity: (p) => bump(`${agent.angle}: ${p.lastAction}`),
+          });
 
-        if (!result.ok) {
-          logger.error(
-            { tool: "review", angle: agent.angle, error: result.error },
-            "angle session failed",
-          );
-          return {
-            angle: agent.angle,
-            findings: [],
-            failureReason: result.error ?? "unknown error",
-          };
+          if (result.ok) {
+            logger.info(
+              { tool: "review", angle: agent.angle, findings: result.data?.findings.length ?? 0 },
+              "angle session done",
+            );
+            return { angle: agent.angle, findings: result.data?.findings ?? [] };
+          }
+
+          failureReason = result.error ?? "unknown error";
+          if (attempt < ANGLE_MAX_ATTEMPTS) {
+            logger.warn(
+              {
+                event: "review.angle_retry",
+                tool: "review",
+                project: cwd,
+                angle: agent.angle,
+                attempt,
+                error: failureReason,
+              },
+              "angle session failed — retrying once",
+            );
+            bump(`${agent.angle}: retry after failure`);
+          } else {
+            logger.error(
+              { tool: "review", angle: agent.angle, error: failureReason },
+              "angle session failed",
+            );
+          }
         }
 
-        logger.info(
-          { tool: "review", angle: agent.angle, findings: result.data?.findings.length ?? 0 },
-          "angle session done",
-        );
-        return { angle: agent.angle, findings: result.data?.findings ?? [] };
+        return { angle: agent.angle, findings: [], failureReason };
       }),
       adversaryPromise,
     ]);
