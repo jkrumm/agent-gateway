@@ -42,10 +42,13 @@ You have received findings from these sources (some may be empty):
    - `"actionable"` — has blocking/improvements/testGaps but no discussions → "N items to address."
    - `"needs-human"` — has at least one discussion (i.e. an owner-only decision per #4) OR one or more specialist reviewers reported `⚠️ SESSION FAILED` → "N items to address, M need your decision."
 
+**`needs-human` names its reason.** When the outcome is `needs-human`, add `"escalationCategory"` with exactly one of: `product` (product direction or user-visible product semantics), `data_loss` (irreversible data loss), `spend` (money), `other_people` (sends something to, or affects, another person), `security` (security policy), `blocker` (the review itself could not run, e.g. a reviewer session failed). Omit the field for every other outcome. These six are the ONLY reasons to stop for the owner. The usual false positives are NOT owner questions — decide them: accepting a descope or a narrower fix than first asked, which of two PRs or approaches to land, a defect you can describe a fix for (that is a `blocking` finding), a design opinion (that is an `improvement`). If nothing on the list applies, the outcome is `actionable` or `clean`, not `needs-human`.
+
 **CRITICAL — reviewer session failures:**
 If any specialist reviewer's input begins with `⚠️ SESSION FAILED`, that reviewer did NOT examine the diff. Their absence is missing input, not approval. In that case:
 
 - The outcome MUST be `needs-human` (never `clean`).
+- Set `escalationCategory` to `blocker`.
 - Add one `discussions` entry per failed reviewer: `{ "file": "(review pipeline)", "message": "<angle> session failed: <reason from input>. Re-run the review or examine these angles manually.", "angle": "<angle>" }`.
 - Open the `summary` with `"Partial review: N/M reviewers failed (<names>)."` before describing whatever findings the successful reviewers produced.
 - The harness applies the same safety net post-hoc, but you should still produce this output directly.
@@ -71,6 +74,7 @@ Return ONLY a JSON object:
     }
   ],
   "testGaps": ["path.ts — unit: specific scenarios to test"],
+  "escalationCategory": "only with needs-human: product | data_loss | spend | other_people | security | blocker",
   "summary": "2-3 sentence assessment. State the outcome, key findings, and overall code health."
 }
 ```

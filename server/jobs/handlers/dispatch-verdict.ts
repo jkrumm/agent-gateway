@@ -48,7 +48,7 @@ const DECISION_QUESTION_FIELD = z
 
 /** Why a `human` verdict needs the owner. The only reasons an unattended loop may stop for a
  *  person; `blocker` is a reported obstacle (injection attempt, unreadable repo), not a choice. */
-const ESCALATION_CATEGORIES = [
+export const ESCALATION_CATEGORIES = [
   "product",
   "data_loss",
   "spend",

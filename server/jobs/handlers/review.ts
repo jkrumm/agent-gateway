@@ -11,6 +11,7 @@ import { runOcrReview, type RunOcrReviewResult } from "../../lib/ocr.ts";
 import { isPathScope, splitRange } from "../../lib/scope.ts";
 import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
+import { ESCALATION_CATEGORIES } from "./dispatch-verdict.ts";
 import { parseParams } from "./util.ts";
 import {
   createReadWorktree,
@@ -168,7 +169,8 @@ export const REVIEW_OUTCOMES = ["clean", "actionable", "needs-human"] as const;
 // A consumer (today: warden) pins this number and treats a mismatch as a loud refusal rather
 // than a best-effort parse — same contract as DISPATCH_SCHEMA_VERSION in dispatch.ts. Bump it
 // whenever a field's meaning or presence on REVIEW_OUTPUT changes.
-export const REVIEW_SCHEMA_VERSION = 1;
+// v2: optional `escalationCategory` on `needs-human` verdicts (additive).
+export const REVIEW_SCHEMA_VERSION = 2;
 
 // What the SYNTHESIS worker is shown and graded against. `schemaVersion` is deliberately not
 // part of this one — it is set by the HANDLER on every return path (the clean shortcut, both
@@ -196,6 +198,17 @@ const SYNTHESIS_OUTPUT = z.object({
   testGaps: z
     .array(z.string())
     .describe("Missing test coverage, e.g. 'server/auth.ts — unit: expired token, revoked token'."),
+  escalationCategory: z
+    .enum(ESCALATION_CATEGORIES)
+    .optional()
+    .describe(
+      'ONLY when outcome is "needs-human": why only the owner can decide. product = product direction ' +
+        "or user-visible product semantics | data_loss = irreversible data loss | spend = money | " +
+        "other_people = sends something to / affects another person | security = security policy | " +
+        "blocker = the review itself could not run (a reviewer failed), not a choice. Accepting a " +
+        "descope, choosing between two PRs, or a fixable defect is none of these: file it as an " +
+        "improvement or a blocking finding instead.",
+    ),
   summary: z
     .string()
     .describe(
@@ -213,6 +226,16 @@ export const REVIEW_OUTPUT = SYNTHESIS_OUTPUT.extend({
         "you and should be a loud refusal, not a best-effort parse.",
     ),
 });
+
+/** The category rides only on `needs-human`; anything else drops it rather than failing a 12-minute run. */
+export function normalizeEscalationCategory<
+  T extends { outcome: string; escalationCategory?: string },
+>(data: T): T {
+  if (data.outcome !== "needs-human" && data.escalationCategory !== undefined) {
+    delete data.escalationCategory;
+  }
+  return data;
+}
 
 const REVIEW_JSON_SCHEMA = z.toJSONSchema(SYNTHESIS_OUTPUT);
 
@@ -1236,6 +1259,7 @@ export async function runReview(
           angle: r.angle,
         })),
         testGaps: [],
+        escalationCategory: "blocker" as const,
         summary: `All ${totalReviewers} specialist reviewers failed — no review was actually performed. Causes: ${failedAngles.map((r) => `${r.angle}: ${r.failureReason}`).join("; ")}. Do NOT treat this as approval.`,
         schemaVersion: REVIEW_SCHEMA_VERSION,
       };
@@ -1351,6 +1375,7 @@ export async function runReview(
           },
         ],
         testGaps: [],
+        escalationCategory: "blocker" as const,
         summary: `Review ran ${totalReviewers} reviewers but synthesis failed to serialize a structured verdict (after one retry). Findings were NOT lost — see the discussions entry for the raw synthesizer text. Treat as needs-human.`,
         schemaVersion: REVIEW_SCHEMA_VERSION,
       };
@@ -1361,6 +1386,7 @@ export async function runReview(
     // Safety net: synthesis must not return "clean" when one or more angles failed.
     if (failedAngles.length > 0 && data.outcome === "clean") {
       data.outcome = "needs-human";
+      data.escalationCategory = "blocker";
       for (const f of failedAngles) {
         data.discussions.push({
           file: "(review pipeline)",
@@ -1369,6 +1395,14 @@ export async function runReview(
         });
       }
       data.summary = `Partial review: ${failedAngles.length}/${totalReviewers} reviewers failed (${failedAngles.map((r) => r.angle).join(", ")}). ${data.summary}`;
+    }
+
+    normalizeEscalationCategory(data);
+    if (data.outcome === "needs-human" && !data.escalationCategory) {
+      logger.warn(
+        { event: "review.needs_human_without_category", tool: "review", project: cwd },
+        "synthesis returned needs-human without an escalationCategory",
+      );
     }
 
     logger.info(
