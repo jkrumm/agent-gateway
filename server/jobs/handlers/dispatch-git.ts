@@ -1895,20 +1895,20 @@ export async function inPlaceRefusalReason(
   // secret-shaped text the file carried before it ran.
   const nowListing = await gitOrThrow(["ls-files", "--others", "--exclude-standard", "-z"], cwd);
   const nowUntracked = new Set(nowListing.split("\0").filter(Boolean));
-  let untrackedText = "";
+  const extraFiles: { file: string; text: string }[] = [];
   for (const f of changedFiles) {
     if (!nowUntracked.has(f) || snap.untracked.includes(f)) continue;
     try {
-      untrackedText += `\n${readFileSync(join(cwd, f), "utf8")}`;
+      extraFiles.push({ file: f, text: readFileSync(join(cwd, f), "utf8") });
     } catch {
       // Gone, unreadable or a directory between listing and read — the diff already
       // covers everything tracked, and this is a warning path, not a gate.
     }
   }
-  const secrets = await addedLineSecrets(cwd, base, untrackedText);
+  const secrets = await addedLineSecrets(cwd, base, extraFiles);
   if (secrets.length > 0) {
     warnings.push(
-      `the episode's added lines match ${secrets.join(", ")} — review before committing`,
+      `the episode's added lines match ${describeSecretHits(secrets)} — review before committing`,
     );
   }
 
@@ -1991,13 +1991,24 @@ export async function diffRefusalReason(
   }
   const secrets = await addedLineSecrets(wt.path, `${wt.base}...HEAD`);
   if (secrets.length > 0) {
-    return `the change adds text matching ${secrets.join(", ")} — a dispatched episode must never commit a credential or an internal address to a branch that becomes a public, permanent artifact`;
+    return `the change adds text matching ${describeSecretHits(secrets)} — a dispatched episode must never commit a credential or an internal address to a branch that becomes a public, permanent artifact`;
   }
   return null;
 }
 
+/** One secret-shaped string the added-lines scan found, and the file:line it sits on. */
+interface AddedSecretHit {
+  /** Pattern name, e.g. "1Password reference". */
+  name: string;
+  /** Repo-relative path of the file the line was added to. */
+  file: string;
+  /** 1-based line number in the post-change file. */
+  line: number;
+}
+
 /**
- * Secret-shaped strings among a change set's ADDED lines, by pattern name.
+ * Secret-shaped strings among a change set's ADDED lines, each with the file and line it
+ * sits on.
  *
  * The artifact scan (`assertNoSecrets`) covers the issue and PR *bodies*. It says nothing
  * about the code, and the code is the durable half: a branch pushed to a public repo is in
@@ -2005,22 +2016,62 @@ export async function diffRefusalReason(
  * it cannot be edited away. An episode that "fixes" a broken config by inlining the value it
  * read is the ordinary, non-adversarial way this happens.
  *
+ * The location is part of the refusal, not decoration: the branch is DISCARDED on a hit, and
+ * a caller who is told only which pattern fired has no way to narrow the re-dispatch. Naming
+ * the file and line makes the next attempt mechanical.
+ *
  * `base` is whatever diff range the caller's path uses — the worktree path scans
  * `${base}...HEAD` (committed work), the in-place path scans a snapshot base (uncommitted
- * edits). `extraText` is appended to the added lines before scanning (the in-place path
- * adds the whole content of newly untracked files, which have no base to diff against).
+ * edits). `extraFiles` are read whole and scanned line-by-line (the in-place path's newly
+ * untracked files, which have no base to diff against). Every `SECRET_PATTERNS` entry is
+ * single-line, so scanning per added line is equivalent to scanning the joined text.
  * Added lines only: a credential already committed in this repo is not this episode's doing,
  * and refusing on it would disable the tier in precisely the repo that needs a fix. The
  * corollary is a real limit: a secret this episode merely MOVES between files is invisible
  * here, because the addition matches something the base already contained.
  */
-async function addedLineSecrets(cwd: string, base: string, extraText?: string): Promise<string[]> {
+async function addedLineSecrets(
+  cwd: string,
+  base: string,
+  extraFiles?: ReadonlyArray<{ file: string; text: string }>,
+): Promise<AddedSecretHit[]> {
   const patch = await gitOrThrow(["diff", "--no-renames", "-U0", base, "--"], cwd);
-  const added = patch
-    .split("\n")
-    .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
-    .join("\n");
-  return scanForSecrets(extraText === undefined ? added : `${added}\n${extraText}`);
+  const hits: AddedSecretHit[] = [];
+  let file = "";
+  let line = 0;
+  for (const raw of patch.split("\n")) {
+    if (raw.startsWith("+++ ")) {
+      const path = raw.slice(4).trim();
+      file = path === "/dev/null" ? "" : path.replace(/^b\//, "");
+      continue;
+    }
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
+    if (hunk) {
+      line = Number.parseInt(hunk[1] as string, 10);
+      continue;
+    }
+    if (raw.startsWith("+")) {
+      for (const name of scanForSecrets(raw.slice(1))) hits.push({ name, file, line });
+      line += 1;
+      continue;
+    }
+    if (raw.startsWith(" ")) line += 1;
+  }
+  for (const extra of extraFiles ?? []) {
+    extra.text.split("\n").forEach((text, i) => {
+      for (const name of scanForSecrets(text)) hits.push({ name, file: extra.file, line: i + 1 });
+    });
+  }
+  return hits;
+}
+
+/** One short phrase naming the patterns that fired and where, for a refusal or a warning. */
+function describeSecretHits(hits: ReadonlyArray<AddedSecretHit>): string {
+  const names = [...new Set(hits.map((h) => h.name))].join(", ");
+  const locations = [...new Set(hits.map((h) => `${h.file}:${h.line}`))];
+  const shown = locations.slice(0, 5);
+  const rest = locations.length - shown.length;
+  return `${names} at ${rest > 0 ? `${shown.join(", ")} (+${rest} more)` : shown.join(", ")}`;
 }
 
 /**

@@ -820,11 +820,11 @@ describe("diffRefusalReason", () => {
     expect(await refusal(wt)).toBeNull();
   });
 
-  test("refuses a diff that ADDS a credential", async () => {
+  test("refuses a diff that ADDS a credential, naming its file and line", async () => {
     const wt = await createWorktree(fx.repo, key(), "leaky", "master");
     fx.write("config.yaml", "gateway:\n  key: op://hermes/gateway/api-server-key\n", wt.path);
     await commitPendingWork(wt, "inline the value it read");
-    expect(await refusal(wt)).toMatch(/adds text matching 1Password reference/);
+    expect(await refusal(wt)).toMatch(/adds text matching 1Password reference at config\.yaml:2/);
   });
 
   test("does NOT refuse a credential the episode only removed", async () => {
