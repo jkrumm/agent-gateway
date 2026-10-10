@@ -437,7 +437,7 @@ fallback.
 SINGLE_SHOT: `triage` and review's angle router — one tool-less, JSON-out completion
 (`singleShotJson`, single-shot.ts) instead of a `claude -p` session, 2026-10-02. Neither
 needs tools (the router now gets the diff inline), so the session was pure overhead:
-20-100x the cost of one call (dotfiles docs/agent-platform.md §Sideclaw). Same
+20-100x the cost of one call (dotfiles docs/agent-platform.md §Agent-Gateway — the engine). Same
 deepseek-v4.1-flash id review_ocr runs, registry-verified, over the iu-openai transport —
 no Max lane (Max never serves it), no thinking budget (an iu-openai route has none; the
 registry's `minOutput` floor on `max_completion_tokens` is what keeps reasoning from

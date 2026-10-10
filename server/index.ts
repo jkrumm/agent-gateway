@@ -130,7 +130,7 @@ const PORT = parseInt(process.env.PORT ?? "7705");
 // Loopback only. Every consumer is local — the herdr overview pane, Hermes, the MCP child
 // per session, fetch_usage.py's POST, devhost-health — and nothing here carries auth of
 // its own, so a tailnet-reachable bind would be an unauthenticated job submitter one ACL
-// grant away. The tailnet door is Caddy's `sideclaw.mini.jkrumm.com` block, on purpose.
+// grant away. It is excluded from the Caddy tailnet doors (`exclude agent-gateway`), on purpose.
 const HOSTNAME = process.env.AGENT_GATEWAY_HOST ?? "127.0.0.1";
 app.listen({ hostname: HOSTNAME, port: PORT });
 

@@ -59,9 +59,9 @@ request.
 - The server binds **`127.0.0.1` only** (`server/index.ts`), so this endpoint
   is reachable from this machine alone — it carries no auth of its own, and
   there is **no tailnet door**: `~/.config/caddy-tailnet.ports` explicitly
-  `exclude sideclaw`, precisely because that missing auth would let any
+  `exclude agent-gateway`, precisely because that missing auth would let any
   tailnet node `POST /api/jobs` with `dispatch implement` otherwise. Don't
-  restore a `sideclaw.mini.jkrumm.com` block.
+  restore a `agent-gateway (no tailnet door)` block.
 - **`humanQueue`** (top-level in the snapshot): every pending
   `ask-human.sh` request (`~/.local/state/human-queue/*.req` with no `.res`,
   `readHumanQueue` in `agents.ts`), as `{ id, askedAt, question, cmd }`,

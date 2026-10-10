@@ -391,7 +391,7 @@ export async function hydrateExcalidrawSkeleton(input: HydrateInput): Promise<Hy
       const file = {
         type: "excalidraw" as const,
         version: 2 as const,
-        source: "https://sideclaw.local",
+        source: "https://agent-gateway.local",
         elements: raw.elements ?? [],
         appState: raw.appState ?? {},
         files: raw.files ?? {},
