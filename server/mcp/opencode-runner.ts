@@ -259,6 +259,13 @@ const READ_ONLY_BASH_RULES: Record<string, "allow" | "deny"> = {
  *  just works" in this mode, and an omitted key is exactly as broken as one it defaults to
  *  ask on.
  *
+ *  This still writes the v1 `permission` OBJECT (keyed `bash`, `edit`, …) on purpose. opencode
+ *  2.x stores permissions internally as a plural `permissions` ruleset (`{action, resource,
+ *  effect}`), but its config normalizer migrates the v1 object and renames the shell key —
+ *  `packages/core/src/config/normalize.ts` `migratePermissions` + `packages/core/src/v1/config/
+ *  migrate.ts` `normalizeAction("bash") → "shell"` (verified against tag v2.0.25) — so
+ *  `READ_ONLY_BASH_RULES` still governs the 2.x `shell` tool and `edit: "deny"` still binds.
+ *
  *  `readOnly` is a true read-only profile, not just `edit: deny`: `bash` becomes the
  *  `READ_ONLY_BASH_RULES` object (read commands allowed, everything else default-denied),
  *  `webfetch`/`websearch` are `deny` (workers shell out via `curl` — AGENTS.md's Worker
@@ -544,6 +551,13 @@ export interface OpencodeAccum {
    *  would look finished — the final step's `step_finish` that would carry `reason: "length"`
    *  is exactly the one 2.x drops, so it cannot be distinguished from here. */
   finished: boolean;
+  /** The last `step_finish.reason` observed (`"stop"`, `"tool-calls"`, `"length"`, …), when any
+   *  `step_finish` reached the stream. opencode 2.x publishes the terminal step's reason as
+   *  `session.step.ended` (`finish: "stop"|"length"`), but the `run --format json` client drops
+   *  that event before rendering it (measured 2.0.25), so on 2.x a terminal `"length"`
+   *  truncation cannot be told apart from `"stop"` here — the field records the reason only when
+   *  the client DOES render the step_finish (every 1.x run, and a 2.x non-terminal step). */
+  stopReason?: string;
   sawErrorEvent: boolean;
   errorMessage?: string;
 }
@@ -591,6 +605,7 @@ export function reduceOpencodeEvent(state: OpencodeAccum, event: OpencodeEvent):
       break;
     case "step_finish":
       next.stepFinishes += 1;
+      next.stopReason = part?.reason;
       if (part?.tokens) {
         next.inputTokens += part.tokens.input ?? 0;
         next.outputTokens += part.tokens.output ?? 0;
@@ -850,7 +865,14 @@ export async function runOpencodeProcessLifecycle(
             onSessionId: ctx.onSessionId,
           });
         }
-        ctx.turnsRef.current = accum.turns;
+        // `turnsRef` is the wrapper's `noOutputYet` signal (session-runner.ts `planNextAttempt`):
+        // it must mean "the worker actually produced output", not "a step marker was seen". A 2.x
+        // run emits `step_start` before any output, so `accum.turns` (max of step_start/step_finish)
+        // is already 1 while nothing has been produced — driving the signal from it would suppress
+        // the retry/fallback lanes on a run that died before its first output. Actual output is a
+        // completed step (`stepFinishes > 0`) or a non-empty assistant text; `accum.turns` stays the
+        // telemetry/attribution step count, not this gate.
+        ctx.turnsRef.current = accum.stepFinishes > 0 || accum.lastAssistantText !== "" ? 1 : 0;
         emitActivity();
       },
     });
@@ -1193,9 +1215,14 @@ export async function runOpencodeAttempt<T>(
   }
 
   if (!accum.finished) {
-    emitAttribution("error", { reason: "no_stop_reason" });
-    const error =
-      "opencode session ended without reaching the end of its final turn (no terminal step_finish and no final assistant text) — likely truncated or interrupted mid-run";
+    emitAttribution("error", { reason: "no_stop_reason", stopReason: accum.stopReason });
+    // When a terminal `step_finish` DID reach the stream with a non-stop reason (a 1.x run, or a
+    // 2.x run whose terminal step wasn't dropped), name that reason — a `"length"` here is the
+    // provider output-limit truncation the text-only 2.x path cannot see. Without one, the stream
+    // ended mid-loop (fresh `step_start`/`tool_use`/`step_finish(tool-calls)`) before a final turn.
+    const error = accum.stopReason
+      ? `opencode session ended with finish reason "${accum.stopReason}" (no terminal "stop") — truncated or interrupted mid-run`
+      : "opencode session ended without reaching the end of its final turn (no terminal step_finish and no final assistant text) — likely truncated or interrupted mid-run";
     return {
       ok: false,
       error,

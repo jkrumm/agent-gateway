@@ -672,6 +672,38 @@ describe("reduceOpencodeEvent over a real captured 2.x stream (no terminal step_
   });
 });
 
+describe("reduceOpencodeEvent — stop reason tracking", () => {
+  test("a terminal step_finish(reason: stop) finishes the run and records the reason", () => {
+    const accum = reduceOpencodeEvent(INITIAL_OPENCODE_ACCUM, {
+      type: "step_finish",
+      sessionID: "s",
+      part: { type: "step-finish", reason: "stop" },
+    } as never);
+    expect(accum.finished).toBe(true);
+    expect(accum.stopReason).toBe("stop");
+  });
+
+  test("a terminal step_finish with a non-stop reason (e.g. length truncation) is NOT finished", () => {
+    const accum = reduceOpencodeEvent(INITIAL_OPENCODE_ACCUM, {
+      type: "step_finish",
+      sessionID: "s",
+      part: { type: "step-finish", reason: "length" },
+    } as never);
+    expect(accum.finished).toBe(false);
+    expect(accum.stopReason).toBe("length");
+  });
+
+  test("stopReason stays undefined until a step_finish is seen (text alone leaves it unset)", () => {
+    const accum = reduceOpencodeEvent(INITIAL_OPENCODE_ACCUM, {
+      type: "text",
+      sessionID: "s",
+      part: { type: "text", text: "DONE" },
+    } as never);
+    expect(accum.finished).toBe(true);
+    expect(accum.stopReason).toBeUndefined();
+  });
+});
+
 describe("reduceOpencodeEvent over real captured FAILING streams (B1)", () => {
   test("a rejected apiKey's error event: nested error.data.message, sawErrorEvent true, never finished", () => {
     const [ev] = readFixture("opencode-events-error.jsonl");

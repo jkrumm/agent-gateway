@@ -22,6 +22,27 @@ function emptyStderr(): ReadableStream<Uint8Array> {
   });
 }
 
+/** An already-exited fake process whose stdout emits the given NDJSON lines, then closes.
+ *  Drives `runOpencodeProcessLifecycle`'s real read loop + event fold against a scripted
+ *  stream, so `turnsRef` (the wrapper's `noOutputYet` gate) can be asserted without a real
+ *  `opencode` binary. */
+function fakeStreamProc(lines: string[]): OpencodeSubprocess {
+  const encoder = new TextEncoder();
+  const stdout = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const line of lines) controller.enqueue(encoder.encode(line + "\n"));
+      controller.close();
+    },
+  });
+  return {
+    exitCode: 0,
+    stdout,
+    stderr: emptyStderr(),
+    exited: Promise.resolve(0),
+    kill() {},
+  } as unknown as OpencodeSubprocess;
+}
+
 /** A fake process whose stdout reader ALWAYS rejects on `.read()` — simulates the failure
  *  shape B2 fixes: an exception escaping the read loop for a reason other than an idle
  *  timeout. `kill()` resolves `.exited` immediately for SIGTERM unless `ignoresSigterm` is
@@ -138,5 +159,46 @@ describe("runOpencodeProcessLifecycle — teardown guarantees (B2)", () => {
     expect(result.exitCode).toBe(0);
     expect(kills).toEqual([]); // forceKill's exitCode-!==-null guard makes this a no-op
     expect(activeSessionCount()).toBe(0);
+  });
+});
+
+describe("runOpencodeProcessLifecycle — turnsRef drives the noOutputYet gate, not step count", () => {
+  test("a run that dies after a bare step_start (no output) leaves turnsRef at 0", async () => {
+    const turnsRef = { current: 0 };
+    await runOpencodeProcessLifecycle(
+      fakeStreamProc(['{"type":"step_start","sessionID":"s","part":{"type":"step-start"}}']),
+      {
+        jobId: "job-turns-1",
+        cwd: "/tmp",
+        model: "deepseek-v4.1-flash",
+        backend: "iu",
+        tool: "dispatch",
+        iuOpenaiBase: "https://iu.example.com/openai/v1",
+        turnsRef,
+      },
+    );
+    // `turns` (max of step_start/step_finish) is already 1 here; the gate must still read "no
+    // output yet" so the wrapper's retry/fallback lanes fire.
+    expect(turnsRef.current).toBe(0);
+  });
+
+  test("a run that produced a final text sets turnsRef above 0", async () => {
+    const turnsRef = { current: 0 };
+    await runOpencodeProcessLifecycle(
+      fakeStreamProc([
+        '{"type":"step_start","sessionID":"s","part":{"type":"step-start"}}',
+        '{"type":"text","sessionID":"s","part":{"type":"text","text":"DONE"}}',
+      ]),
+      {
+        jobId: "job-turns-2",
+        cwd: "/tmp",
+        model: "deepseek-v4.1-flash",
+        backend: "iu",
+        tool: "dispatch",
+        iuOpenaiBase: "https://iu.example.com/openai/v1",
+        turnsRef,
+      },
+    );
+    expect(turnsRef.current).toBeGreaterThan(0);
   });
 });
