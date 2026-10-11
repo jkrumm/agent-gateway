@@ -193,9 +193,8 @@ install-agent:
 install-cli:
 	@mkdir -p ~/.local/bin
 	@ln -sf "$(CURDIR)/bin/agw.ts" ~/.local/bin/agw
-	@ln -sf "$(CURDIR)/bin/sideclaw" ~/.local/bin/sideclaw
 	@ln -sf "$(CURDIR)/scripts/opencode-safe" ~/.local/bin/opencode-safe
-	@echo "agent-gateway CLI symlinked to ~/.local/bin/agw, deprecated shim at ~/.local/bin/sideclaw (run: agw --help), opencode-safe (bounded opencode for probes)"
+	@echo "agent-gateway CLI symlinked to ~/.local/bin/agw (run: agw --help), opencode-safe (bounded opencode for probes)"
 
 uninstall-agent:
 	launchctl bootout gui/$$(id -u)/com.jkrumm.agent-gateway

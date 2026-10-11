@@ -1,6 +1,6 @@
 // FIRST: the MCP process is spawned with the calling session's cwd, so Bun never auto-loaded
 // agent-gateway/.env here — otel and the routing/backend flags ran unconfigured. Order matters.
-import { warnLegacyEnv } from "./lib/env-compat.ts";
+import "./lib/load-env.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerAllTools } from "./mcp/tools/index.ts";
@@ -12,7 +12,6 @@ import { logRoutingOverrides, logStaleQuotaEnvVars } from "./lib/routing.ts";
 // set it explicitly here anyway — this is the one process that default exists to describe, and
 // an explicit call survives a future change to that default.
 setProcessKind("mcp");
-warnLegacyEnv(logger);
 logRoutingOverrides(logger);
 logStaleQuotaEnvVars(logger);
 

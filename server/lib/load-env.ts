@@ -5,7 +5,7 @@ import { join } from "node:path";
 // (LaunchAgent WorkingDirectory) and gets it for free; the MCP process is spawned by the
 // calling Claude Code session with THAT session's cwd, so it never saw agent-gateway/.env —
 // which is why `otel` (and the MCP-side routing/backend flags) silently ran without
-// AGENT_GATEWAY_* / RESEARCH_GATEWAY_* for months. Import it FIRST in mcp.ts (via env-compat.ts): ES
+// AGENT_GATEWAY_* / RESEARCH_GATEWAY_* for months. Import it FIRST in mcp.ts (directly): ES
 // imports evaluate in order, and session-runner/routing read their flags at load.
 //
 // Existing environment always wins — a value the caller exported deliberately is not

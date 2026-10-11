@@ -10,10 +10,7 @@ would let any tag:mac/phone/tablet node `POST /api/jobs` with `dispatch
 implement`. Don't remove that exclusion. (`excalidraw-hydrate.ts` still stamps
 `https://sideclaw.local` as a diagram `source`, a dead localias-proxy convention.)
 
-**Renamed from `sideclaw` (2026-10-09).** CLI `agw` (`bin/sideclaw` is a deprecated shim that
-execs it), MCP server and tools `mcp__agent-gateway__*`, env prefix `AGENT_GATEWAY_*` — a
-`SIDECLAW_*` var is still aliased at boot by `server/lib/env-compat.ts` and warned once
-(`env.legacy_prefix`), to be dropped after the deprecation window. Still carrying the old name
+**Renamed from `sideclaw` (2026-10-09).** CLI `agw`, MCP server and tools `mcp__agent-gateway__*`, env prefix `AGENT_GATEWAY_*` — the deprecation shims (`bin/sideclaw`, `SIDECLAW_*` env aliasing) are gone. Still carrying the old name
 on purpose: the persisted usage-tracker data contract (`sideclaw-iu` and `sideclaw-sessions` sinks, `src: "sideclaw"`, `sideclaw:<tool>` lanes), kept on both sides so historical rows stay joinable. The Caddy door is `agent-gateway.test` since 2026-10-09. `scripts/rename-codemod.ts`
 re-runs the rewrite; `scripts/migrate-runtime.sh` (drain, move data/state/logs, new label) and
 `scripts/post-move.sh` (Claude Code state, MCP registration, then the migration) are the
@@ -23,7 +20,7 @@ Bun loads `.env` automatically from the `agent-gateway/` directory — all env v
 (`PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH`, `GITHUB_TOKEN`, `AGENT_GATEWAY_*`,
 `RESEARCH_GATEWAY_*`) live there, listed in `README.md`. That auto-load is
 cwd-based, so the **MCP process** (spawned with the calling session's cwd)
-imports `server/lib/env-compat.ts` (which loads `load-env.ts`) first thing in `mcp.ts` to read the same
+imports `server/lib/load-env.ts` first thing in `mcp.ts` to read the same
 file — existing environment always wins over the file.
 
 ## Validate

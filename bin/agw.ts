@@ -8,7 +8,7 @@
 // functions so tests/cli.test.ts can pin them without spawning a server; the
 // only I/O here is fetch, the git-root probe, and `--context @file` reads.
 
-import "../server/lib/env-compat.ts";
+import "../server/lib/load-env.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { isTerminal, type JobStatus } from "../server/jobs/types";

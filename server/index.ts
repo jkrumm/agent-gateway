@@ -1,4 +1,4 @@
-import { warnLegacyEnv } from "./lib/env-compat.ts";
+import "./lib/load-env.ts";
 import { Elysia } from "elysia";
 import { appLogger as logger, cleanupLogFile } from "./logger.ts";
 import { usageRoutes } from "./routes/usage";
@@ -39,7 +39,6 @@ import {
 // since every job (check/review/dispatch/overview/narrative) actually runs its worker sessions
 // in THIS process, not the MCP one.
 setProcessKind("app");
-warnLegacyEnv(logger);
 logRoutingOverrides(logger);
 logStaleQuotaEnvVars(logger);
 logDispatchPolicy(logger);
