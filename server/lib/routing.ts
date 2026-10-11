@@ -20,8 +20,8 @@
 // the caller-selected `dispatch_editorial` route (a dispatch param `kind: "editorial"`, below),
 // or the reactive `iu`→`max` reverse fallback after an IU failure — the one AUTOMATIC Claude
 // path a dispatch episode has. A route's
-// `variant` (opencode's `--variant`, a reasoning-effort knob) is only meaningful when
-// `harness: "opencode"`. A fallback attempt (the `iu`→`max` reverse lane) ALWAYS runs the
+// `variant` (opencode's reasoning-effort knob, passed as the `#variant` suffix of `-m` since
+// 2.x dropped `--variant`) is only meaningful when `harness: "opencode"`. A fallback attempt (the `iu`→`max` reverse lane) ALWAYS runs the
 // `claude` harness, regardless of the primary route's harness — Max only ever serves a
 // Claude id via `claude -p`, so a fallback onto it can never be an opencode run. See
 // `session-runner.ts`'s `resolveHarness`.
@@ -151,8 +151,9 @@ export interface ToolRoute {
    *  Harness paragraph and `Harness`'s doc comment. Defaults to `"claude"` on every tier
    *  below except AGENT_OC/AGENT_OC_IMPLEMENT. */
   harness: Harness;
-  /** opencode's `--variant` — a reasoning-effort knob (`"high"`, `"max"`, `"none"`, …)
-   *  specific to the model's `opencode.json` entry (see `buildOpencodeConfig` in
+  /** opencode's reasoning-effort variant (`"high"`, `"max"`, `"none"`, …) — passed as the
+   *  `#variant` suffix of `-m` (opencode 2.x dropped `run --variant`) — specific to the
+   *  model's `opencode.json` entry (see `buildOpencodeConfig` in
    *  opencode-runner.ts). Only read when `harness === "opencode"`; absent (undefined) on
    *  every `claude`-harness route, where thinking is controlled by `thinkingTokens`
    *  (gateway ids) or not at all (Claude ids). */

@@ -5,6 +5,9 @@
 // `tests/fixtures/opencode-events-error.jsonl` is two REAL failing runs (a rejected apiKey, an
 // unrecognized model id), captured the same day via `OPENCODE_CONFIG_CONTENT` with deliberately
 // broken credentials/model — the exact NDJSON `type: "error"` shape B1 fixes against.
+// `tests/fixtures/opencode-events-v2.jsonl` is a trimmed excerpt of a REAL 2.0.25 success
+// (2026-10-11): same part shape, but the stream ends on the final `text` part with no terminal
+// `step_finish(reason: "stop")` — see `OpencodeAccum.finished`.
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -65,18 +68,16 @@ function readOnlyBashRules(): Record<string, "allow" | "deny"> {
 }
 
 describe("buildOpencodeArgs", () => {
-  test("bare invocation — dir, model-as-iu-chat/<model>, format json, -- before the prompt", () => {
+  test("bare invocation — standalone, model-as-iu-chat/<model>, format json, -- before the prompt", () => {
     const argv = buildOpencodeArgs({
       bin: "/opt/homebrew/bin/opencode",
-      cwd: "/tmp/wt-vps",
       model: "deepseek-v4.1-flash",
       prompt: "investigate the thing",
     });
     expect(argv).toEqual([
       "/opt/homebrew/bin/opencode",
       "run",
-      "--dir",
-      "/tmp/wt-vps",
+      "--standalone",
       "-m",
       "iu-chat/deepseek-v4.1-flash",
       "--format",
@@ -86,10 +87,15 @@ describe("buildOpencodeArgs", () => {
     ]);
   });
 
+  test("no --dir anywhere — 2.x dropped it and reads the directory from the process cwd", () => {
+    const argv = buildOpencodeArgs({ bin: "opencode", model: "deepseek-v4.1-flash", prompt: "p" });
+    expect(argv).not.toContain("--dir");
+    expect(argv).toContain("--standalone");
+  });
+
   test("a responses-wire (GPT) model is prefixed with the iu-responses provider", () => {
     const argv = buildOpencodeArgs({
       bin: "opencode",
-      cwd: "/tmp/wt",
       model: "gpt-6.1-sol",
       prompt: "p",
     });
@@ -101,7 +107,6 @@ describe("buildOpencodeArgs", () => {
     // message as an unknown flag, prints --help and exits 0 with no session ever starting.
     const argv = buildOpencodeArgs({
       bin: "opencode",
-      cwd: "/tmp/wt",
       model: "deepseek-v4.1-flash",
       prompt: "-foo, do the thing",
     });
@@ -111,24 +116,22 @@ describe("buildOpencodeArgs", () => {
     expect(argv.at(-1)).toBe("-foo, do the thing");
   });
 
-  test("variant is inserted before -- when present", () => {
+  test("variant is folded into the model ref as -m <provider>/<model>#<variant>", () => {
     const argv = buildOpencodeArgs({
       bin: "opencode",
-      cwd: "/tmp/wt",
       model: "deepseek-v4.1-flash",
       variant: "max",
       prompt: "p",
     });
-    const i = argv.indexOf("--variant");
-    expect(i).toBeGreaterThan(-1);
-    expect(argv[i + 1]).toBe("max");
-    expect(argv.indexOf("--")).toBeGreaterThan(i);
+    expect(argv).not.toContain("--variant");
+    expect(argv[argv.indexOf("-m") + 1]).toBe("iu-chat/deepseek-v4.1-flash#max");
+    // The variant rides on -m, and the `--` guard still trails it.
+    expect(argv.indexOf("--")).toBeGreaterThan(argv.indexOf("-m"));
   });
 
   test("resumeSessionId emits --session <id>", () => {
     const argv = buildOpencodeArgs({
       bin: "opencode",
-      cwd: "/tmp/wt",
       model: "deepseek-v4.1-flash",
       resumeSessionId: "ses_abc123",
       prompt: "continue",
@@ -141,7 +144,6 @@ describe("buildOpencodeArgs", () => {
   test("no --pure anywhere in the vector — measured to hang", () => {
     const argv = buildOpencodeArgs({
       bin: "opencode",
-      cwd: "/tmp/wt",
       model: "deepseek-v4.1-flash",
       variant: "high",
       resumeSessionId: "ses_x",
@@ -624,6 +626,39 @@ describe("reduceOpencodeEvent over a real captured successful stream", () => {
       },
     } as never);
     expect(accum.lastAction).toBe("edit evaluators.py");
+  });
+});
+
+// opencode 2.x (2.0.25, 2026-10-11) ends a successful `run --format json` stream on the final
+// assistant `text` part and never emits the terminal `step_finish(reason: "stop")` that 1.x
+// did (tests/fixtures/opencode-events-v2.jsonl is a trimmed excerpt of a real 2.0.25 run).
+describe("reduceOpencodeEvent over a real captured 2.x stream (no terminal step_finish)", () => {
+  const fixtureLines = readFixture("opencode-events-v2.jsonl");
+
+  test("the final text part completes the session: finished true, text captured, no error", () => {
+    let accum = INITIAL_OPENCODE_ACCUM;
+    for (const ev of fixtureLines) accum = reduceOpencodeEvent(accum, ev as never);
+
+    expect(accum.sessionId).toBe("ses_ed536e6b7ffeVauOU19YywcOLm");
+    // Exactly one step_finish (the tool step, reason "tool-calls"); the final step emits none.
+    expect(accum.turns).toBe(1);
+    expect(accum.lastAssistantText).toBe("DONE");
+    // Under the old "last step_finish must be stop" rule this stayed false forever on 2.x.
+    expect(accum.finished).toBe(true);
+    expect(accum.lastAction).toBe("shell: echo hello");
+    expect(accum.sawErrorEvent).toBe(false);
+  });
+
+  test("a 2.x stream truncated on a fresh step_start is NOT finished", () => {
+    let accum = INITIAL_OPENCODE_ACCUM;
+    for (const ev of fixtureLines.slice(0, -1)) accum = reduceOpencodeEvent(accum, ev as never);
+    expect(accum.finished).toBe(false);
+  });
+
+  test("a 2.x stream truncated on a tool_use is NOT finished", () => {
+    let accum = INITIAL_OPENCODE_ACCUM;
+    for (const ev of fixtureLines.slice(0, 2)) accum = reduceOpencodeEvent(accum, ev as never);
+    expect(accum.finished).toBe(false);
   });
 });
 

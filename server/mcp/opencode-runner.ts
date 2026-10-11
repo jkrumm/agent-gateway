@@ -4,7 +4,10 @@
 // `opencode run` instead of `claude -p` — see routing.ts's module-header Harness paragraph
 // for why. This module owns everything specific to that CLI: argv/config/env builders (pure,
 // unit-tested directly), its NDJSON event shape (measured against real `opencode run --format
-// json` output, 2026-09-24 — see tests/fixtures/opencode-events*.jsonl), the per-process
+// json` output — 1.19 on 2026-09-24 via tests/fixtures/opencode-events*.jsonl, re-measured
+// against 2.0.25 on 2026-10-11 via tests/fixtures/opencode-events-v2.jsonl, which differs in
+// that a successful run's stream ends on the final assistant `text` part with no terminal
+// `step_finish(reason: "stop")` — see `OpencodeAccum.finished`), the per-process
 // lifecycle (`runOpencodeProcessLifecycle`) and one attempt runner (`runOpencodeAttempt`),
 // invoked from `session-runner.ts`'s `runSessionAttempt` whenever `resolveHarness()` resolves
 // to `"opencode"`. It returns the exact same `SessionResult<T>` shape the claude path does, so
@@ -80,7 +83,6 @@ export type OpencodeSubprocess = Subprocess<"ignore", "pipe", "pipe">;
 
 export interface OpencodeArgsInput {
   bin: string;
-  cwd: string;
   model: string;
   variant?: string;
   resumeSessionId?: string;
@@ -111,21 +113,29 @@ function providerFor(entry: { wire: "chat" | "responses" }): string {
 
 /** The full `opencode` argument vector, INCLUDING the binary as element 0. `-m <provider>/<model>`
  *  names the provider (`iu-chat`/`iu-responses`, `buildOpencodeConfig` below) and the model id together —
- *  opencode has no bare `--model <id>` against a custom provider. The `--` before `prompt`
- *  is load-bearing, not decorative: measured 2026-09-24, a message starting with `-` (e.g. a
- *  brief that happens to begin "-foo bar") is parsed by opencode's own yargs CLI as an
- *  unknown FLAG without it — the command prints --help and exits 0 with no session ever
- *  starting, which this module would otherwise only see as an opaque "no output" failure. */
+ *  opencode has no bare `--model <id>` against a custom provider.
+ *
+ *  opencode 2.x (measured against 2.0.25, 2026-10-11) dropped `run --dir` and `run --variant`:
+ *  the project directory now comes from the child's cwd (`Bun.spawn`'s `cwd`, set at the spawn
+ *  site), and the reasoning-effort variant is folded into the model ref as
+ *  `-m provider/model#variant`. `--standalone` is required, not cosmetic: without it `run`
+ *  connects to a long-lived background server that never sees this worker's per-invocation
+ *  `IU_KEY`/`IU_OPENAI_BASE` (measured 2026-10-11: `provider.no-route` on every run), and the
+ *  read-only permission profile rides the same per-process `OPENCODE_CONFIG_CONTENT`; a
+ *  private server is what makes both the env and the profile apply. The `--` before `prompt`
+ *  stays load-bearing,
+ *  not decorative: a message starting with `-` (e.g. a brief that happens to begin "-foo bar")
+ *  is parsed by opencode's own yargs CLI as an unknown FLAG without it — the command prints
+ *  --help and exits 0 with no session ever starting, which this module would otherwise only
+ *  see as an opaque "no output" failure. */
 export function buildOpencodeArgs(input: OpencodeArgsInput): string[] {
-  const { bin, cwd, model, variant, resumeSessionId, prompt } = input;
+  const { bin, model, variant, resumeSessionId, prompt } = input;
   return [
     bin,
     "run",
-    "--dir",
-    cwd,
+    "--standalone",
     "-m",
-    `${providerFor(opencodeModel(model))}/${model}`,
-    ...(variant ? ["--variant", variant] : []),
+    `${providerFor(opencodeModel(model))}/${model}${variant ? `#${variant}` : ""}`,
     ...(resumeSessionId ? ["--session", resumeSessionId] : []),
     "--format",
     "json",
@@ -264,7 +274,8 @@ export function buildOpencodeConfig(input: OpencodeConfigInput): Record<string, 
       output: entry.rate.out,
       ...(entry.rate.cacheRead !== undefined ? { cache_read: entry.rate.cacheRead } : {}),
     },
-    // A model that exposes effort levels runs at "high" by default; `--variant` picks another.
+    // A model that exposes effort levels runs at "high" by default; the `#variant` suffix on
+    // `-m` (buildOpencodeArgs) picks another.
     ...(entry.effort.length > 0
       ? {
           options: { reasoningEffort: "high" },
@@ -483,8 +494,9 @@ function announceOpencodeSessionId(
 function describeOpencodeTool(part: OpencodePart): string {
   const tool = part.tool ?? "tool";
   const input = part.state?.input ?? {};
-  if (tool === "bash" && typeof input.command === "string") {
-    return `bash: ${input.command.slice(0, 50)}`;
+  // 2.x renamed the shell tool from "bash" to "shell" (measured 2.0.25, 2026-10-11).
+  if ((tool === "bash" || tool === "shell") && typeof input.command === "string") {
+    return `${tool}: ${input.command.slice(0, 50)}`;
   }
   const path = input.filePath ?? input.path;
   if (typeof path === "string") {
@@ -503,13 +515,15 @@ export interface OpencodeAccum {
   reasoningTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
-  /** Whether the MOST RECENT `step_finish` seen so far had `part.reason === "stop"` — the
-   *  final assistant turn, as opposed to a `"tool-calls"` step that continues the loop.
-   *  Overwritten on every `step_finish` (not OR-accumulated), so this always reflects the
-   *  LAST one by the time the stream ends. A session that ends on ANY other reason (or ends
-   *  with zero `step_finish` events at all — the initial `false`) is treated as truncated:
-   *  `runOpencodeAttempt` fails the attempt rather than trusting a partial `lastAssistantText`
-   *  as if the model had actually finished. */
+  /** Whether the stream reached the end of the model's final turn. Two shapes set it: a
+   *  `step_finish` with `part.reason === "stop"` (the 1.x shape, tests/fixtures/
+   *  opencode-events.jsonl), or a non-empty `text` part — opencode 2.x (2.0.25, 2026-10-11)
+   *  ends a successful `run --format json` stream on the final assistant `text` part and never
+   *  emits the terminal `step_finish(reason: "stop")` (tests/fixtures/opencode-events-v2.jsonl).
+   *  `step_start`/`tool_use` reset it to false, so this always reflects the LAST part: a stream
+   *  truncated mid-loop (ending on a tool call or a fresh `step_start`) stays false.
+   *  `runOpencodeAttempt` fails the attempt on `!finished` rather than trusting a partial
+   *  `lastAssistantText` as if the model had actually finished. */
   finished: boolean;
   sawErrorEvent: boolean;
   errorMessage?: string;
@@ -536,11 +550,22 @@ export function reduceOpencodeEvent(state: OpencodeAccum, event: OpencodeEvent):
   if (event.sessionID && !next.sessionId) next.sessionId = event.sessionID;
   const part = event.part;
   switch (event.type) {
+    case "step_start":
+      // A fresh step beginning means the previous part was not the session's last — see
+      // `OpencodeAccum.finished`.
+      next.finished = false;
+      break;
     case "tool_use":
+      next.finished = false;
       if (part) next.lastAction = describeOpencodeTool(part);
       break;
     case "text":
-      if (typeof part?.text === "string" && part.text.trim()) next.lastAssistantText = part.text;
+      if (typeof part?.text === "string" && part.text.trim()) {
+        next.lastAssistantText = part.text;
+        // opencode 2.x ends a successful stream here, with no terminal step_finish — see
+        // `OpencodeAccum.finished`.
+        next.finished = true;
+      }
       break;
     case "step_finish":
       next.turns += 1;
@@ -980,7 +1005,6 @@ export async function runOpencodeAttempt<T>(
   const finalPrompt = jsonSchema ? appendJsonSchemaInstruction(prompt, jsonSchema) : prompt;
   const argv = buildOpencodeArgs({
     bin: OPENCODE_BIN,
-    cwd,
     model,
     variant,
     resumeSessionId,
