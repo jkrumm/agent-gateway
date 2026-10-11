@@ -132,8 +132,9 @@ latched so the fallback attempt itself is never switched again:
   `thinkingTokens` mechanism, DeepSeek-V4-Flash/-Pro over the IU native
   Anthropic transport) were retired 2026-09-24 for AGENT_OC/AGENT_OC_IMPLEMENT
   (`harness: "opencode"`, `deepseek-v4.1-flash` over IU's OpenAI-compatible
-  route) — opencode has no `MAX_THINKING_TOKENS` equivalent, only `--variant`
-  (`"high"` investigate/author, `"max"` implement, same reasoning tier split
+  route) — opencode has no `MAX_THINKING_TOKENS` equivalent, only the
+  reasoning-effort variant (`provider/model#variant`; `"high"` investigate/author,
+  `"max"` implement, same reasoning tier split
   AGENT_IMPLEMENT used to encode). Overridable per tool via
   `AGENT_GATEWAY_THINKING_TOKENS_<TOOL>` (claude-harness routes) or
   `AGENT_GATEWAY_HARNESS_<TOOL>`/`AGENT_GATEWAY_VARIANT_<TOOL>` (any route), same env

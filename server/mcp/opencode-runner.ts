@@ -80,7 +80,6 @@ export type OpencodeSubprocess = Subprocess<"ignore", "pipe", "pipe">;
 
 export interface OpencodeArgsInput {
   bin: string;
-  cwd: string;
   model: string;
   variant?: string;
   resumeSessionId?: string;
@@ -109,23 +108,26 @@ function providerFor(entry: { wire: "chat" | "responses" }): string {
   return entry.wire === "responses" ? OPENCODE_PROVIDER_RESPONSES : OPENCODE_PROVIDER_CHAT;
 }
 
-/** The full `opencode` argument vector, INCLUDING the binary as element 0. `-m <provider>/<model>`
- *  names the provider (`iu-chat`/`iu-responses`, `buildOpencodeConfig` below) and the model id together —
- *  opencode has no bare `--model <id>` against a custom provider. The `--` before `prompt`
- *  is load-bearing, not decorative: measured 2026-09-24, a message starting with `-` (e.g. a
- *  brief that happens to begin "-foo bar") is parsed by opencode's own yargs CLI as an
- *  unknown FLAG without it — the command prints --help and exits 0 with no session ever
- *  starting, which this module would otherwise only see as an opaque "no output" failure. */
+/** The full `opencode` argument vector, INCLUDING the binary as element 0. Targets the 2.x CLI:
+ *  opencode 2.0 dropped `run --dir` and `--variant`. The working directory is no longer a flag —
+ *  it is the spawn cwd (`Bun.spawn`'s `cwd`) — and `--standalone` pins the run to its own private
+ *  server rooted there instead of the shared per-user background server, preserving the
+ *  per-episode worktree isolation. `-m <provider>/<model>` names the provider
+ *  (`iu-chat`/`iu-responses`, `buildOpencodeConfig` below) and the model id together — opencode
+ *  has no bare `--model <id>` against a custom provider — with the reasoning variant appended as
+ *  `#<variant>` (2.x's `provider/model#variant` form). The `--` before `prompt` is load-bearing,
+ *  not decorative: measured 2026-09-24, a message starting with `-` (e.g. a brief that happens to
+ *  begin "-foo bar") is parsed by opencode's own yargs CLI as an unknown FLAG without it — the
+ *  command prints --help and exits 0 with no session ever starting, which this module would
+ *  otherwise only see as an opaque "no output" failure. */
 export function buildOpencodeArgs(input: OpencodeArgsInput): string[] {
-  const { bin, cwd, model, variant, resumeSessionId, prompt } = input;
+  const { bin, model, variant, resumeSessionId, prompt } = input;
   return [
     bin,
     "run",
-    "--dir",
-    cwd,
+    "--standalone",
     "-m",
-    `${providerFor(opencodeModel(model))}/${model}`,
-    ...(variant ? ["--variant", variant] : []),
+    `${providerFor(opencodeModel(model))}/${model}${variant ? `#${variant}` : ""}`,
     ...(resumeSessionId ? ["--session", resumeSessionId] : []),
     "--format",
     "json",
@@ -264,7 +266,8 @@ export function buildOpencodeConfig(input: OpencodeConfigInput): Record<string, 
       output: entry.rate.out,
       ...(entry.rate.cacheRead !== undefined ? { cache_read: entry.rate.cacheRead } : {}),
     },
-    // A model that exposes effort levels runs at "high" by default; `--variant` picks another.
+    // A model that exposes effort levels runs at "high" by default; `#<variant>` on the model
+    // ref (buildOpencodeArgs) picks another.
     ...(entry.effort.length > 0
       ? {
           options: { reasoningEffort: "high" },
@@ -980,7 +983,6 @@ export async function runOpencodeAttempt<T>(
   const finalPrompt = jsonSchema ? appendJsonSchemaInstruction(prompt, jsonSchema) : prompt;
   const argv = buildOpencodeArgs({
     bin: OPENCODE_BIN,
-    cwd,
     model,
     variant,
     resumeSessionId,
