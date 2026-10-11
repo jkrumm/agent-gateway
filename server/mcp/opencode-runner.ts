@@ -111,7 +111,9 @@ function providerFor(entry: { wire: "chat" | "responses" }): string {
 
 /** The full `opencode` argument vector, INCLUDING the binary as element 0. Targets the 2.x CLI:
  *  opencode 2.0 dropped `run --dir` and `--variant`. The working directory is no longer a flag —
- *  it is the spawn cwd (`Bun.spawn`'s `cwd`) — and `--standalone` pins the run to its own private
+ *  opencode 2.x resolves it from the inherited `PWD` env var, NOT from `Bun.spawn`'s `cwd`
+ *  (measured 2026-10-11 on 2.0.25), so `buildOpencodeEnv` pins `env.PWD` to the spawn `cwd`
+ *  itself — and `--standalone` pins the run to its own private
  *  server rooted there instead of the shared per-user background server, preserving the
  *  per-episode worktree isolation. `-m <provider>/<model>` names the provider
  *  (`iu-chat`/`iu-responses`, `buildOpencodeConfig` below) and the model id together — opencode
@@ -324,6 +326,11 @@ export function buildOpencodeConfig(input: OpencodeConfigInput): Record<string, 
 
 export interface OpencodeEnvInput {
   tool?: string;
+  /** The spawn working directory, pinned as `env.PWD` — opencode 2.x resolves its cwd from
+   *  the inherited `PWD` env var, not `Bun.spawn`'s `cwd` option, and `workerBaseEnv` copies
+   *  `process.env` verbatim (including the server's own stale `PWD`), so without this the
+   *  spawned session's shell/read tools run against the ambient `PWD`, not the worktree. */
+  cwd: string;
   extraEnv?: Record<string, string>;
   iuKey: string;
   iuOpenaiBase: string;
@@ -358,6 +365,7 @@ export interface OpencodeEnvInput {
 export function buildOpencodeEnv(input: OpencodeEnvInput): Record<string, string> {
   const {
     tool,
+    cwd,
     extraEnv,
     iuKey,
     iuOpenaiBase,
@@ -374,6 +382,12 @@ export function buildOpencodeEnv(input: OpencodeEnvInput): Record<string, string
   delete env.OPENCODE_CONFIG;
   env.OPENCODE_CONFIG_CONTENT = opencodeConfigContent;
   if (extraEnv) Object.assign(env, extraEnv);
+  // Set AFTER `extraEnv` (and after the verbatim `process.env` copy in `workerBaseEnv`): the
+  // spawn cwd is authoritative, so no inherited or caller-supplied `PWD` may shadow it.
+  // opencode 2.x resolves its working directory from `PWD`, not `Bun.spawn`'s cwd — without
+  // this pin the session's shell/read tools run against the server's stale ambient `PWD`,
+  // silently breaking per-episode worktree isolation for every opencode-harness dispatch.
+  env.PWD = cwd;
   return env;
 }
 
@@ -529,6 +543,12 @@ export interface OpencodeAccum {
   cacheWriteTokens: number;
   sawErrorEvent: boolean;
   errorMessage?: string;
+  /** True when the most recent assistant `text` event was never followed by a `step_finish` —
+   *  opencode 2.x under `--standalone` drops the terminal step_finish (measured 2026-10-11),
+   *  so the final answer turn's tokens/cost are NOT in `inputTokens`/`outputTokens`/etc. A
+   *  completed stream reads this at the end: `true` means the run was billed only its
+   *  pre-final-turn usage, and must be flagged as not-fully-accounted rather than complete. */
+  usageIncomplete: boolean;
 }
 
 export const INITIAL_OPENCODE_ACCUM: OpencodeAccum = {
@@ -541,6 +561,7 @@ export const INITIAL_OPENCODE_ACCUM: OpencodeAccum = {
   cacheReadTokens: 0,
   cacheWriteTokens: 0,
   sawErrorEvent: false,
+  usageIncomplete: false,
 };
 
 /** Pure event-fold: one NDJSON line in, the next accumulator state out. No I/O, no callbacks
@@ -555,7 +576,12 @@ export function reduceOpencodeEvent(state: OpencodeAccum, event: OpencodeEvent):
       if (part) next.lastAction = describeOpencodeTool(part);
       break;
     case "text":
-      if (typeof part?.text === "string" && part.text.trim()) next.lastAssistantText = part.text;
+      if (typeof part?.text === "string" && part.text.trim()) {
+        next.lastAssistantText = part.text;
+        // A text turn whose usage is not yet closed by a `step_finish` — the terminal turn
+        // on 2.x standalone. Cleared by the next `step_finish` below.
+        next.usageIncomplete = true;
+      }
       break;
     case "step_finish":
       next.turns += 1;
@@ -566,6 +592,7 @@ export function reduceOpencodeEvent(state: OpencodeAccum, event: OpencodeEvent):
         next.cacheReadTokens += part.tokens.cache?.read ?? 0;
         next.cacheWriteTokens += part.tokens.cache?.write ?? 0;
       }
+      next.usageIncomplete = false;
       break;
     case "error":
       next.sawErrorEvent = true;
@@ -992,7 +1019,7 @@ export async function runOpencodeAttempt<T>(
   }
 
   const opencodeConfigContent = JSON.stringify(buildOpencodeConfig({ model, readOnly }));
-  const env = buildOpencodeEnv({ tool, extraEnv, iuKey, iuOpenaiBase, opencodeConfigContent });
+  const env = buildOpencodeEnv({ tool, cwd, extraEnv, iuKey, iuOpenaiBase, opencodeConfigContent });
 
   const finalPrompt = jsonSchema ? appendJsonSchemaInstruction(prompt, jsonSchema) : prompt;
   const argv = buildOpencodeArgs({
@@ -1174,6 +1201,13 @@ export async function runOpencodeAttempt<T>(
     };
   }
 
+  if (accum.usageIncomplete) {
+    runnerLogger().warn(
+      { event: "session.opencode_usage_incomplete", project: cwd, ...errCtx, turns: accum.turns },
+      "opencode final-turn usage not accounted (no terminal step_finish) — cost/tokens understated",
+    );
+  }
+
   const parsed = extractJson<T>(accum.lastAssistantText);
   if (parsed === undefined) {
     emitAttribution("error", { reason: "json_parse" });
@@ -1193,10 +1227,10 @@ export async function runOpencodeAttempt<T>(
       const asText = typeof parsed === "string" ? parsed : JSON.stringify(parsed, null, 2);
       return unclassifiedOutputFailure<T>(v.error, asText, false, backend, model);
     }
-    emitAttribution("ok");
+    emitAttribution("ok", { usageIncomplete: accum.usageIncomplete });
     return { ok: true, data: v.value, backend, model };
   }
 
-  emitAttribution("ok");
+  emitAttribution("ok", { usageIncomplete: accum.usageIncomplete });
   return { ok: true, data: parsed as T, backend, model };
 }

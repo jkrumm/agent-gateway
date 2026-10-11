@@ -363,6 +363,7 @@ describe("buildOpencodeEnv", () => {
   test("IU_KEY/IU_OPENAI_BASE/OPENCODE_CONFIG_CONTENT are set, OPENCODE_CONFIG is never set", () => {
     const env = buildOpencodeEnv({
       tool: "dispatch",
+      cwd: "/worktree/abc",
       iuKey: "sk-secret-123",
       iuOpenaiBase: "https://iu.example.com/openai/v1",
       opencodeConfigContent: '{"permission":{}}',
@@ -374,9 +375,23 @@ describe("buildOpencodeEnv", () => {
     expect(env.OPENCODE_CONFIG).toBeUndefined();
   });
 
+  test("PWD is pinned to cwd, overriding an inherited and an extraEnv PWD", () => {
+    const env = buildOpencodeEnv({
+      tool: "dispatch",
+      cwd: "/worktree/abc",
+      iuKey: "k",
+      iuOpenaiBase: "https://iu.example.com/openai/v1",
+      opencodeConfigContent: "{}",
+      baseEnv: { PWD: "/stale/server/cwd", PATH: "/usr/bin" },
+      extraEnv: { PWD: "/also/wrong" },
+    });
+    expect(env.PWD).toBe("/worktree/abc");
+  });
+
   test("an inherited OPENCODE_CONFIG file-path var is deleted, not merely shadowed", () => {
     const env = buildOpencodeEnv({
       tool: "dispatch",
+      cwd: "/tmp",
       iuKey: "k",
       iuOpenaiBase: "https://iu.example.com/openai/v1",
       opencodeConfigContent: "{}",
@@ -388,6 +403,7 @@ describe("buildOpencodeEnv", () => {
   test("the key never appears verbatim in any other env value", () => {
     const env = buildOpencodeEnv({
       tool: "dispatch",
+      cwd: "/tmp",
       iuKey: "sk-secret-123",
       iuOpenaiBase: "https://iu.example.com/openai/v1",
       opencodeConfigContent: '{"permission":{}}',
@@ -400,6 +416,7 @@ describe("buildOpencodeEnv", () => {
   test("scrub removes credential-shaped inherited env vars", () => {
     const env = buildOpencodeEnv({
       tool: "dispatch",
+      cwd: "/tmp",
       iuKey: "k",
       iuOpenaiBase: "https://iu.example.com/openai/v1",
       opencodeConfigContent: "{}",
@@ -413,6 +430,7 @@ describe("buildOpencodeEnv", () => {
   test("USAGE_LANE tags the tool, CLAUDE_SESSION_ID/CLAUDE_PARENT_SESSION_ID are stripped", () => {
     const env = buildOpencodeEnv({
       tool: "dispatch",
+      cwd: "/tmp",
       iuKey: "k",
       iuOpenaiBase: "https://iu.example.com/openai/v1",
       opencodeConfigContent: "{}",
@@ -427,6 +445,7 @@ describe("buildOpencodeEnv", () => {
   test("extraEnv is applied last and wins over everything else", () => {
     const env = buildOpencodeEnv({
       tool: "dispatch",
+      cwd: "/tmp",
       iuKey: "k",
       iuOpenaiBase: "https://iu.example.com/openai/v1",
       opencodeConfigContent: "{}",
@@ -552,6 +571,42 @@ describe("reduceOpencodeEvent over a real captured successful 2.x stream", () =>
     expect(accum.lastAssistantText).toBe("done");
     // No top-level `error` event — a completed session.
     expect(accum.sawErrorEvent).toBe(false);
+    // The final `text` ("done") has no following step_finish, so the final turn's usage is
+    // unaccounted — exactly the 2.x standalone shape the accounting must flag.
+    expect(accum.usageIncomplete).toBe(true);
+  });
+
+  test("a terminal step_finish closes the final text turn: usageIncomplete is false", () => {
+    let accum = INITIAL_OPENCODE_ACCUM;
+    for (const ev of fixtureLines) accum = reduceOpencodeEvent(accum, ev as never);
+    accum = reduceOpencodeEvent(accum, {
+      type: "step_finish",
+      sessionID: "ses_ed4817882ffeolsUu5rLTg5npK",
+      part: {
+        type: "step-finish",
+        reason: "stop",
+        tokens: { input: 100, output: 50, reasoning: 10, cache: { read: 0, write: 0 } },
+      },
+    } as never);
+    expect(accum.usageIncomplete).toBe(false);
+    // And the terminal turn's tokens are now tallied too.
+    expect(accum.inputTokens).toBe(351);
+    expect(accum.outputTokens).toBe(87);
+  });
+
+  test("a text with no step_finish yet flags usageIncomplete, cleared by the next step_finish", () => {
+    let accum = reduceOpencodeEvent(INITIAL_OPENCODE_ACCUM, {
+      type: "text",
+      sessionID: "s",
+      part: { type: "text", text: "answer" },
+    } as never);
+    expect(accum.usageIncomplete).toBe(true);
+    accum = reduceOpencodeEvent(accum, {
+      type: "step_finish",
+      sessionID: "s",
+      part: { type: "step-finish", reason: "stop", tokens: { input: 1, output: 1 } },
+    } as never);
+    expect(accum.usageIncomplete).toBe(false);
   });
 
   test("a 2.x success stream carries NO terminal step_finish(reason: stop) — completion must not require it", () => {
