@@ -5,9 +5,11 @@
 // for why. This module owns everything specific to that CLI: argv/config/env builders (pure,
 // unit-tested directly), its NDJSON event shape (measured against real `opencode run --format
 // json` output — 1.19 on 2026-09-24 via tests/fixtures/opencode-events*.jsonl, re-measured
-// against 2.0.25 on 2026-10-11 via tests/fixtures/opencode-events-v2.jsonl, which differs in
-// that a successful run's stream ends on the final assistant `text` part with no terminal
-// `step_finish(reason: "stop")` — see `OpencodeAccum.finished`), the per-process
+// against 2.0.25 on 2026-10-11 via tests/fixtures/opencode-events-v2.jsonl, a FULL untrimmed
+// capture: a successful run's stream ends on the final assistant `text` part with no terminal
+// `step_finish(reason: "stop")` — see `OpencodeAccum.finished`; the same capture is why
+// `OpencodeAccum.turns` counts `max(step_start, step_finish)` and why a 2.x terminal step's
+// token usage is a known undercount — see `reduceOpencodeEvent`), the per-process
 // lifecycle (`runOpencodeProcessLifecycle`) and one attempt runner (`runOpencodeAttempt`),
 // invoked from `session-runner.ts`'s `runSessionAttempt` whenever `resolveHarness()` resolves
 // to `"opencode"`. It returns the exact same `SessionResult<T>` shape the claude path does, so
@@ -408,7 +410,9 @@ export function redactSecret(text: string, secret: string): string {
 // ── NDJSON event shape (measured 2026-09-24 against real `opencode run --format json`
 // output — tests/fixtures/opencode-events.jsonl (a successful run) and
 // tests/fixtures/opencode-events-error.jsonl (two real failing runs: a rejected apiKey, an
-// unrecognized model id) are trimmed excerpts of the actual streams) ──
+// unrecognized model id) are trimmed excerpts of the actual streams; re-measured 2026-10-11
+// against 2.0.25 — tests/fixtures/opencode-events-v2.jsonl is a FULL untrimmed capture of a
+// real success, whose final step ends on `text` with no `step_finish`) ──
 
 interface OpencodeToolState {
   status?: "completed" | "error" | string;
@@ -506,7 +510,16 @@ function describeOpencodeTool(part: OpencodePart): string {
 }
 
 export interface OpencodeAccum {
+  /** Completed steps. Derived as `max(stepStarts, stepFinishes)` (see `reduceOpencodeEvent`):
+   *  in a 1.x stream every step ends on a `step_finish`, and in a 2.x stream the terminal step
+   *  emits a `step_start` but no `step_finish`. Neither event alone counts steps across both
+   *  versions — the terminal step of one version drops one marker — so the larger of the two
+   *  counts is the step total. */
   turns: number;
+  /** Raw count of `step_start` events — half of `turns`'s `max(...)`; see its doc comment. */
+  stepStarts: number;
+  /** Raw count of `step_finish` events — the other half of `turns`'s `max(...)`. */
+  stepFinishes: number;
   lastAction: string;
   lastAssistantText: string;
   sessionId?: string;
@@ -519,11 +532,17 @@ export interface OpencodeAccum {
    *  `step_finish` with `part.reason === "stop"` (the 1.x shape, tests/fixtures/
    *  opencode-events.jsonl), or a non-empty `text` part — opencode 2.x (2.0.25, 2026-10-11)
    *  ends a successful `run --format json` stream on the final assistant `text` part and never
-   *  emits the terminal `step_finish(reason: "stop")` (tests/fixtures/opencode-events-v2.jsonl).
-   *  `step_start`/`tool_use` reset it to false, so this always reflects the LAST part: a stream
-   *  truncated mid-loop (ending on a tool call or a fresh `step_start`) stays false.
-   *  `runOpencodeAttempt` fails the attempt on `!finished` rather than trusting a partial
-   *  `lastAssistantText` as if the model had actually finished. */
+   *  emits the terminal `step_finish(reason: "stop")` (tests/fixtures/opencode-events-v2.jsonl
+   *  is a FULL untrimmed 2.0.25 capture — step_start, tool_use, step_finish[tool-calls],
+   *  step_start, text — reproduced twice on the installed binary). The static server code still
+   *  publishes `session.step.ended` (which maps to `step_finish`), but the `run` client returns
+   *  on `session.execution.succeeded` before rendering that final event, so the runner never
+   *  sees it. `step_start`/`tool_use` reset it to false, so this always reflects the LAST part:
+   *  a stream truncated mid-loop (ending on a tool call or a fresh `step_start`) stays false.
+   *  Caveat: real 2.x truncation shows up as a non-zero exit or an `error` event (both checked
+   *  before this flag), but a provider cutoff that still closes the text segment (`length`)
+   *  would look finished — the final step's `step_finish` that would carry `reason: "length"`
+   *  is exactly the one 2.x drops, so it cannot be distinguished from here. */
   finished: boolean;
   sawErrorEvent: boolean;
   errorMessage?: string;
@@ -531,6 +550,8 @@ export interface OpencodeAccum {
 
 export const INITIAL_OPENCODE_ACCUM: OpencodeAccum = {
   turns: 0,
+  stepStarts: 0,
+  stepFinishes: 0,
   lastAction: "starting",
   lastAssistantText: "",
   inputTokens: 0,
@@ -552,7 +573,8 @@ export function reduceOpencodeEvent(state: OpencodeAccum, event: OpencodeEvent):
   switch (event.type) {
     case "step_start":
       // A fresh step beginning means the previous part was not the session's last — see
-      // `OpencodeAccum.finished`.
+      // `OpencodeAccum.finished`. Also one more step observed — see `OpencodeAccum.turns`.
+      next.stepStarts += 1;
       next.finished = false;
       break;
     case "tool_use":
@@ -568,7 +590,7 @@ export function reduceOpencodeEvent(state: OpencodeAccum, event: OpencodeEvent):
       }
       break;
     case "step_finish":
-      next.turns += 1;
+      next.stepFinishes += 1;
       if (part?.tokens) {
         next.inputTokens += part.tokens.input ?? 0;
         next.outputTokens += part.tokens.output ?? 0;
@@ -587,6 +609,11 @@ export function reduceOpencodeEvent(state: OpencodeAccum, event: OpencodeEvent):
     default:
       break;
   }
+  // See `OpencodeAccum.turns`: the terminal step of one version drops one of the two markers,
+  // so the true step count is whichever of `stepStarts`/`stepFinishes` is larger. Usage still
+  // only comes from `step_finish` (above), so a 2.x terminal step's tokens are not observable —
+  // tracked in the module header as a known undercount.
+  next.turns = Math.max(next.stepStarts, next.stepFinishes);
   return next;
 }
 
@@ -1143,8 +1170,10 @@ export async function runOpencodeAttempt<T>(
   }
 
   // exit 0 is NOT success on its own — a real `type: "error"` event (tested,
-  // tests/fixtures/opencode-events-error.jsonl) or a stream that never reached a final
-  // step_finish(reason: "stop") (truncated/interrupted mid-run) can both still exit 0.
+  // tests/fixtures/opencode-events-error.jsonl) or a stream that never reached the end of the
+  // final turn (truncated/interrupted mid-run; `finished` stays false — see its doc comment for
+  // why 2.x's "finished" is the final `text` part, not a terminal step_finish) can both still
+  // exit 0.
   // `noOutput: true` on both branches below so `isSalvageable` (dispatch.ts) still gets one
   // retry out of a partial `lastAssistantText`, same as every other "ran but didn't finish
   // cleanly" shape this module produces.
@@ -1166,7 +1195,7 @@ export async function runOpencodeAttempt<T>(
   if (!accum.finished) {
     emitAttribution("error", { reason: "no_stop_reason" });
     const error =
-      'opencode session ended without a final step_finish(reason: "stop") — likely truncated or interrupted mid-run';
+      "opencode session ended without reaching the end of its final turn (no terminal step_finish and no final assistant text) — likely truncated or interrupted mid-run";
     return {
       ok: false,
       error,

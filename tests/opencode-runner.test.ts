@@ -5,9 +5,11 @@
 // `tests/fixtures/opencode-events-error.jsonl` is two REAL failing runs (a rejected apiKey, an
 // unrecognized model id), captured the same day via `OPENCODE_CONFIG_CONTENT` with deliberately
 // broken credentials/model — the exact NDJSON `type: "error"` shape B1 fixes against.
-// `tests/fixtures/opencode-events-v2.jsonl` is a trimmed excerpt of a REAL 2.0.25 success
-// (2026-10-11): same part shape, but the stream ends on the final `text` part with no terminal
-// `step_finish(reason: "stop")` — see `OpencodeAccum.finished`.
+// `tests/fixtures/opencode-events-v2.jsonl` is a FULL untrimmed capture of a REAL 2.0.25
+// success (2026-10-11): same part shape, but the stream ends on the final `text` part with no
+// terminal `step_finish(reason: "stop")` — see `OpencodeAccum.finished`. The static server code
+// still publishes `session.step.ended` (→ `step_finish`); the `run` client returns on
+// `session.execution.succeeded` before rendering it, so it never reaches the stream.
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -631,7 +633,7 @@ describe("reduceOpencodeEvent over a real captured successful stream", () => {
 
 // opencode 2.x (2.0.25, 2026-10-11) ends a successful `run --format json` stream on the final
 // assistant `text` part and never emits the terminal `step_finish(reason: "stop")` that 1.x
-// did (tests/fixtures/opencode-events-v2.jsonl is a trimmed excerpt of a real 2.0.25 run).
+// did (tests/fixtures/opencode-events-v2.jsonl is a FULL untrimmed capture of a real 2.0.25 run).
 describe("reduceOpencodeEvent over a real captured 2.x stream (no terminal step_finish)", () => {
   const fixtureLines = readFixture("opencode-events-v2.jsonl");
 
@@ -639,14 +641,22 @@ describe("reduceOpencodeEvent over a real captured 2.x stream (no terminal step_
     let accum = INITIAL_OPENCODE_ACCUM;
     for (const ev of fixtureLines) accum = reduceOpencodeEvent(accum, ev as never);
 
-    expect(accum.sessionId).toBe("ses_ed536e6b7ffeVauOU19YywcOLm");
-    // Exactly one step_finish (the tool step, reason "tool-calls"); the final step emits none.
-    expect(accum.turns).toBe(1);
+    expect(accum.sessionId).toBe("ses_ed51550d8ffeeT3JslyPG4FMF7");
+    // Two step_start events (the tool step and the final text step) vs one step_finish (the
+    // tool step) — `turns` is the max of the two, so the final 2.x step is counted even though
+    // it emits no step_finish (see `OpencodeAccum.turns`).
+    expect(accum.turns).toBe(2);
     expect(accum.lastAssistantText).toBe("DONE");
     // Under the old "last step_finish must be stop" rule this stayed false forever on 2.x.
     expect(accum.finished).toBe(true);
-    expect(accum.lastAction).toBe("shell: echo hello");
+    expect(accum.lastAction).toBe("shell: echo hi");
     expect(accum.sawErrorEvent).toBe(false);
+    // KNOWN UNDERCOUNT: the final step emits no step_finish, so its tokens are not in the
+    // stream — usage reflects only the tool step. Documented on `OpencodeAccum`/module header.
+    expect(accum.inputTokens).toBe(304);
+    expect(accum.outputTokens).toBe(38);
+    expect(accum.reasoningTokens).toBe(208);
+    expect(accum.cacheReadTokens).toBe(19456);
   });
 
   test("a 2.x stream truncated on a fresh step_start is NOT finished", () => {
