@@ -4,7 +4,8 @@
 // `opencode run` instead of `claude -p` — see routing.ts's module-header Harness paragraph
 // for why. This module owns everything specific to that CLI: argv/config/env builders (pure,
 // unit-tested directly), its NDJSON event shape (measured against real `opencode run --format
-// json` output, 2026-09-24 — see tests/fixtures/opencode-events*.jsonl), the per-process
+// json` output — re-captured from opencode 2.0.25 on 2026-10-11, see
+// tests/fixtures/opencode-events*.jsonl), the per-process
 // lifecycle (`runOpencodeProcessLifecycle`) and one attempt runner (`runOpencodeAttempt`),
 // invoked from `session-runner.ts`'s `runSessionAttempt` whenever `resolveHarness()` resolves
 // to `"opencode"`. It returns the exact same `SessionResult<T>` shape the claude path does, so
@@ -253,7 +254,15 @@ const READ_ONLY_BASH_RULES: Record<string, "allow" | "deny"> = {
  *  `READ_ONLY_BASH_RULES` object (read commands allowed, everything else default-denied),
  *  `webfetch`/`websearch` are `deny` (workers shell out via `curl` — AGENTS.md's Worker
  *  routing rule), and `edit` is `deny`. A writable session (dispatch implement) keeps the
- *  permissive profile: `bash: "allow"`, `webfetch`/`websearch: "allow"`, `edit: "allow"`. */
+ *  permissive profile: `bash: "allow"`, `webfetch`/`websearch: "allow"`, `edit: "allow"`.
+ *
+ *  Verified against 2.0.25 live (2026-10-11): under `--standalone` this config IS honoured by
+ *  the private server — a read-only run exposed no `edit`/`write` tool and denied a `shell`
+ *  command outside the allowlist ("Permission denied: shell"; `ls` ran, `touch` was refused),
+ *  while the same config with `readOnly: false` exposed `write` and created the file. The
+ *  `bash` permission key still governs 2.x's renamed `shell` tool — the tool label changed, the
+ *  key did not. Without `--standalone` the shared background server ignored the config entirely
+ *  ("Model unavailable" for the custom provider), which is why `--standalone` is load-bearing. */
 export function buildOpencodeConfig(input: OpencodeConfigInput): Record<string, unknown> {
   const { model, readOnly } = input;
   const entry = opencodeModel(model);
@@ -425,14 +434,24 @@ interface OpencodePart {
   cost?: number;
 }
 
-/** The nested shape of a real `type: "error"` event's `error` field — measured 2026-09-24
- *  against two live failures (a rejected apiKey: `{name:"APIError", data:{message, statusCode:
- *  401, isRetryable:false, responseHeaders, responseBody, metadata}}`; an unrecognized model
- *  id: `{name:"UnknownError", data:{message, ref}}`). This is an OBJECT, not a bare string —
- *  an earlier draft of this module assumed a flat `error?: string` / top-level `message?:
- *  string`, which never matched anything real and would have left `errorMessage` always
- *  `undefined` on an actual failure. */
+/** The shape of a real `type: "error"` event's `error` field. opencode 2.x INLINED it — the
+ *  error is now a FLAT `{type, message}` object, e.g.
+ *  `{type:"provider.no-route", message:"Model unavailable: iu-chat/…"}` or
+ *  `{type:"provider.auth", message:"Provider request failed with HTTP 401: …", status:401}`
+ *  (measured 2026-10-11 on 2.0.25, tests/fixtures/opencode-events-error.jsonl). Reading the
+ *  1.x `event.error?.data?.message ?? event.error?.name` shape here left `errorMessage` always
+ *  `undefined` on 2.x, collapsing every failure into the generic "opencode error: unknown". The
+ *  1.x nested `{name, data:{message}}` fields are kept below as a fallback so an old binary's
+ *  stream still yields a real message. This is an OBJECT, not a bare string — a flat
+ *  `error?: string` never matched anything real. */
 interface OpencodeErrorDetail {
+  /** 2.x machine class, e.g. "provider.no-route" / "provider.auth" (fallback when no message). */
+  type?: string;
+  /** 2.x human-readable message — the field `reduceOpencodeEvent` surfaces. */
+  message?: string;
+  /** HTTP status, when the provider answered with one (2.x). */
+  status?: number;
+  /** 1.x legacy shape, retained as a fallback. */
   name?: string;
   data?: {
     message?: string;
@@ -482,12 +501,14 @@ function announceOpencodeSessionId(
 
 /** Compact human label for a tool_use part, mirroring `describeTool` in session-runner.ts —
  *  same shape of output ("bash: <cmd>", "edit <basename>"), different input shape
- *  (`part.tool`/`part.state.input` rather than claude's `name`/`input`). */
+ *  (`part.tool`/`part.state.input` rather than claude's `name`/`input`). The shell-command tool
+ *  is named `bash` in opencode 1.x and `shell` in 2.x (measured 2026-10-11 on 2.0.25), so both
+ *  are labelled `${tool}: <cmd>`. */
 function describeOpencodeTool(part: OpencodePart): string {
   const tool = part.tool ?? "tool";
   const input = part.state?.input ?? {};
-  if (tool === "bash" && typeof input.command === "string") {
-    return `bash: ${input.command.slice(0, 50)}`;
+  if ((tool === "bash" || tool === "shell") && typeof input.command === "string") {
+    return `${tool}: ${input.command.slice(0, 50)}`;
   }
   const path = input.filePath ?? input.path;
   if (typeof path === "string") {
@@ -506,14 +527,6 @@ export interface OpencodeAccum {
   reasoningTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
-  /** Whether the MOST RECENT `step_finish` seen so far had `part.reason === "stop"` — the
-   *  final assistant turn, as opposed to a `"tool-calls"` step that continues the loop.
-   *  Overwritten on every `step_finish` (not OR-accumulated), so this always reflects the
-   *  LAST one by the time the stream ends. A session that ends on ANY other reason (or ends
-   *  with zero `step_finish` events at all — the initial `false`) is treated as truncated:
-   *  `runOpencodeAttempt` fails the attempt rather than trusting a partial `lastAssistantText`
-   *  as if the model had actually finished. */
-  finished: boolean;
   sawErrorEvent: boolean;
   errorMessage?: string;
 }
@@ -527,7 +540,6 @@ export const INITIAL_OPENCODE_ACCUM: OpencodeAccum = {
   reasoningTokens: 0,
   cacheReadTokens: 0,
   cacheWriteTokens: 0,
-  finished: false,
   sawErrorEvent: false,
 };
 
@@ -554,13 +566,15 @@ export function reduceOpencodeEvent(state: OpencodeAccum, event: OpencodeEvent):
         next.cacheReadTokens += part.tokens.cache?.read ?? 0;
         next.cacheWriteTokens += part.tokens.cache?.write ?? 0;
       }
-      // Overwrite, not OR — see `OpencodeAccum.finished`'s doc comment: only the LAST
-      // step_finish's reason should decide this.
-      next.finished = part?.reason === "stop";
       break;
     case "error":
       next.sawErrorEvent = true;
-      next.errorMessage = event.error?.data?.message ?? event.error?.name ?? next.errorMessage;
+      next.errorMessage =
+        event.error?.message ??
+        event.error?.data?.message ??
+        event.error?.type ??
+        event.error?.name ??
+        next.errorMessage;
       break;
     default:
       break;
@@ -1121,30 +1135,19 @@ export async function runOpencodeAttempt<T>(
   }
 
   // exit 0 is NOT success on its own — a real `type: "error"` event (tested,
-  // tests/fixtures/opencode-events-error.jsonl) or a stream that never reached a final
-  // step_finish(reason: "stop") (truncated/interrupted mid-run) can both still exit 0.
+  // tests/fixtures/opencode-events-error.jsonl) can still exit 0, so that check is preserved.
+  // It is NOT gated on a terminal `step_finish(reason: "stop")`: opencode 2.x does not emit one
+  // under `--standalone` (measured 2026-10-11 on 2.0.25 — the process exits right after the
+  // final assistant text and the terminal event is dropped almost every run), so requiring it
+  // failed every successful dispatch. A clean exit carrying a final assistant message and no
+  // error event is the completion signal; a genuinely truncated/interrupted run exits non-zero,
+  // trips the idle watchdog, or emits an `error` event — all handled above.
   // `noOutput: true` on both branches below so `isSalvageable` (dispatch.ts) still gets one
   // retry out of a partial `lastAssistantText`, same as every other "ran but didn't finish
   // cleanly" shape this module produces.
   if (accum.sawErrorEvent) {
     emitAttribution("error", { reason: "error_event" });
     const error = `opencode error: ${accum.errorMessage ?? "unknown"}`;
-    return {
-      ok: false,
-      error,
-      classificationText: error,
-      hadApiRetry: false,
-      noOutput: true,
-      rawText: accum.lastAssistantText || undefined,
-      backend,
-      model,
-    };
-  }
-
-  if (!accum.finished) {
-    emitAttribution("error", { reason: "no_stop_reason" });
-    const error =
-      'opencode session ended without a final step_finish(reason: "stop") — likely truncated or interrupted mid-run';
     return {
       ok: false,
       error,
