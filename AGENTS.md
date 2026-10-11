@@ -376,8 +376,8 @@ implement model on
 `claude -p` (three re-run implement briefs): ~40x cheaper, ~2-4x faster, a
 blind diff review preferred it on 2 of 3, lost the third on inverted
 volume-floor logic in a HyperDX config — not a clean sweep, and 95-98% cache
-hit vs the previous model's 8%. `variant` (opencode's `--variant`, a reasoning-effort
-knob) is `"high"` for investigate/author, `"max"` for implement — the same
+hit vs the previous model's 8%. `variant` (opencode's reasoning-effort knob, folded into
+the model ref as `provider/model#variant` in 2.x) is `"high"` for investigate/author, `"max"` for implement — the same
 higher-stakes-write-tier split AGENT_IMPLEMENT used to encode; opencode's
 model/harness combination is validated against the model registry
 (`server/lib/models.ts` — id, wire, harnesses, limits, rates, `verified`; also

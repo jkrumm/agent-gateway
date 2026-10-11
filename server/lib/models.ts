@@ -43,7 +43,7 @@ export interface ModelEntry {
   /** USD per MTok. `cacheRead` absent → billed at 0.1x `in` (modelpick's convention — a
    *  missing cache rate must never make cached tokens look free). */
   rate: { in: number; out: number; cacheRead?: number; source: string; date: string };
-  /** Reasoning-effort variants the id accepts (opencode `--variant`); [] = none exposed. */
+  /** Reasoning-effort variants the id accepts (opencode `provider/model#variant`); [] = none exposed. */
   effort: readonly string[];
   /** Whether `response_format: {type: "json_object"}` is probed to work on the chat wire. */
   jsonObject: boolean;

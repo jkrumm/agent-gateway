@@ -65,18 +65,16 @@ function readOnlyBashRules(): Record<string, "allow" | "deny"> {
 }
 
 describe("buildOpencodeArgs", () => {
-  test("bare invocation — dir, model-as-iu-chat/<model>, format json, -- before the prompt", () => {
+  test("bare invocation — standalone, model-as-iu-chat/<model>, format json, -- before the prompt", () => {
     const argv = buildOpencodeArgs({
       bin: "/opt/homebrew/bin/opencode",
-      cwd: "/tmp/wt-vps",
       model: "deepseek-v4.1-flash",
       prompt: "investigate the thing",
     });
     expect(argv).toEqual([
       "/opt/homebrew/bin/opencode",
       "run",
-      "--dir",
-      "/tmp/wt-vps",
+      "--standalone",
       "-m",
       "iu-chat/deepseek-v4.1-flash",
       "--format",
@@ -89,7 +87,6 @@ describe("buildOpencodeArgs", () => {
   test("a responses-wire (GPT) model is prefixed with the iu-responses provider", () => {
     const argv = buildOpencodeArgs({
       bin: "opencode",
-      cwd: "/tmp/wt",
       model: "gpt-6.1-sol",
       prompt: "p",
     });
@@ -101,7 +98,6 @@ describe("buildOpencodeArgs", () => {
     // message as an unknown flag, prints --help and exits 0 with no session ever starting.
     const argv = buildOpencodeArgs({
       bin: "opencode",
-      cwd: "/tmp/wt",
       model: "deepseek-v4.1-flash",
       prompt: "-foo, do the thing",
     });
@@ -111,24 +107,21 @@ describe("buildOpencodeArgs", () => {
     expect(argv.at(-1)).toBe("-foo, do the thing");
   });
 
-  test("variant is inserted before -- when present", () => {
+  test("variant is folded into the model ref as provider/model#variant (2.x; no --variant flag)", () => {
     const argv = buildOpencodeArgs({
       bin: "opencode",
-      cwd: "/tmp/wt",
       model: "deepseek-v4.1-flash",
       variant: "max",
       prompt: "p",
     });
-    const i = argv.indexOf("--variant");
-    expect(i).toBeGreaterThan(-1);
-    expect(argv[i + 1]).toBe("max");
-    expect(argv.indexOf("--")).toBeGreaterThan(i);
+    expect(argv[argv.indexOf("-m") + 1]).toBe("iu-chat/deepseek-v4.1-flash#max");
+    expect(argv).not.toContain("--variant");
+    expect(argv.indexOf("--")).toBeGreaterThan(argv.indexOf("-m"));
   });
 
   test("resumeSessionId emits --session <id>", () => {
     const argv = buildOpencodeArgs({
       bin: "opencode",
-      cwd: "/tmp/wt",
       model: "deepseek-v4.1-flash",
       resumeSessionId: "ses_abc123",
       prompt: "continue",
@@ -138,16 +131,16 @@ describe("buildOpencodeArgs", () => {
     expect(argv[i + 1]).toBe("ses_abc123");
   });
 
-  test("no --pure anywhere in the vector — measured to hang", () => {
+  test("no --pure or --dir anywhere in the vector — --pure hangs, --dir is gone in 2.x", () => {
     const argv = buildOpencodeArgs({
       bin: "opencode",
-      cwd: "/tmp/wt",
       model: "deepseek-v4.1-flash",
       variant: "high",
       resumeSessionId: "ses_x",
       prompt: "p",
     });
     expect(argv).not.toContain("--pure");
+    expect(argv).not.toContain("--dir");
   });
 });
 
