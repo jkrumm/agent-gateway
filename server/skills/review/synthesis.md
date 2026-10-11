@@ -12,10 +12,6 @@ You have received findings from these sources (some may be empty):
 
 [FALLOW_RESULTS]
 
-### CodeRabbit
-
-[CODERABBIT_RESULTS]
-
 ### OpenCodeReview
 
 [OCR_RESULTS]
@@ -87,10 +83,9 @@ is discarded. Do any reasoning first, then emit the JSON as your final message a
 ## Rules
 
 - `line` is optional — omit if not identifiable from the original finding
-- `angle` is required — which reviewer caught it: `architect`, `senior-dev`, `frontend`, `backend`, `typescript`, `qa`, `security`, `performance`, `concurrency`, `data-migration`, `api-contract`, `resilience`, `adversary`, `coderabbit`, `fallow`, `ocr`
+- `angle` is required — which reviewer caught it: `architect`, `senior-dev`, `frontend`, `backend`, `typescript`, `qa`, `security`, `performance`, `concurrency`, `data-migration`, `api-contract`, `resilience`, `adversary`, `fallow`, `ocr`
 - Preserve specificity from the original finding — don't generalize
 - Empty arrays are fine — not every review has blocking issues
 - Bias toward `improvement` over `discussion` — if the fix is obvious and low-risk, it's an improvement
 - The summary should help a human quickly decide: read and move on (clean), delegate to implementation agent (actionable), or review discussions personally (needs-human)
 - For fallow findings: map verdict "fail" items to improvements, "warn" items to improvements only if they're concretely actionable
-- For CodeRabbit findings: deduplicate against specialist findings, keep CodeRabbit's phrasing only if it's more specific

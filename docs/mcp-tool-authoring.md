@@ -93,7 +93,7 @@ it — design new tools with these baked in.
    build a minimal prompt that forbids `which`/`git remote -v`/ecosystem
    sniffing/`fallow`. Prefer doing discovery in handler code (deterministic parallel
    `shell()` calls) over asking the worker — why `review` never had this
-   time-sink: it gathers diff/fallow/coderabbit itself.
+   time-sink: it gathers diff/fallow itself.
 3. **Keep skills ecosystem-agnostic.** Don't hardwire Node/`package.json`
    assumptions into prompts or angle-gating. Known residual: `review` still
    gates the QA angle on `package.json` existing.

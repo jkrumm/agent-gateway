@@ -10,12 +10,12 @@ import { appLogger as logger } from "../logger.ts";
 
 // ── OpenCodeReview (alibaba/open-code-review, `ocr` on PATH) ─────────────────────────────
 //
-// One more phase-1 review INPUT, like fallow/CodeRabbit — never a gate. A POC on this repo's
+// One more phase-1 review INPUT, like fallow — never a gate. A POC on this repo's
 // last 4 commits found 5 real, verified issues the 12-angle pipeline missed (cross-file
 // consistency, config drift, precise line anchors); it missed the deeper runtime bugs the
 // angles caught. `runOcrReview` therefore NEVER throws into the review — a failure degrades
 // to a one-line block the synthesizer reads as "no input from this reviewer", the same shape
-// an unavailable fallow/CodeRabbit already produces.
+// an unavailable fallow already produces.
 //
 // Liveness is an idle watchdog only (`.claude/rules/agent-limits.md`): no stdout/stderr byte
 // for IDLE_TIMEOUT_MS (5 min) kills it, never a wall-clock ceiling — `--timeout 0` disables
@@ -347,7 +347,7 @@ async function recordOcrFailureUsage(input: {
 }
 
 /** Compact markdown rendering of one OCR run, fed into the synthesis prompt's `[OCR_RESULTS]`
- *  placeholder the same way the fallow/CodeRabbit blocks already are. Pure, never throws.
+ *  placeholder the same way the fallow blocks already are. Pure, never throws.
  *  Zero comments still renders `warnings` and a non-`complete`/`success` `status` — a
  *  `completed_with_errors` run with no comments is a partial failure, not "nothing found". */
 export function renderOcrBlock(result: OcrResult): string {
@@ -428,7 +428,7 @@ export interface RunOcrReviewResult {
   ran: boolean;
 }
 
-/** Run `ocr review` as one more phase-1 review input, alongside fallow/CodeRabbit — NEVER
+/** Run `ocr review` as one more phase-1 review input, alongside fallow — NEVER
  *  throws, so a caller can always treat the resolved `{ block, ran }` as ready for the
  *  synthesis prompt. Skipped (logged) when `AGENT_GATEWAY_REVIEW_OCR=0`, `ocr` is not on PATH,
  *  the scope has no OCR-shaped mode (`ocrModeArgs` → `null`), or IU credentials cannot be

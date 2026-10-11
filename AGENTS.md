@@ -591,8 +591,7 @@ boundary for a sensitive episode, not the permission profile.
 The `review` job (`server/jobs/handlers/review.ts`) runs a 3-phase parallel
 pipeline: data gathering (git diff, `fallow review --brief` with a scope-derived
 `--base` — `fallowBaseFor`, never `audit`'s auto-detected merge-base, which
-is wrong on this direct-to-master repo for an already-pushed scope, CodeRabbit
-CLI) → angle reviews (parallel Claude sessions, capped at
+is wrong on this direct-to-master repo for an already-pushed scope) → angle reviews (parallel Claude sessions, capped at
 `ANGLE_CONCURRENCY=3`: architect, senior-dev, + conditional
 frontend/backend/typescript/QA, plus router-picked content angles
 security/performance/concurrency/data-migration/api-contract/resilience
@@ -615,7 +614,7 @@ phases instead of adding in front of them (`server/lib/ocr.ts`, route
 picked by a same-range bake-off, rationale in `routing.ts`; per-token, off Max; no Max fallback,
 since it's an external CLI, not a `runSession` worker). Fails soft to a
 one-line skip/fail block the synthesizer reads like an unavailable
-fallow/CodeRabbit — never a gate, never thrown into the review. Disable with
+fallow — never a gate, never thrown into the review. Disable with
 `AGENT_GATEWAY_REVIEW_OCR=0`. The IU key is handed to the third-party `ocr` binary
 via env — accepted because its agent tools are read-only (file read/find/
 search via `git`, no shell tool) and it reads LLM config only from env/

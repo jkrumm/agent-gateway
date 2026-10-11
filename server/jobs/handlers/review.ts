@@ -167,7 +167,7 @@ const FINDING = z.object({
   angle: z
     .string()
     .describe(
-      "Which reviewer caught this: architect | senior-dev | frontend | backend | typescript | qa | security | performance | concurrency | data-migration | api-contract | resilience | adversary | coderabbit | fallow | ocr",
+      "Which reviewer caught this: architect | senior-dev | frontend | backend | typescript | qa | security | performance | concurrency | data-migration | api-contract | resilience | adversary | fallow | ocr",
     ),
 });
 
@@ -477,9 +477,9 @@ async function shell(
   }
 
   // Signals go to the wrapper's children too (`pkill -P`): killing only `bash` leaves a hung
-  // `coderabbit` holding the stdout pipe open, so the reads never end and the whole review wedges
-  // in "gathering" (seen 2026-10-09: 100+ orphaned `coderabbit review` processes, a review stuck
-  // for 29 min). The exitCode guard keeps `proc.kill` off an already-reaped process.
+  // tool (fallow, ocr) holding the stdout pipe open, so the reads never end and the whole
+  // review wedges in "gathering" (seen 2026-10-09: a review stuck for 29 min behind a hung
+  // wrapper child). The exitCode guard keeps `proc.kill` off an already-reaped process.
   const killTree = (signal: "TERM" | "KILL") => {
     Bun.spawnSync(["pkill", `-${signal}`, "-P", String(proc.pid)]);
     if (proc.exitCode === null) proc.kill(signal === "TERM" ? "SIGTERM" : "SIGKILL");
@@ -512,7 +512,7 @@ async function shell(
       return failed;
     }
     const [stdout, stderr, exitCode] = outcome;
-    // Merge stderr into stdout — tools like fallow/coderabbit may write findings to stderr
+    // Merge stderr into stdout — tools like fallow may write findings to stderr
     const combined = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
     return { stdout: combined, ok: exitCode === 0 };
   } catch {
@@ -988,7 +988,6 @@ export async function runReview(
     let effectiveCwd = cwd;
     let diffCmd: string;
     let filesCmd: string;
-    let coderabbitCmd: string;
     let fallowCmd: string;
     // Hoisted so ref mode's resolved base can also seed OCR's `--from` after Phase 1 — see
     // where `ocrPromise` is started below. Stays `undefined` outside ref mode.
@@ -1013,25 +1012,15 @@ export async function runReview(
       strippedSettings = stripProjectSettings(worktree);
       diffCmd = refDiffCommand(baseOid);
       filesCmd = refDiffFilesCommand(baseOid);
-      coderabbitCmd = `which coderabbit >/dev/null 2>&1 && coderabbit review --prompt-only --base ${baseOid} 2>/dev/null || true`;
       fallowCmd = fallowCommand({ kind: "base", ref: baseOid });
     } else {
       diffCmd = gitDiffCommand(resolvedScope);
       filesCmd = gitDiffFilesCommand(resolvedScope);
-      coderabbitCmd =
-        resolvedScope === "uncommitted"
-          ? "which coderabbit >/dev/null 2>&1 && coderabbit review --prompt-only --type uncommitted 2>/dev/null || true"
-          : resolvedScope === "head"
-            ? "which coderabbit >/dev/null 2>&1 && coderabbit review --prompt-only --type committed 2>/dev/null || true"
-            : `which coderabbit >/dev/null 2>&1 && coderabbit review --prompt-only --base ${resolvedScope} 2>/dev/null || true`;
       // Explicit `--base` from the scope — never fallow's auto-detected merge-base, which on
       // this direct-to-master repo resolves against `origin/master` and so audits nothing for
       // already-pushed commits. See `fallowBaseFor` for the `auto`/`skip` cases.
       fallowCmd = fallowCommand(fallowBaseFor(resolvedScope));
     }
-    // Kill switch, same shape as AGENT_GATEWAY_REVIEW_OCR: a wedged CodeRabbit CLI (its
-    // `--version` hung on this host 2026-10-09) otherwise costs every review a full 60 s stall.
-    if (process.env.AGENT_GATEWAY_REVIEW_CODERABBIT === "0") coderabbitCmd = "true";
 
     // Scope mode runs in the caller's LIVE checkout, which must never be stripped — another
     // session may own those files. Instead, each opencode-harness angle is refused below and
@@ -1042,16 +1031,14 @@ export async function runReview(
     const liveOpencodeConfig = refMode ? [] : opencodeRepoConfigPresent(cwd);
 
     // ── Phase 1: Data gathering (parallel) ──────────────────────────────
-    bump("gathering diff, fallow, coderabbit, ocr");
+    bump("gathering diff, fallow, ocr");
 
-    const [diffResult, filesResult, fallowResult, coderabbitResult, packageJsonResult] =
-      await Promise.all([
-        shell(diffCmd, effectiveCwd),
-        shell(filesCmd, effectiveCwd),
-        shell(fallowCmd, effectiveCwd, 60_000),
-        shell(coderabbitCmd, effectiveCwd, 60_000),
-        shell("cat package.json 2>/dev/null", effectiveCwd),
-      ]);
+    const [diffResult, filesResult, fallowResult, packageJsonResult] = await Promise.all([
+      shell(diffCmd, effectiveCwd),
+      shell(filesCmd, effectiveCwd),
+      shell(fallowCmd, effectiveCwd, 60_000),
+      shell("cat package.json 2>/dev/null", effectiveCwd),
+    ]);
 
     // A non-zero exit from `git diff` is a genuine failure (bad scope ref, not a
     // git repo, git missing) — NOT "no changes". Surface it; otherwise the empty
@@ -1155,7 +1142,6 @@ export async function runReview(
         changedFiles: changedFiles.length,
         routed: !explicit,
         hasFallow: !!fallowResult.stdout,
-        hasCoderabbit: !!coderabbitResult.stdout,
         research: researchEnabled,
       },
       "review agents selected",
@@ -1344,10 +1330,6 @@ export async function runReview(
 
     const fallowBlock = renderFallowBlock(fallowResult.stdout);
 
-    const coderabbitBlock = coderabbitResult.stdout
-      ? `CodeRabbit findings:\n\`\`\`\n${coderabbitResult.stdout}\n\`\`\``
-      : "CodeRabbit: not available or skipped.";
-
     // Function replacers, not string ones — `String.prototype.replace`'s string form treats
     // `$&`/`$1`/`$$` etc. in the replacement as special substitution patterns, and every one
     // of these blocks is untrusted-ish worker/tool output that could legitimately contain a
@@ -1355,7 +1337,6 @@ export async function runReview(
     const finalPrompt = synthesisPrompt
       .replace("[ANGLE_RESULTS]", () => angleBlock)
       .replace("[FALLOW_RESULTS]", () => fallowBlock)
-      .replace("[CODERABBIT_RESULTS]", () => coderabbitBlock)
       .replace("[OCR_RESULTS]", () => ocrResult.block);
 
     const runSynthesis = (synthPrompt: string) =>
