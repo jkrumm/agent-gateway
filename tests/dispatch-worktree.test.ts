@@ -822,17 +822,17 @@ describe("diffRefusalReason", () => {
 
   test("refuses a diff that ADDS a credential, naming its file and line", async () => {
     const wt = await createWorktree(fx.repo, key(), "leaky", "master");
-    fx.write("config.yaml", "gateway:\n  key: op://hermes/gateway/api-server-key\n", wt.path);
+    fx.write("config.yaml", "gateway:\n  key: AKIAIOSFODNN7EXAMPLE\n", wt.path);
     await commitPendingWork(wt, "inline the value it read");
     // A refusal that names only the pattern is unactionable: the branch is discarded, so the
     // file and line are what let a re-dispatch be narrowed.
-    expect(await refusal(wt)).toMatch(/adds text matching 1Password reference at config\.yaml:2/);
+    expect(await refusal(wt)).toMatch(/adds text matching AWS access key id at config\.yaml:2/);
   });
 
   test("does NOT refuse a credential the episode only removed", async () => {
     // Refusing on pre-existing secrets would disable the tier in precisely the repo that
     // needs the fix.
-    fx.write("legacy.yaml", "key: op://mini/github/token\nother: value\n");
+    fx.write("legacy.yaml", "key: AKIAIOSFODNN7EXAMPLE\nother: value\n");
     await fx.commit("pre-existing reference");
     await git(["push", "-q", "origin", "master"], fx.repo);
 
@@ -845,7 +845,7 @@ describe("diffRefusalReason", () => {
   test("checks cheapest-first: the CI path beats the content scan", async () => {
     const wt = await createWorktree(fx.repo, key(), "both", "master");
     fx.write(".github/workflows/ci.yml", "on: push\n", wt.path);
-    fx.write("leak.txt", "op://mini/github/token\n", wt.path);
+    fx.write("leak.txt", "AKIAIOSFODNN7EXAMPLE\n", wt.path);
     await commitPendingWork(wt, "everything at once");
     expect(await refusal(wt)).toMatch(/CI execution surface/);
   });
@@ -857,9 +857,9 @@ describe("diffRefusalReason", () => {
       Array.from({ length: 2001 }, (_, i) => `line ${i}`).join("\n") + "\n",
       wt.path,
     );
-    fx.write("leak.txt", "op://mini/github/token\n", wt.path);
+    fx.write("leak.txt", "AKIAIOSFODNN7EXAMPLE\n", wt.path);
     await commitPendingWork(wt, "large and leaky");
-    expect(await refusal(wt)).toMatch(/adds text matching 1Password reference at leak\.txt:1/);
+    expect(await refusal(wt)).toMatch(/adds text matching AWS access key id at leak\.txt:1/);
   });
 });
 
@@ -986,8 +986,8 @@ describe("artifact refusals", () => {
   // publishing side of the handler, not on the worker's promise not to quote a secret.
   test("an issue body carrying a credential is never filed", async () => {
     await expect(
-      openIssue(ID, { title: "Fix the gateway", body: "set op://hermes/gateway/api-server-key" }),
-    ).rejects.toThrow(/refusing to publish an issue.*1Password reference/s);
+      openIssue(ID, { title: "Fix the gateway", body: "set AKIAIOSFODNN7EXAMPLE" }),
+    ).rejects.toThrow(/refusing to publish an issue.*AWS access key id/s);
   });
 
   test("an issue TITLE carrying a credential is never filed", async () => {
@@ -1089,8 +1089,8 @@ describe("GitLab artifact write paths (openIssue/openPullRequest via glab)", () 
 
   test("a GitLab issue body carrying a credential is refused before glab ever runs", async () => {
     await expect(
-      openIssue(GITLAB_ID, { title: "Fix", body: "set op://hermes/gateway/api-server-key" }),
-    ).rejects.toThrow(/refusing to publish an issue.*1Password reference/s);
+      openIssue(GITLAB_ID, { title: "Fix", body: "set AKIAIOSFODNN7EXAMPLE" }),
+    ).rejects.toThrow(/refusing to publish an issue.*AWS access key id/s);
     expect(existsSync(argvFile)).toBe(false);
   });
 
