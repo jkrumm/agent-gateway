@@ -1,10 +1,12 @@
 // Pure builders + the NDJSON event mapper for the OpenCode harness (server/mcp/opencode-runner.ts).
 // `tests/fixtures/opencode-events.jsonl` is a trimmed excerpt of a REAL successful
-// `opencode run --format json` stream, captured 2026-09-24 against `iu/deepseek-v4.1-flash` —
-// see routing.ts's AGENT_OC comment for the episode this came from.
-// `tests/fixtures/opencode-events-error.jsonl` is two REAL failing runs (a rejected apiKey, an
-// unrecognized model id), captured the same day via `OPENCODE_CONFIG_CONTENT` with deliberately
-// broken credentials/model — the exact NDJSON `type: "error"` shape B1 fixes against.
+// `opencode run --standalone --format json` stream, captured 2026-10-11 against opencode 2.0.25
+// (`iu-chat/deepseek-v4.1-flash#high`). Note it ends on a `text` event with NO terminal
+// `step_finish(reason: "stop")` — 2.x drops that event under `--standalone`, the behaviour the
+// completion path must tolerate.
+// `tests/fixtures/opencode-events-error.jsonl` is two REAL failing runs (an unknown model id, a
+// rejected apiKey), captured the same day with the same binary — the flat `{type, message}`
+// `error` shape 2.x emits (1.x nested it under `error.data`).
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -529,30 +531,35 @@ describe("computeOpencodeCostUsd", () => {
   });
 });
 
-describe("reduceOpencodeEvent over a real captured successful stream", () => {
+describe("reduceOpencodeEvent over a real captured successful 2.x stream", () => {
   const fixtureLines = readFixture("opencode-events.jsonl");
 
-  test("accumulates turns, tokens, lastAction, lastAssistantText, finished and the session id", () => {
+  test("accumulates turns, tokens, lastAction, lastAssistantText and the session id", () => {
     let accum = INITIAL_OPENCODE_ACCUM;
     for (const ev of fixtureLines) accum = reduceOpencodeEvent(accum, ev as never);
 
-    expect(accum.sessionId).toBe("ses_f2b5129d1ffen3T90AH2DK2X8t");
-    // Two step_finish events in the fixture, the last one reason: "stop".
-    expect(accum.turns).toBe(2);
-    expect(accum.finished).toBe(true);
-    // Token sums across both step_finish events: input 12218+196, output 128+1690,
-    // reasoning 32+1428, cache.read 20992+144128.
-    expect(accum.inputTokens).toBe(12414);
-    expect(accum.outputTokens).toBe(1818);
-    expect(accum.reasoningTokens).toBe(1460);
-    expect(accum.cacheReadTokens).toBe(165120);
-    // Last tool_use is the errored webfetch call (no filePath/path/command in its input),
-    // so describeOpencodeTool falls back to the bare tool name.
-    expect(accum.lastAction).toBe("webfetch");
-    expect(accum.lastAssistantText).toContain("HyperDX formula parser");
-    // A per-tool "error" status (the webfetch call) is NOT the same as a top-level `error`
-    // event — the session kept going, so this must stay false.
+    expect(accum.sessionId).toBe("ses_ed4817882ffeolsUu5rLTg5npK");
+    // One step_finish event in the fixture (reason "tool-calls").
+    expect(accum.turns).toBe(1);
+    // Tokens from that single step_finish.
+    expect(accum.inputTokens).toBe(251);
+    expect(accum.outputTokens).toBe(37);
+    expect(accum.reasoningTokens).toBe(21);
+    expect(accum.cacheReadTokens).toBe(18688);
+    expect(accum.cacheWriteTokens).toBe(0);
+    // The tool_use is a 2.x `shell` call, labelled with the command.
+    expect(accum.lastAction).toBe("shell: ls");
+    expect(accum.lastAssistantText).toBe("done");
+    // No top-level `error` event — a completed session.
     expect(accum.sawErrorEvent).toBe(false);
+  });
+
+  test("a 2.x success stream carries NO terminal step_finish(reason: stop) — completion must not require it", () => {
+    const reasons = fixtureLines.map((ev) => (ev as { part?: { reason?: string } }).part?.reason);
+    expect(reasons).not.toContain("stop");
+    // The stream ends on the model's final `text`, which is the whole point: a clean exit with a
+    // final assistant message is the completion signal on 2.x, not a terminal step_finish.
+    expect((fixtureLines.at(-1) as { type?: string }).type).toBe("text");
   });
 
   test("tallies cache.write across step_finish events, not just cache.read", () => {
@@ -575,22 +582,15 @@ describe("reduceOpencodeEvent over a real captured successful stream", () => {
     expect(accum.cacheWriteTokens).toBe(10);
   });
 
-  test("finished reflects the LAST step_finish's reason, not an OR across every one", () => {
-    // The fixture's first step_finish is reason "tool-calls" (mid-run), the second is "stop".
-    let accum = INITIAL_OPENCODE_ACCUM;
-    for (const ev of fixtureLines.slice(0, 3)) accum = reduceOpencodeEvent(accum, ev as never);
-    expect(accum.finished).toBe(false); // only the "tool-calls" step_finish seen so far
-  });
-
   test("sessionId is captured on the FIRST event that carries it, not overwritten later", () => {
     let accum = INITIAL_OPENCODE_ACCUM;
     accum = reduceOpencodeEvent(accum, fixtureLines[0] as never);
-    expect(accum.sessionId).toBe("ses_f2b5129d1ffen3T90AH2DK2X8t");
+    expect(accum.sessionId).toBe("ses_ed4817882ffeolsUu5rLTg5npK");
     accum = reduceOpencodeEvent(accum, {
       ...(fixtureLines[1] as object),
       sessionID: "different-session",
     } as never);
-    expect(accum.sessionId).toBe("ses_f2b5129d1ffen3T90AH2DK2X8t");
+    expect(accum.sessionId).toBe("ses_ed4817882ffeolsUu5rLTg5npK");
   });
 
   test("a bash tool_use describes as bash: <command>", () => {
@@ -604,6 +604,19 @@ describe("reduceOpencodeEvent over a real captured successful stream", () => {
       },
     } as never);
     expect(accum.lastAction).toBe("bash: git status");
+  });
+
+  test("a 2.x shell tool_use describes as shell: <command>", () => {
+    const accum = reduceOpencodeEvent(INITIAL_OPENCODE_ACCUM, {
+      type: "tool_use",
+      sessionID: "s",
+      part: {
+        type: "tool",
+        tool: "shell",
+        state: { status: "completed", input: { command: "git status" } },
+      },
+    } as never);
+    expect(accum.lastAction).toBe("shell: git status");
   });
 
   test("an edit tool_use describes as <tool> <basename>", () => {
@@ -620,23 +633,42 @@ describe("reduceOpencodeEvent over a real captured successful stream", () => {
   });
 });
 
-describe("reduceOpencodeEvent over real captured FAILING streams (B1)", () => {
-  test("a rejected apiKey's error event: nested error.data.message, sawErrorEvent true, never finished", () => {
+describe("reduceOpencodeEvent over real captured FAILING 2.x streams", () => {
+  test("an unknown model's flat {type, message} error: the message is surfaced", () => {
     const [ev] = readFixture("opencode-events-error.jsonl");
-    let accum = reduceOpencodeEvent(INITIAL_OPENCODE_ACCUM, ev as never);
+    const accum = reduceOpencodeEvent(INITIAL_OPENCODE_ACCUM, ev as never);
     expect(accum.sawErrorEvent).toBe(true);
-    expect(accum.errorMessage).toBe("Unauthorized: Unauthorized: Authorization parsing failed");
-    expect(accum.finished).toBe(false);
+    expect(accum.errorMessage).toBe("Model unavailable: iu-chat/does-not-exist");
   });
 
-  test("an unrecognized model id's error event: falls back to error.name when data.message differs", () => {
+  test("a rejected apiKey's flat {type, message, status} error: the message is surfaced", () => {
     const [, ev] = readFixture("opencode-events-error.jsonl");
     const accum = reduceOpencodeEvent(INITIAL_OPENCODE_ACCUM, ev as never);
     expect(accum.sawErrorEvent).toBe(true);
-    expect(accum.errorMessage).toBe("Unexpected server error. Check server logs for details.");
+    expect(accum.errorMessage).toBe(
+      "Provider request failed with HTTP 401: Unauthorized: Authorization parsing failed",
+    );
   });
 
-  test("error.name is the fallback when error.data.message is absent", () => {
+  test("error.type is the fallback when a 2.x error carries no message", () => {
+    const accum = reduceOpencodeEvent(INITIAL_OPENCODE_ACCUM, {
+      type: "error",
+      sessionID: "s",
+      error: { type: "provider.no-route" },
+    } as never);
+    expect(accum.errorMessage).toBe("provider.no-route");
+  });
+
+  test("the legacy 1.x nested {name, data:{message}} shape is still read", () => {
+    const accum = reduceOpencodeEvent(INITIAL_OPENCODE_ACCUM, {
+      type: "error",
+      sessionID: "s",
+      error: { name: "APIError", data: { message: "legacy message" } },
+    } as never);
+    expect(accum.errorMessage).toBe("legacy message");
+  });
+
+  test("error.name is the last fallback when no message or type is present", () => {
     const accum = reduceOpencodeEvent(INITIAL_OPENCODE_ACCUM, {
       type: "error",
       sessionID: "s",
@@ -645,7 +677,7 @@ describe("reduceOpencodeEvent over real captured FAILING streams (B1)", () => {
     expect(accum.errorMessage).toBe("SomeBareError");
   });
 
-  test("a bare/legacy string error field (no longer produced, but tolerated) does not crash the reducer", () => {
+  test("a missing error field does not crash the reducer", () => {
     expect(() =>
       reduceOpencodeEvent(INITIAL_OPENCODE_ACCUM, {
         type: "error",
