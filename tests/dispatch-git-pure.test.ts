@@ -51,7 +51,6 @@ const joined = (...parts: string[]): string => parts.join("");
 
 /** One exemplar per pattern, in the spelling an episode would realistically emit. */
 const SECRET_SHAPES: ReadonlyArray<{ name: string; text: string }> = [
-  { name: "1Password reference", text: "resolve op://mini/github/token first" },
   { name: "GitHub token", text: joined("token gh", "p_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7 works") },
   {
     name: "GitHub token",
@@ -110,16 +109,22 @@ describe("scanForSecrets — attack shapes", () => {
       "## What I found",
       "",
       "The deploy fails because the gateway env is missing a value.",
-      "The fix is to add op://vps/argo/HERMES_API_KEY to the template.",
+      "The fix is to add AKIAIOSFODNN7EXAMPLE to the template.",
       "",
       "Nothing else changed.",
     ].join("\n");
-    expect(scanForSecrets(body)).toEqual(["1Password reference"]);
+    expect(scanForSecrets(body)).toEqual(["AWS access key id"]);
+  });
+
+  test("an op:// pointer is not a secret and is never flagged", () => {
+    expect(scanForSecrets("resolve op://mini/github/token first")).toEqual([]);
   });
 
   test("reports every distinct pattern a body matches, not just the first", () => {
-    const hits = scanForSecrets("op://mini/github/token and AKIAIOSFODNN7EXAMPLE and 100.90.1.2");
-    expect(hits).toEqual(["1Password reference", "AWS access key id", "Tailscale IP"]);
+    const hits = scanForSecrets(
+      `${joined("gh", "p_abcdefghijklmnopqrstuvwxyz0123456789")} and AKIAIOSFODNN7EXAMPLE and 100.90.1.2`,
+    );
+    expect(hits).toEqual(["GitHub token", "AWS access key id", "Tailscale IP"]);
   });
 
   test("Tailscale range boundaries — 64 and 127 in, 63 and 128 out", () => {

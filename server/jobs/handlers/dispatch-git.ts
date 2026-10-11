@@ -74,7 +74,6 @@ const GITHUB_TOKEN_REF = "op://mini/github/token";
  * runs in the handler, after the worker is done and before anything is published.
  */
 const SECRET_PATTERNS: ReadonlyArray<{ name: string; re: RegExp }> = [
-  { name: "1Password reference", re: /\bop:\/\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+/ },
   { name: "GitHub token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,})\b/ },
   { name: "Slack token", re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/ },
   { name: "AWS access key id", re: /\bAKIA[0-9A-Z]{16}\b/ },

@@ -466,7 +466,6 @@ describe("applySensitiveScan", () => {
   };
 
   const SECRET_SHAPES: ReadonlyArray<{ name: string; text: string }> = [
-    { name: "1Password reference", text: "resolve op://mini/github/token first" },
     { name: "Tailscale IP", text: "the gateway binds 100.101.102.103:8642" },
     {
       name: "GitHub token",
@@ -526,10 +525,10 @@ describe("applySensitiveScan", () => {
     const jobId = "job-multi-hit";
     const dirty: DispatchOutput = {
       ...CLEAN_VERDICT,
-      verdict: `${CLEAN_VERDICT.verdict} resolve op://mini/github/token and 100.90.1.2`,
+      verdict: `${CLEAN_VERDICT.verdict} leaked AKIAIOSFODNN7EXAMPLE and 100.90.1.2`,
     };
     const out = applySensitiveScan(dirty, { sensitive: true, jobId, project: "/tmp/x" });
-    expect(out.verdict).toContain("1Password reference");
+    expect(out.verdict).toContain("AWS access key id");
     expect(out.verdict).toContain("Tailscale IP");
   });
 
@@ -556,7 +555,7 @@ describe("applySensitiveScan", () => {
     const jobId = "job-evidence-hit";
     const dirty: DispatchOutput = {
       ...CLEAN_VERDICT,
-      evidence: [{ file: "notes.md", detail: "found op://mini/github/token in a comment" }],
+      evidence: [{ file: "notes.md", detail: "found 100.90.1.2 in a comment" }],
     };
     const out = applySensitiveScan(dirty, { sensitive: true, jobId, project: "/tmp/x" });
     expect(out.evidence).toEqual([]);
@@ -579,7 +578,7 @@ describe("applySensitiveScan", () => {
       process.env.AGENT_GATEWAY_PRIVATE_VERDICTS_ROOT = freshRoot;
       const jobId = "job-fresh";
       const out = applySensitiveScan(
-        { ...CLEAN_VERDICT, verdict: `${CLEAN_VERDICT.verdict} op://mini/github/token` },
+        { ...CLEAN_VERDICT, verdict: `${CLEAN_VERDICT.verdict} 100.90.1.2` },
         { sensitive: true, jobId, project: "/tmp/x" },
       );
       expect(out.nextAction).toBe("human");

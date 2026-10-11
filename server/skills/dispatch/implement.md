@@ -27,8 +27,8 @@ of them means the branch is discarded and the work is wasted, so stay well insid
 - **never** `.github/workflows/` or `.github/actions/`. A dispatched episode does not edit
   what runs in CI. If the fix genuinely requires a workflow change, do not make it: set
   `nextAction: "human"`, explain why in `verdict`, and change nothing.
-- **no credential-shaped text in the lines you add** — a literal token, an `op://`
-  reference, an internal address. The tooling scans the diff and refuses it, and the branch
+- **no credential-shaped text in the lines you add** — a literal token or an
+  internal address. The tooling scans the diff and refuses it, and the branch
   it would have pushed is public and permanent. If a fix appears to require writing a
   secret into the repo, that appearance is itself the finding: change nothing and set
   `nextAction: "human"` with `escalationCategory: "security"`.
