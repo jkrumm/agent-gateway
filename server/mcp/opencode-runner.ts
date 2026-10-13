@@ -324,6 +324,16 @@ export function buildOpencodeConfig(input: OpencodeConfigInput): Record<string, 
   };
 }
 
+/** Env vars that decide where opencode looks for its global config/data; the inherited values
+ *  are authoritative, never a caller's `extraEnv`. */
+const CONFIG_DISCOVERY_ENV = [
+  "HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "XDG_CACHE_HOME",
+];
+
 export interface OpencodeEnvInput {
   tool?: string;
   /** The spawn working directory, pinned as `env.PWD` — opencode 2.x resolves its cwd from
@@ -377,7 +387,14 @@ export function buildOpencodeEnv(input: OpencodeEnvInput): Record<string, string
   // `extraEnv` first, so every module-owned value below wins over it: a caller (dispatch's
   // `readOnly: true` plus its own `extraEnv`) must not be able to replace the permission
   // config, point opencode at another config source, or redirect the IU key to another base.
+  // Config-discovery roots too: opencode merges its GLOBAL config (incl. MCP servers) from
+  // HOME / XDG_*, so a caller must not be able to repoint them at a config it controls.
+  const discovery = Object.fromEntries(
+    CONFIG_DISCOVERY_ENV.filter((k) => env[k] !== undefined).map((k) => [k, env[k]]),
+  );
   if (extraEnv) Object.assign(env, extraEnv);
+  for (const k of CONFIG_DISCOVERY_ENV) delete env[k];
+  Object.assign(env, discovery);
   env.IU_KEY = iuKey;
   env.IU_OPENAI_BASE = iuOpenaiBase;
   // Every other config source that could merge in or shadow the permission profile is dropped
@@ -555,7 +572,8 @@ export interface OpencodeAccum {
    *  opencode 2.x under `--standalone` drops the terminal step_finish (measured 2026-10-11),
    *  so the final answer turn's tokens/cost are NOT in `inputTokens`/`outputTokens`/etc. A
    *  completed stream reads this at the end: `true` means the run was billed only its
-   *  pre-final-turn usage, and must be flagged as not-fully-accounted rather than complete. */
+   *  pre-final-turn usage, and is flagged as not-fully-accounted. Advisory only: recorded on the attribution row for
+   *  cost tracking, never a completion gate. */
   usageIncomplete: boolean;
 }
 
@@ -604,6 +622,8 @@ export function reduceOpencodeEvent(state: OpencodeAccum, event: OpencodeEvent):
         next.cacheWriteTokens += part.tokens.cache?.write ?? 0;
       }
       next.usageIncomplete = false;
+      // A mid-loop step ("tool-calls") means the loop continues: any earlier text was narration.
+      if (part?.reason !== undefined && part.reason !== "stop") next.endedOnText = false;
       break;
     case "error":
       next.sawErrorEvent = true;

@@ -157,21 +157,20 @@ export function writeSessionEnv(
 // requests to it by ts ∈ [tsStart, tsEnd], so token rows get tagged with which
 // agent-gateway tool (check/review/…) caused them.
 // Format: NDJSON, one record per session, written on completion.
-const ATTRIBUTION_LOG = join(
-  homedir(),
-  ".local",
-  "share",
-  "usage-tracker",
-  "agent-gateway-sessions.jsonl",
-);
+// `AGENT_GATEWAY_SESSIONS_LOG` overrides the path (tests/setup.ts points it at a temp dir),
+// resolved per call so a test can set it late.
+const attributionLog = (): string =>
+  process.env.AGENT_GATEWAY_SESSIONS_LOG ??
+  join(homedir(), ".local", "share", "usage-tracker", "agent-gateway-sessions.jsonl");
 
 /** Exported so `opencode-runner.ts` appends to the SAME attribution log/sink under its own
  *  `harness: "opencode"` record shape, rather than a parallel file usage-tracker would need
  *  a second collector for. */
 export function writeAttribution(record: Record<string, unknown>): void {
   try {
-    mkdirSync(dirname(ATTRIBUTION_LOG), { recursive: true });
-    appendFileSync(ATTRIBUTION_LOG, JSON.stringify(record) + "\n", "utf-8");
+    const log = attributionLog();
+    mkdirSync(dirname(log), { recursive: true });
+    appendFileSync(log, JSON.stringify(record) + "\n", "utf-8");
   } catch {
     // Attribution is best-effort — never break a session over a log write.
   }
