@@ -415,6 +415,10 @@ refused even under a hostile `extraEnv`, the job runs in the intended directory,
 `readOnly:false` control proves the probe discriminates). Known residual on 2.x: the `execute`
 (code-mode) tool also exposes the operator's globally configured MCP servers to a read-only run;
 it exposes no file-write or shell tool.
+Cost accounting: 2.x drops the final turn's `step_finish`, so that turn's tokens/cost are missing
+from a successful row; the attribution record carries `usageIncomplete: true` (a lower bound,
+not a completion gate). Killing the `opencode run --standalone` parent reaps its private server and
+tool children (measured 2026-10-13 on 2.0.25) — no process-group kill needed.
 
 **A dead IU endpoint must never hang an opencode run.** `opencode run` retries connect errors
 and 5xx forever. `runOpencodeAttempt` therefore probes the IU OpenAI base (`fetch`, abort after

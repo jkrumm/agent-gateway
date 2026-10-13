@@ -623,7 +623,8 @@ describe("reduceOpencodeEvent over a real captured successful 2.x stream", () =>
     const text = { type: "text", part: { type: "text", text: "narration" } };
     const finish = (reason: string) => ({ type: "step_finish", part: { reason } });
     let accum = reduceOpencodeEvent(INITIAL_OPENCODE_ACCUM, text as never);
-    expect(reduceOpencodeEvent(accum, finish("tool-calls") as never).endedOnText).toBe(false);
+    const midLoop = reduceOpencodeEvent(accum, finish("tool-calls") as never);
+    expect(midLoop.endedOnText).toBe(false);
     accum = reduceOpencodeEvent(accum, finish("stop") as never);
     expect(accum.endedOnText).toBe(true);
   });
