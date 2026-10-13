@@ -9,7 +9,8 @@
 //   3. the job runs in the intended directory (not the probe's own cwd)
 //   4. a GLOBAL opencode config (the operator's `$XDG_CONFIG_HOME/opencode/opencode.json`,
 //      where MCP servers live) does NOT reach the worker — `buildOpencodeEnv` pins
-//      `XDG_CONFIG_HOME` to a private empty root
+//      `XDG_CONFIG_HOME` to a private empty root. Asserted under the read-only AND writable
+//      profiles, with a positive control proving the canary DOES start when the pin is absent
 // Exits non-zero on any failed check. Costs a few cents of IU tokens; never run from CI.
 
 import {
@@ -52,45 +53,76 @@ console.log(`probe dir: ${dir}  (process cwd: ${process.cwd()})`);
 
 // ── Part 1: raw run, read-only profile + hostile extraEnv ──────────────────────────────────
 const iu = await getIuConfig();
-// The private empty GLOBAL-config root every worker run gets. Part 0 also shows a global config
-// pointed at by the inherited XDG_CONFIG_HOME cannot leak in past this pin.
+// The private empty GLOBAL-config root every worker run gets — the value `buildOpencodeEnv`
+// pins `XDG_CONFIG_HOME` to. Part 0 proves a global config pointed at by that var is empty.
 const configHome = realpathSync(mkdtempSync(join(tmpdir(), "oc-probe-cfghome-")));
 
 // ── Part 0: the operator's GLOBAL opencode config (where MCP servers live) must NOT reach a worker ──
-const globalHome = realpathSync(mkdtempSync(join(tmpdir(), "oc-probe-global-")));
-mkdirSync(join(globalHome, "opencode"), { recursive: true });
-const canary = join(globalHome, "canary.log");
-writeFileSync(
-  join(globalHome, "opencode", "opencode.json"),
-  JSON.stringify({
-    $schema: "https://opencode.ai/config.json",
-    mcp: { canary: { type: "local", command: ["sh", "-c", `date >> ${canary}; sleep 300`] } },
-  }),
-);
-const env0 = buildOpencodeEnv({
-  tool: "dispatch",
-  cwd: dir,
-  iuKey: iu.key,
-  iuOpenaiBase: iu.openaiBase,
-  opencodeConfigContent: JSON.stringify(buildOpencodeConfig({ model: MODEL, readOnly: true })),
-  configHome,
-  baseEnv: { ...process.env, XDG_CONFIG_HOME: globalHome },
-});
-const p0 = Bun.spawn(buildOpencodeArgs({ bin: BIN, model: MODEL, prompt: "reply with exactly: OK" }), {
-  cwd: dir,
-  env: env0,
-  stdout: "pipe",
-  stderr: "pipe",
-  stdin: "ignore",
-});
-await Promise.all([new Response(p0.stdout).text(), new Response(p0.stderr).text()]);
-await p0.exited;
-await Bun.sleep(1200);
+//
+// A "the canary did not start" assertion only means something if the canary WOULD start when the
+// pin is absent. So each check registers a canary local MCP server in a throwaway
+// `$XDG_CONFIG_HOME/opencode/opencode.json` and spawns the real binary against it:
+//   0a. control — pin bypassed (`configHome: globalHome`, the value opencode would inherit),
+//       read-only profile: the canary MUST start. If it does not, opencode is not resolving its
+//       global config from `$XDG_CONFIG_HOME` (or starts MCP lazily), so 0b/0c prove nothing —
+//       the check fails loudly rather than passing vacuously.
+//   0b. pinned, read-only profile: the canary MUST NOT start.
+//   0c. pinned, writable profile: the canary MUST NOT start (the profile that can push a branch/PR).
+async function globalMcpCanary(input: {
+  readOnly: boolean;
+  /** true = exercise the pin; false = control with the inherited XDG_CONFIG_HOME (pin bypassed). */
+  pinned: boolean;
+}): Promise<{ started: boolean; globalHome: string }> {
+  const globalHome = realpathSync(mkdtempSync(join(tmpdir(), "oc-probe-global-")));
+  mkdirSync(join(globalHome, "opencode"), { recursive: true });
+  const canary = join(globalHome, "canary.log");
+  writeFileSync(
+    join(globalHome, "opencode", "opencode.json"),
+    JSON.stringify({
+      $schema: "https://opencode.ai/config.json",
+      mcp: { canary: { type: "local", command: ["sh", "-c", `date >> ${canary}; sleep 300`] } },
+    }),
+  );
+  const env = buildOpencodeEnv({
+    tool: "dispatch",
+    cwd: dir,
+    iuKey: iu.key,
+    iuOpenaiBase: iu.openaiBase,
+    opencodeConfigContent: JSON.stringify(
+      buildOpencodeConfig({ model: MODEL, readOnly: input.readOnly }),
+    ),
+    // The pin IS `env.XDG_CONFIG_HOME = configHome`; the control points that value at the global
+    // root instead, which is exactly the un-pinned state opencode would inherit.
+    configHome: input.pinned ? configHome : globalHome,
+    baseEnv: { ...process.env, XDG_CONFIG_HOME: globalHome },
+  });
+  const proc = Bun.spawn(
+    buildOpencodeArgs({ bin: BIN, model: MODEL, prompt: "reply with exactly: OK" }),
+    { cwd: dir, env, stdout: "pipe", stderr: "pipe", stdin: "ignore" },
+  );
+  await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+  await proc.exited;
+  await Bun.sleep(1200);
+  return { started: existsSync(canary), globalHome };
+}
+
+const control = await globalMcpCanary({ readOnly: true, pinned: false });
 check(
-  "0. a global MCP server (XDG_CONFIG_HOME) is NOT started in a worker run",
-  !existsSync(canary),
+  "0a. control: a global MCP server DOES start when the config root is unpinned (canary is falsifiable)",
+  control.started,
 );
-rmSync(globalHome, { recursive: true, force: true });
+rmSync(control.globalHome, { recursive: true, force: true });
+
+const pinnedReadOnly = await globalMcpCanary({ readOnly: true, pinned: true });
+check(
+  "0b. read-only: a global MCP server (XDG_CONFIG_HOME) is NOT started in a worker run",
+  !pinnedReadOnly.started,
+);
+rmSync(pinnedReadOnly.globalHome, { recursive: true, force: true });
+
+const pinnedWritable = await globalMcpCanary({ readOnly: false, pinned: true });
+check("0c. writable: a global MCP server is NOT started in a worker run", !pinnedWritable.started);
+rmSync(pinnedWritable.globalHome, { recursive: true, force: true });
 
 const hostile = JSON.stringify({
   permission: { bash: "allow", edit: "allow", external_directory: "allow" },
