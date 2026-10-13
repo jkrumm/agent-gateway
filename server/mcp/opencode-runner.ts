@@ -423,10 +423,10 @@ export function redactSecret(text: string, secret: string): string {
   return text.split(secret).join("[REDACTED]");
 }
 
-// ── NDJSON event shape (measured 2026-09-24 against real `opencode run --format json`
+// ── NDJSON event shape (re-measured 2026-10-11 on 2.0.25 against real `opencode run --format json`
 // output — tests/fixtures/opencode-events.jsonl (a successful run) and
-// tests/fixtures/opencode-events-error.jsonl (two real failing runs: a rejected apiKey, an
-// unrecognized model id) are trimmed excerpts of the actual streams) ──
+// tests/fixtures/opencode-events-error.jsonl (two real failing runs: an unrecognized model id,
+// a rejected apiKey) are trimmed excerpts of the actual streams) ──
 
 interface OpencodeToolState {
   status?: "completed" | "error" | string;
@@ -538,6 +538,11 @@ export interface OpencodeAccum {
   turns: number;
   lastAction: string;
   lastAssistantText: string;
+  /** True while the newest content event is an assistant `text` (no `tool_use` after it). The
+   *  completion signal on 2.x, where the terminal `step_finish` is dropped: a stream cut off
+   *  mid-loop ends on a `tool_use` (or earlier narration text followed by one), so its
+   *  `lastAssistantText` is narration, not a verdict, even when the process exits 0. */
+  endedOnText: boolean;
   sessionId?: string;
   inputTokens: number;
   outputTokens: number;
@@ -558,6 +563,7 @@ export const INITIAL_OPENCODE_ACCUM: OpencodeAccum = {
   turns: 0,
   lastAction: "starting",
   lastAssistantText: "",
+  endedOnText: false,
   inputTokens: 0,
   outputTokens: 0,
   reasoningTokens: 0,
@@ -577,10 +583,12 @@ export function reduceOpencodeEvent(state: OpencodeAccum, event: OpencodeEvent):
   switch (event.type) {
     case "tool_use":
       if (part) next.lastAction = describeOpencodeTool(part);
+      next.endedOnText = false;
       break;
     case "text":
       if (typeof part?.text === "string" && part.text.trim()) {
         next.lastAssistantText = part.text;
+        next.endedOnText = true;
         // A text turn whose usage is not yet closed by a `step_finish` — the terminal turn
         // on 2.x standalone. Cleared by the next `step_finish` below.
         next.usageIncomplete = true;
@@ -1204,8 +1212,23 @@ export async function runOpencodeAttempt<T>(
     };
   }
 
+  if (!accum.endedOnText) {
+    emitAttribution("error", { reason: "truncated_stream" });
+    const error = "opencode stream ended on a tool call, not a final assistant message";
+    return {
+      ok: false,
+      error,
+      classificationText: error,
+      hadApiRetry: false,
+      noOutput: true,
+      rawText: accum.lastAssistantText,
+      backend,
+      model,
+    };
+  }
+
   if (accum.usageIncomplete) {
-    runnerLogger().warn(
+    runnerLogger().debug(
       { event: "session.opencode_usage_incomplete", project: cwd, ...errCtx, turns: accum.turns },
       "opencode final-turn usage not accounted (no terminal step_finish) — cost/tokens understated",
     );

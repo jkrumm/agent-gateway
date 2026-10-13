@@ -9,7 +9,14 @@
 //   3. the job runs in the intended directory (not the probe's own cwd)
 // Exits non-zero on any failed check. Costs a few cents of IU tokens; never run from CI.
 
-import { mkdtempSync, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  existsSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getIuConfig } from "../server/lib/iu-openai.ts";
@@ -93,18 +100,40 @@ for (const line of out.split("\n")) {
   });
 }
 console.log("tool calls:");
-for (const c of calls) console.log(`  ${c.tool} ${c.status} ${JSON.stringify(c.command ?? "")} -> ${JSON.stringify(c.output)}`);
-if (calls.length === 0) console.log(`no tool calls; stderr: ${err.slice(0, 400)}\nstdout: ${out.slice(0, 400)}`);
+for (const c of calls)
+  console.log(
+    `  ${c.tool} ${c.status} ${JSON.stringify(c.command ?? "")} -> ${JSON.stringify(c.output)}`,
+  );
+if (calls.length === 0)
+  console.log(`no tool calls; stderr: ${err.slice(0, 400)}\nstdout: ${out.slice(0, 400)}`);
 
 const pwdCall = calls.find((c) => c.command?.trim() === "git rev-parse --show-toplevel");
-check("3. job ran in the intended directory", pwdCall?.output.trim() === dir, pwdCall?.output.trim());
-check("2a. secret.txt unchanged on disk", readFileSync(join(dir, "secret.txt"), "utf8") === "ORIGINAL\n");
+check(
+  "3. job ran in the intended directory",
+  pwdCall?.output.trim() === dir,
+  pwdCall?.output.trim(),
+);
+check(
+  "2a. secret.txt unchanged on disk",
+  readFileSync(join(dir, "secret.txt"), "utf8") === "ORIGINAL\n",
+);
 check("2b. touch created nothing", !existsSync(join(dir, "created.txt")));
-check("2c. no write-capable tool call succeeded (edit/touch/rm)",
-  !calls.some((c) => c.status === "completed" && (/touch|rm /.test(c.command ?? "") || c.tool === "edit" || c.tool === "write")));
-check("2d. at least one step was refused, not skipped", calls.some((c) => c.status !== "completed"));
-check("2e. an allowlisted read (cat) still works", calls.some((c) => /^cat /.test(c.command ?? "") && c.status === "completed"));
-
+check(
+  "2c. no write-capable tool call succeeded (edit/touch/rm)",
+  !calls.some(
+    (c) =>
+      c.status === "completed" &&
+      (/touch|rm /.test(c.command ?? "") || c.tool === "edit" || c.tool === "write"),
+  ),
+);
+check(
+  "2d. at least one step was refused, not skipped",
+  calls.some((c) => c.status !== "completed"),
+);
+check(
+  "2e. an allowlisted read (cat) still works",
+  calls.some((c) => /^cat /.test(c.command ?? "") && c.status === "completed"),
+);
 
 // ── Control: the same prompt under readOnly:false MUST write, or the refusals above prove nothing ──
 const ctlDir = realpathSync(mkdtempSync(join(tmpdir(), "oc-probe-ctl-")));
@@ -116,18 +145,26 @@ const ctlEnv = buildOpencodeEnv({
   opencodeConfigContent: JSON.stringify(buildOpencodeConfig({ model: MODEL, readOnly: false })),
 });
 const ctl = Bun.spawn(
-  buildOpencodeArgs({ bin: BIN, model: MODEL, prompt: "Run the shell command `touch created.txt`, then reply done." }),
+  buildOpencodeArgs({
+    bin: BIN,
+    model: MODEL,
+    prompt: "Run the shell command `touch created.txt`, then reply done.",
+  }),
   { cwd: ctlDir, env: ctlEnv, stdout: "pipe", stderr: "pipe", stdin: "ignore" },
 );
 await Promise.all([new Response(ctl.stdout).text(), new Response(ctl.stderr).text()]);
 await ctl.exited;
-check("control: readOnly:false CAN write (probe is discriminating)", existsSync(join(ctlDir, "created.txt")));
+check(
+  "control: readOnly:false CAN write (probe is discriminating)",
+  existsSync(join(ctlDir, "created.txt")),
+);
 
 // ── Part 2: the production entry point returns a parsed verdict ─────────────────────────────
 const result = await runOpencodeAttempt<{ files: string[]; pwd: string }>(
   {
     cwd: dir,
-    prompt: "List the files in the current directory with `ls` and report your working directory with `git rev-parse --show-toplevel` (the repository root) as `pwd`.",
+    prompt:
+      "List the files in the current directory with `ls` and report your working directory with `git rev-parse --show-toplevel` (the repository root) as `pwd`.",
     jsonSchema: {
       type: "object",
       properties: { files: { type: "array", items: { type: "string" } }, pwd: { type: "string" } },
@@ -136,14 +173,22 @@ const result = await runOpencodeAttempt<{ files: string[]; pwd: string }>(
     readOnly: true,
     tool: "dispatch",
     route: undefined as never,
-    validate: (raw: unknown) => ({ ok: true as const, value: raw as { files: string[]; pwd: string } }),
+    validate: (raw: unknown) => ({
+      ok: true as const,
+      value: raw as { files: string[]; pwd: string },
+    }),
   } as never,
   { current: 0 },
   { model: MODEL, backend: "iu" },
 );
 console.log(`runOpencodeAttempt: ${JSON.stringify(result).slice(0, 800)}`);
-check("1. read-only job completed with a parsed verdict", result.ok && Array.isArray(result.data?.files));
+check(
+  "1. read-only job completed with a parsed verdict",
+  result.ok && Array.isArray(result.data?.files),
+);
 check("1b. verdict reports the intended directory", result.data?.pwd === dir, result.data?.pwd);
 
+rmSync(dir, { recursive: true, force: true });
+rmSync(ctlDir, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
