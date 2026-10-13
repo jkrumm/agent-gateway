@@ -29,19 +29,19 @@ export function scrubSensitiveEnv(env: Record<string, string>): void {
 }
 
 /**
- * The `USAGE_LANE` value for a routed tool — `sideclaw:<tool>`, coarsened to the part
+ * The `USAGE_LANE` value for a routed tool — `agent-gateway:<tool>`, coarsened to the part
  * before the first `:` in `tool` itself. `review`'s sub-steps (`review:router`,
  * `review:angle`, `review:adversary`, `review:synthesis`) pass their own sub-tool label
  * through `SessionOptions.tool` for logging/attribution, but usage-tracker's `sub_tool`
  * column is a flat string with no sub-lane concept (`report.ts`'s grouping is a plain
  * `coalesce`, nothing wildcard-aware) — one lane per Max-lane worker keeps
- * `stats --by sub_tool` a single `sideclaw:review` row instead of four fragments. Single
+ * `stats --by sub_tool` a single `agent-gateway:review` row instead of four fragments. Single
  * chokepoint so every spawn path (all of them already route through `workerBaseEnv`)
  * gets this for free rather than each call site coarsening its own `tool` string.
  */
 export function usageLane(tool: string | undefined): string {
   const base = (tool ?? "unknown").split(":")[0];
-  return `sideclaw:${base}`;
+  return `agent-gateway:${base}`;
 }
 
 /** The env prelude both harnesses share: copy the inherited env (defined entries only), strip

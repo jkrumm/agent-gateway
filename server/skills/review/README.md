@@ -179,7 +179,7 @@ table is always `GET /api/routing`.
 | 1 synthesis session                                                                        | `review`        |
 
 OCR reads the repo itself with its own tool loop rather than working off a single diff
-string, so its own IU-billed token spend (`review_ocr` in the `sideclaw-iu` usage sink) runs
+string, so its own IU-billed token spend (`review_ocr` in the `agent-gateway-iu` usage sink) runs
 **~1.5-3M tokens per run** on the `review_ocr` model with `--effort low` (~2.5-3 min on a
 1.8k-line diff), mostly cache reads. ocr's wall time is LLM rounds × ~5 s, so the default
 effort's second review pass doubled it — see the `review_ocr` comment in

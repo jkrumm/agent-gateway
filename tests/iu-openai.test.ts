@@ -15,7 +15,7 @@ import { join } from "node:path";
 
 process.env.AGENT_GATEWAY_IU_USAGE_LOG = join(
   tmpdir(),
-  `sideclaw-iu-openai-test-${Date.now()}.jsonl`,
+  `agent-gateway-iu-openai-test-${Date.now()}.jsonl`,
 );
 process.env.IU_API_KEY = "test-key";
 process.env.IU_BASE_URL = "https://iu.example.com/anthropic";
@@ -27,7 +27,7 @@ const originalUsageLog = process.env.AGENT_GATEWAY_IU_USAGE_LOG;
 /** A fresh temp sink path for a test that needs to read back exactly one row, rather than
  *  sharing the file-level sink every other test in this suite appends to. */
 function uniqueSink(): string {
-  return join(tmpdir(), `sideclaw-iu-openai-test-row-${Date.now()}-${Math.random()}.jsonl`);
+  return join(tmpdir(), `agent-gateway-iu-openai-test-row-${Date.now()}-${Math.random()}.jsonl`);
 }
 
 async function readLastRow(sink: string): Promise<Record<string, unknown>> {

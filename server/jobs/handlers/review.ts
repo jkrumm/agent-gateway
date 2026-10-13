@@ -417,7 +417,7 @@ export function fallowCommand(base: FallowBase): string {
 // every reviewer to newly added files. A changed file importing a brand-new
 // module handed the adversary an import with no target in the diff, and it
 // filed a false blocking "file missing / build break" — observed live against
-// usage-tracker's then-untracked src/collectors/sideclaw-iu.ts.
+// usage-tracker's then-untracked src/collectors/agent-gateway-iu.ts.
 //
 // `git diff --no-index -- /dev/null <file>` renders each untracked file as a
 // normal added-file hunk (`new file mode`, repo-relative `b/` path) so it reads

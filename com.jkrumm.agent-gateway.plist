@@ -2,14 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- A label BTM has never seen, deliberately: never reuse `com.jkrumm.sideclaw`.
-       Background Task Management stores a disposition per IDENTIFIER, and this
-       machine's entry for `8.com.jkrumm.sideclaw` is denied. Measured 2026-08-06:
-       removing the plist entirely, re-adding it, and re-adding it under a
-       different filename all re-registered as [enabled, disallowed] — the denial
-       outlives the file. A label BTM has never seen registers allowed; this one
-       (2026-10-09 rename from `com.jkrumm.sideclaw-server`) must be re-verified
-       after the first boot (AGENTS.md § Deploy). -->
+  <!-- Never rename or reuse a label casually: Background Task Management keeps a
+       disposition per identifier, and a denied one outlives the plist. See
+       docs/deployment.md § The BTM denial. -->
   <key>Label</key>
   <string>com.jkrumm.agent-gateway</string>
 

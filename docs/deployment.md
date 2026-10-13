@@ -248,7 +248,7 @@ The label is `com.jkrumm.agent-gateway` and the program is a wrapper script
 — both are Background Task Management workarounds, not style. macOS computes
 an *effective* disposition for every launch item, and on this host two
 separate denials applied: `/opt/homebrew/bin/bun` as an executable, and the
-identifier `8.com.jkrumm.sideclaw`. Either one alone is enough to make
+identifier of the pre-rename label (see below). Either one alone is enough to make
 launchd skip the `RunAtLoad` spawn — which is what "agent-gateway doesn't come up
 after a power cut" actually was, reproduced across three reboots on
 2026-08-06 (one no-start, two starting ~3 minutes late, against ~18s for
@@ -261,8 +261,9 @@ resolved to `[enabled, allowed]`. The identifier half is stickier than it
 looks — deleting the plist, re-adding it, and re-adding it under a different
 *filename* all came back disallowed, so only a new **Label** clears it. Hence
 `scripts/agent-gateway-start.sh` (dodges the bun denial) plus a label BTM has
-never seen (dodges the identifier denial) — `com.jkrumm.sideclaw` is burned,
-`com.jkrumm.sideclaw-server` was the first clean one, and `com.jkrumm.agent-gateway`
+never seen (dodges the identifier denial). History: the service's first label,
+`com.jkrumm.sideclaw` (BTM identifier `8.com.jkrumm.sideclaw`), is burned for good;
+`com.jkrumm.sideclaw-server` was the first clean replacement, and `com.jkrumm.agent-gateway`
 (2026-10-09 rename) is the current one, re-verified after its first boot. Reverting either brings the boot failure
 back. It also makes the entry legible as `agent-gateway-start.sh` rather than an
 anonymous `bun` in System Settings → Login Items, which is how it plausibly

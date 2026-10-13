@@ -120,7 +120,7 @@ export function sessionEnvRecord(
  * for why null is written rather than skipped). Idempotent — safe if the hook also
  * fires. Never throws.
  *
- * `lane` (`usageLane(tool)`, e.g. `"sideclaw:dispatch"`) and `harness` are the only
+ * `lane` (`usageLane(tool)`, e.g. `"agent-gateway:dispatch"`) and `harness` are the only
  * per-worker signal that survives to usage-tracker at all: every worker runs with
  * `disableAllHooks: true` (WORKER_SETTINGS), so dotfiles' own SessionStart hook never
  * fires inside one — this sidecar record is the sole source, not a mirror of a redundant
@@ -141,7 +141,7 @@ export function writeSessionEnv(
     const line =
       JSON.stringify({
         ts: now,
-        src: "sideclaw",
+        src: "agent-gateway",
         event: "session_env",
         level: "info",
         data: sessionEnvRecord(sessionId, baseUrl, model, backend, tool, harness),
@@ -162,7 +162,7 @@ const ATTRIBUTION_LOG = join(
   ".local",
   "share",
   "usage-tracker",
-  "sideclaw-sessions.jsonl",
+  "agent-gateway-sessions.jsonl",
 );
 
 /** Exported so `opencode-runner.ts` appends to the SAME attribution log/sink under its own
@@ -247,7 +247,7 @@ export interface SessionOptions<T = unknown> {
   extraEnv?: Record<string, string>;
   /**
    * Tool name for usage attribution — e.g. "check", "review".
-   * Written to the sideclaw-sessions.jsonl attribution log so
+   * Written to the agent-gateway-sessions.jsonl attribution log so
    * usage-tracker can tag worker requests back to the agent-gateway tool that caused
    * them. Optional but every job handler should set it.
    */
@@ -707,7 +707,7 @@ export function buildSessionArgs(input: SessionArgsInput): string[] {
 }
 
 export interface WorkerEnvInput {
-  /** Routed tool name, tags `USAGE_LANE` as `sideclaw:<tool>` — `"unknown"` when absent. */
+  /** Routed tool name, tags `USAGE_LANE` as `agent-gateway:<tool>` — `"unknown"` when absent. */
   tool?: string;
   backend: Backend;
   model: string;

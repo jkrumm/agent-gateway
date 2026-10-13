@@ -53,8 +53,8 @@ process.env.AGENT_GATEWAY_JOBS_DB ??= join(
 
 // Same reasoning, for `recordIuUsage`'s NDJSON sink (`server/lib/iu-openai.ts`): a test file
 // that imports it transitively (e.g. via `server/lib/ocr.ts`) before any test sets the env
-// itself must still never append to the real ~/.local/share/usage-tracker/sideclaw-iu.jsonl.
+// itself must still never append to the real ~/.local/share/usage-tracker/agent-gateway-iu.jsonl.
 process.env.AGENT_GATEWAY_IU_USAGE_LOG ??= join(
   mkdtempSync(join(tmpdir(), "agent-gateway-test-iu-usage-")),
-  "sideclaw-iu.jsonl",
+  "agent-gateway-iu.jsonl",
 );

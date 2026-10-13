@@ -13,12 +13,12 @@ import { readTrimmedLines } from "../mcp/worker-shared.ts";
 // fetches, billed IU per-token, zero Max quota.
 //
 // Because they bypass session-runner, nothing writes their usage to the normal
-// sideclaw-sessions attribution log. `recordIuUsage()` writes a separate NDJSON
-// sink instead, which the usage-tracker's `sideclaw-iu` collector ingests.
+// agent-gateway-sessions attribution log. `recordIuUsage()` writes a separate NDJSON
+// sink instead, which the usage-tracker's `agent-gateway-iu` collector ingests.
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
-/** NDJSON usage sink consumed by the usage-tracker's `sideclaw-iu` collector. Resolved fresh
+/** NDJSON usage sink consumed by the usage-tracker's `agent-gateway-iu` collector. Resolved fresh
  *  on every call (not cached at module load) — a test that sets `AGENT_GATEWAY_IU_USAGE_LOG` AFTER
  *  this module has already been imported (e.g. transitively, via `server/lib/ocr.ts`, from an
  *  earlier test file in the same bun test process) would otherwise leak rows into the real
@@ -26,7 +26,7 @@ const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 function usageSinkPath(): string {
   return (
     process.env.AGENT_GATEWAY_IU_USAGE_LOG ??
-    join(homedir(), ".local", "share", "usage-tracker", "sideclaw-iu.jsonl")
+    join(homedir(), ".local", "share", "usage-tracker", "agent-gateway-iu.jsonl")
   );
 }
 
@@ -356,7 +356,7 @@ export async function recordIuUsage(rec: {
     const line =
       JSON.stringify({
         ts: new Date().toISOString(),
-        source: "sideclaw-iu",
+        source: "agent-gateway-iu",
         request_id: rec.requestId ?? crypto.randomUUID(),
         tool: rec.tool,
         model: rec.model,

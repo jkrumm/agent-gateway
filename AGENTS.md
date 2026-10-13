@@ -7,14 +7,9 @@ loopback-only on `:7705`. Reached via Caddy: `https://agent-gateway.test` locall
 — **no tailnet door, deliberately**. `~/.config/caddy-tailnet.ports` carries
 an explicit `exclude agent-gateway`: the job API has no auth, so a tailnet twin
 would let any tag:mac/phone/tablet node `POST /api/jobs` with `dispatch
-implement`. Don't remove that exclusion. (`excalidraw-hydrate.ts` still stamps
-`https://sideclaw.local` as a diagram `source`, a dead localias-proxy convention.)
+implement`. Don't remove that exclusion.
 
-**Renamed from `sideclaw` (2026-10-09).** CLI `agw`, MCP server and tools `mcp__agent-gateway__*`, env prefix `AGENT_GATEWAY_*` — the deprecation shims (`bin/sideclaw`, `SIDECLAW_*` env aliasing) are gone. Still carrying the old name
-on purpose: the persisted usage-tracker data contract (`sideclaw-iu` and `sideclaw-sessions` sinks, `src: "sideclaw"`, `sideclaw:<tool>` lanes), kept on both sides so historical rows stay joinable. The Caddy door is `agent-gateway.test` since 2026-10-09. `scripts/rename-codemod.ts`
-re-runs the rewrite; `scripts/migrate-runtime.sh` (drain, move data/state/logs, new label) and
-`scripts/post-move.sh` (Claude Code state, MCP registration, then the migration) are the
-one-time machine steps.
+**Renamed 2026-10-09.** CLI `agw`, MCP server and tools `mcp__agent-gateway__*`, env prefix `AGENT_GATEWAY_*`, Caddy door `agent-gateway.test`. The persisted usage-tracker contract followed on 2026-10-13: `agent-gateway-iu` and `agent-gateway-sessions` sinks, `src: "agent-gateway"`, `agent-gateway:<tool>` lanes (stored rows and sink files migrated in place).
 
 Bun loads `.env` automatically from the `agent-gateway/` directory — all env vars
 (`PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH`, `GITHUB_TOKEN`, `AGENT_GATEWAY_*`,
@@ -653,8 +648,8 @@ the 60s SDK timeout. Billed IU per-token, zero Max.
   dotfiles `/read-drawing` skill's `claude_iu` path.
 - `generate_image` was retired 2026-07 in favor of the `image-gen` gateway.
 - These bypass `session-runner`, so usage is logged separately:
-  `~/.local/share/usage-tracker/sideclaw-iu.jsonl` (`recordIuUsage`), ingested
-  by usage-tracker's `sideclaw-iu` collector. Reasoning tokens (Gemini bills
+  `~/.local/share/usage-tracker/agent-gateway-iu.jsonl` (`recordIuUsage`), ingested
+  by usage-tracker's `agent-gateway-iu` collector. Reasoning tokens (Gemini bills
   thinking spend outside `completion_tokens`) are derived via
   `normalizeUsage`, not reported by the gateway — dropping this understated
   cost several-fold.
