@@ -25,6 +25,9 @@
 // one carries the model and therefore the `-m` prefix — GPT ids ride Responses only.
 
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Subprocess } from "bun";
 import { getIuConfig } from "../lib/iu-openai.ts";
 import { getModel, type ModelEntry } from "../lib/models.ts";
@@ -324,15 +327,11 @@ export function buildOpencodeConfig(input: OpencodeConfigInput): Record<string, 
   };
 }
 
-/** Env vars that decide where opencode looks for its global config/data; the inherited values
- *  are authoritative, never a caller's `extraEnv`. */
-const CONFIG_DISCOVERY_ENV = [
-  "HOME",
-  "XDG_CONFIG_HOME",
-  "XDG_DATA_HOME",
-  "XDG_STATE_HOME",
-  "XDG_CACHE_HOME",
-];
+/** Env vars that decide where opencode looks for its global data/state/cache; the inherited
+ *  values are authoritative, never a caller's `extraEnv`. `XDG_CONFIG_HOME` is deliberately
+ *  NOT here — it is the root opencode resolves the operator's global CONFIG from, and a worker
+ *  run pins it to a private empty root instead (`buildOpencodeEnv`'s `configHome`). */
+const CONFIG_DISCOVERY_ENV = ["HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"];
 
 export interface OpencodeEnvInput {
   tool?: string;
@@ -351,6 +350,11 @@ export interface OpencodeEnvInput {
    *  pointing `OPENCODE_CONFIG` at it, is a security requirement, not a style choice — see
    *  `buildOpencodeEnv`'s own doc comment. */
   opencodeConfigContent: string;
+  /** The `XDG_CONFIG_HOME` a worker run gets, pinning opencode's GLOBAL config root to a
+   *  private, empty directory created for the run (`runOpencodeAttempt`). Without it opencode
+   *  merges the operator's global config — including any `mcp` servers it registers there, a
+   *  capability the permission profile below cannot reach — into the per-run config. */
+  configHome: string;
   /** Override for tests — defaults to `process.env`, same convention as `WorkerEnvInput`. */
   baseEnv?: Record<string, string | undefined>;
 }
@@ -380,6 +384,7 @@ export function buildOpencodeEnv(input: OpencodeEnvInput): Record<string, string
     iuKey,
     iuOpenaiBase,
     opencodeConfigContent,
+    configHome,
     baseEnv = process.env,
   } = input;
 
@@ -387,8 +392,9 @@ export function buildOpencodeEnv(input: OpencodeEnvInput): Record<string, string
   // `extraEnv` first, so every module-owned value below wins over it: a caller (dispatch's
   // `readOnly: true` plus its own `extraEnv`) must not be able to replace the permission
   // config, point opencode at another config source, or redirect the IU key to another base.
-  // Config-discovery roots too: opencode merges its GLOBAL config (incl. MCP servers) from
-  // HOME / XDG_*, so a caller must not be able to repoint them at a config it controls.
+  // Global data/state/cache roots too: opencode reads its `opencode.db` and session store from
+  // `XDG_DATA_HOME`/`XDG_STATE_HOME`, so a caller must not be able to repoint them at a
+  // location it controls.
   const discovery = Object.fromEntries(
     CONFIG_DISCOVERY_ENV.filter((k) => env[k] !== undefined).map((k) => [k, env[k]]),
   );
@@ -404,6 +410,16 @@ export function buildOpencodeEnv(input: OpencodeEnvInput): Record<string, string
   delete env.OPENCODE_CONFIG_DIR;
   delete env.OPENCODE_CLI_CONFIG_CONTENT;
   env.OPENCODE_CONFIG_CONTENT = opencodeConfigContent;
+  // opencode resolves its GLOBAL config from `$XDG_CONFIG_HOME/opencode/` (`~/.config/opencode`
+  // by default), and MERGES it into every source above — so the operator's `mcp` servers land
+  // in a worker run that declares none. Measured 2026-10-13 on 2.0.25: a global `mcp` server
+  // starts for a worker whose `OPENCODE_CONFIG_CONTENT` has no `mcp` block, and a bare
+  // `mcp: {<name>: {enabled:false}}` there does NOT suppress it (only repeating the server's
+  // full definition does, which would mean copying operator config — including any credential
+  // in it — into the worker). Pinning `XDG_CONFIG_HOME` to a private empty root instead makes
+  // the global-config layer empty for the run; the module's own config is unaffected, it rides
+  // `OPENCODE_CONFIG_CONTENT` (a higher-precedence source).
+  env.XDG_CONFIG_HOME = configHome;
   // opencode 2.x resolves its working directory from `PWD`, not `Bun.spawn`'s cwd — without
   // this pin the session's shell/read tools run against the server's stale ambient `PWD`,
   // silently breaking per-episode worktree isolation. The spawn cwd is authoritative.
@@ -1050,7 +1066,19 @@ export async function runOpencodeAttempt<T>(
   }
 
   const opencodeConfigContent = JSON.stringify(buildOpencodeConfig({ model, readOnly }));
-  const env = buildOpencodeEnv({ tool, cwd, extraEnv, iuKey, iuOpenaiBase, opencodeConfigContent });
+  // A private, empty GLOBAL-config root for this run — opencode merges the operator's
+  // `$XDG_CONFIG_HOME/opencode/` config (including its `mcp` servers) into every worker
+  // otherwise; see `buildOpencodeEnv`'s `configHome` note. Removed once the worker is gone.
+  const configHome = mkdtempSync(join(tmpdir(), "agw-opencode-config-"));
+  const env = buildOpencodeEnv({
+    tool,
+    cwd,
+    extraEnv,
+    iuKey,
+    iuOpenaiBase,
+    opencodeConfigContent,
+    configHome,
+  });
 
   const finalPrompt = jsonSchema ? appendJsonSchemaInstruction(prompt, jsonSchema) : prompt;
   const argv = buildOpencodeArgs({
@@ -1082,43 +1110,50 @@ export async function runOpencodeAttempt<T>(
   let killReason: "idle" | null = null;
   let idleMsAtKill: number | null = null;
 
-  for (let dbAttempt = 1; dbAttempt <= DB_LOCK_MAX_ATTEMPTS; dbAttempt++) {
-    if (jobId !== undefined && isCancelled?.(jobId)) {
-      throw new SessionCancelledError(jobId);
-    }
-    const proc = deps.spawn
-      ? deps.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe", env })
-      : Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe", env });
-    const streamResult = await runOpencodeProcessLifecycle(proc, {
-      jobId,
-      cwd,
-      model,
-      backend,
-      tool,
-      iuOpenaiBase,
-      onSessionId,
-      onActivity,
-      onProgress,
-      turnsRef,
-    });
-    ({ accum, eventCount, exitCode, stderrTrimmed, killReason, idleMsAtKill } = streamResult);
-
-    if (killReason) break; // idle timeout — never retried at the db-lock layer
-    if (
-      isDbLockedFailure(exitCode, eventCount, stderrTrimmed) &&
-      dbAttempt < DB_LOCK_MAX_ATTEMPTS
-    ) {
-      runnerLogger().warn(
-        { event: "session.opencode_db_locked", project: cwd, ...errCtx, dbAttempt },
-        "opencode db locked — retrying spawn",
-      );
-      await Bun.sleep(dbLockRetryDelayMs());
+  try {
+    for (let dbAttempt = 1; dbAttempt <= DB_LOCK_MAX_ATTEMPTS; dbAttempt++) {
       if (jobId !== undefined && isCancelled?.(jobId)) {
         throw new SessionCancelledError(jobId);
       }
-      continue;
+      const proc = deps.spawn
+        ? deps.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe", env })
+        : Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe", env });
+      const streamResult = await runOpencodeProcessLifecycle(proc, {
+        jobId,
+        cwd,
+        model,
+        backend,
+        tool,
+        iuOpenaiBase,
+        onSessionId,
+        onActivity,
+        onProgress,
+        turnsRef,
+      });
+      ({ accum, eventCount, exitCode, stderrTrimmed, killReason, idleMsAtKill } = streamResult);
+
+      if (killReason) break; // idle timeout — never retried at the db-lock layer
+      if (
+        isDbLockedFailure(exitCode, eventCount, stderrTrimmed) &&
+        dbAttempt < DB_LOCK_MAX_ATTEMPTS
+      ) {
+        runnerLogger().warn(
+          { event: "session.opencode_db_locked", project: cwd, ...errCtx, dbAttempt },
+          "opencode db locked — retrying spawn",
+        );
+        await Bun.sleep(dbLockRetryDelayMs());
+        if (jobId !== undefined && isCancelled?.(jobId)) {
+          throw new SessionCancelledError(jobId);
+        }
+        continue;
+      }
+      break;
     }
-    break;
+  } finally {
+    // The run (including every db-lock retry) is over by the time this fires — child processes
+    // are force-killed by `runOpencodeProcessLifecycle`'s own `finally` — so the private config
+    // root can go, even on a `SessionCancelledError` thrown from inside the loop.
+    rmSync(configHome, { recursive: true, force: true });
   }
 
   // The runtime IU key is a live env var inside a session with Bash access — redact it out

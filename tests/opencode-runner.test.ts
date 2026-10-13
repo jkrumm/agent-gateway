@@ -367,6 +367,7 @@ describe("buildOpencodeEnv", () => {
       iuKey: "sk-secret-123",
       iuOpenaiBase: "https://iu.example.com/openai/v1",
       opencodeConfigContent: '{"permission":{}}',
+      configHome: "/private/agw-config-home",
       baseEnv: { PATH: "/usr/bin" },
     });
     expect(env.IU_KEY).toBe("sk-secret-123");
@@ -375,18 +376,19 @@ describe("buildOpencodeEnv", () => {
     expect(env.OPENCODE_CONFIG).toBeUndefined();
   });
 
-  test("extraEnv cannot repoint HOME / XDG config discovery", () => {
+  test("XDG_CONFIG_HOME is pinned to configHome; a hostile extraEnv cannot repoint it", () => {
     const env = buildOpencodeEnv({
       tool: "dispatch",
       cwd: "/tmp",
       iuKey: "k",
       iuOpenaiBase: "https://iu.example.com/openai/v1",
       opencodeConfigContent: "{}",
-      baseEnv: { HOME: "/home/real" },
+      configHome: "/private/agw-config-home",
+      baseEnv: { HOME: "/home/real", XDG_CONFIG_HOME: "/home/real/.config" },
       extraEnv: { HOME: "/evil", XDG_CONFIG_HOME: "/evil/cfg" },
     });
     expect(env.HOME).toBe("/home/real");
-    expect(env.XDG_CONFIG_HOME).toBeUndefined();
+    expect(env.XDG_CONFIG_HOME).toBe("/private/agw-config-home");
   });
 
   test("PWD is pinned to cwd, overriding an inherited and an extraEnv PWD", () => {
@@ -396,6 +398,7 @@ describe("buildOpencodeEnv", () => {
       iuKey: "k",
       iuOpenaiBase: "https://iu.example.com/openai/v1",
       opencodeConfigContent: "{}",
+      configHome: "/private/agw-config-home",
       baseEnv: { PWD: "/stale/server/cwd", PATH: "/usr/bin" },
       extraEnv: { PWD: "/also/wrong" },
     });
@@ -409,6 +412,7 @@ describe("buildOpencodeEnv", () => {
       iuKey: "k",
       iuOpenaiBase: "https://iu.example.com/openai/v1",
       opencodeConfigContent: "{}",
+      configHome: "/private/agw-config-home",
       baseEnv: { OPENCODE_CONFIG: "/some/inherited/path.json" },
     });
     expect(env.OPENCODE_CONFIG).toBeUndefined();
@@ -421,6 +425,7 @@ describe("buildOpencodeEnv", () => {
       iuKey: "sk-secret-123",
       iuOpenaiBase: "https://iu.example.com/openai/v1",
       opencodeConfigContent: '{"permission":{}}',
+      configHome: "/private/agw-config-home",
       baseEnv: { PATH: "/usr/bin" },
     });
     const others = Object.entries(env).filter(([k]) => k !== "IU_KEY");
@@ -434,6 +439,7 @@ describe("buildOpencodeEnv", () => {
       iuKey: "k",
       iuOpenaiBase: "https://iu.example.com/openai/v1",
       opencodeConfigContent: "{}",
+      configHome: "/private/agw-config-home",
       baseEnv: { GITHUB_TOKEN: "ghp_leaked", SOME_API_KEY: "leaked2", PATH: "/usr/bin" },
     });
     expect(env.GITHUB_TOKEN).toBeUndefined();
@@ -448,6 +454,7 @@ describe("buildOpencodeEnv", () => {
       iuKey: "k",
       iuOpenaiBase: "https://iu.example.com/openai/v1",
       opencodeConfigContent: "{}",
+      configHome: "/private/agw-config-home",
       baseEnv: { CLAUDE_SESSION_ID: "leftover", CLAUDE_PARENT_SESSION_ID: "leftover2" },
     });
     expect(env.USAGE_LANE).toBe("agent-gateway:dispatch");
@@ -463,6 +470,7 @@ describe("buildOpencodeEnv", () => {
       iuKey: "k",
       iuOpenaiBase: "https://iu.example.com/openai/v1",
       opencodeConfigContent: '{"permission":{"edit":"deny"}}',
+      configHome: "/private/agw-config-home",
       extraEnv: {
         IU_KEY: "overridden",
         IU_OPENAI_BASE: "https://evil.example.com",
@@ -470,6 +478,7 @@ describe("buildOpencodeEnv", () => {
         OPENCODE_CONFIG: "/evil.json",
         OPENCODE_CONFIG_DIR: "/evil",
         OPENCODE_CLI_CONFIG_CONTENT: "{}",
+        XDG_CONFIG_HOME: "/evil/config",
         PWD: "/also/wrong",
         GIT_CONFIG_COUNT: "1",
       },
@@ -482,6 +491,7 @@ describe("buildOpencodeEnv", () => {
     expect(env.OPENCODE_CONFIG).toBeUndefined();
     expect(env.OPENCODE_CONFIG_DIR).toBeUndefined();
     expect(env.OPENCODE_CLI_CONFIG_CONTENT).toBeUndefined();
+    expect(env.XDG_CONFIG_HOME).toBe("/private/agw-config-home");
     expect(env.PWD).toBe("/worktree/abc");
   });
 });
