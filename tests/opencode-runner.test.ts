@@ -591,6 +591,20 @@ describe("reduceOpencodeEvent over a real captured successful 2.x stream", () =>
     expect(accum.usageIncomplete).toBe(true);
   });
 
+  test("endedOnText: true after a text, cleared by a following tool_use", () => {
+    let accum = reduceOpencodeEvent(INITIAL_OPENCODE_ACCUM, {
+      type: "text",
+      part: { type: "text", text: "let me apply the change" },
+    } as never);
+    expect(accum.endedOnText).toBe(true);
+    accum = reduceOpencodeEvent(accum, {
+      type: "tool_use",
+      part: { type: "tool", tool: "shell", state: { input: { command: "ls" } } },
+    } as never);
+    expect(accum.endedOnText).toBe(false);
+    expect(accum.lastAssistantText).toBe("let me apply the change");
+  });
+
   test("a terminal step_finish closes the final text turn: usageIncomplete is false", () => {
     let accum = INITIAL_OPENCODE_ACCUM;
     for (const ev of fixtureLines) accum = reduceOpencodeEvent(accum, ev as never);
