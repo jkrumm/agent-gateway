@@ -58,3 +58,10 @@ process.env.AGENT_GATEWAY_IU_USAGE_LOG ??= join(
   mkdtempSync(join(tmpdir(), "agent-gateway-test-iu-usage-")),
   "agent-gateway-iu.jsonl",
 );
+
+// Same for the per-session attribution log (`writeAttribution`, session-runner.ts): suites that
+// drive runSession/runOpencodeAttempt must not append fake rows to the live usage ledger.
+process.env.AGENT_GATEWAY_SESSIONS_LOG ??= join(
+  mkdtempSync(join(tmpdir(), "agent-gateway-test-sessions-")),
+  "agent-gateway-sessions.jsonl",
+);

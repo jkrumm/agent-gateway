@@ -375,6 +375,20 @@ describe("buildOpencodeEnv", () => {
     expect(env.OPENCODE_CONFIG).toBeUndefined();
   });
 
+  test("extraEnv cannot repoint HOME / XDG config discovery", () => {
+    const env = buildOpencodeEnv({
+      tool: "dispatch",
+      cwd: "/tmp",
+      iuKey: "k",
+      iuOpenaiBase: "https://iu.example.com/openai/v1",
+      opencodeConfigContent: "{}",
+      baseEnv: { HOME: "/home/real" },
+      extraEnv: { HOME: "/evil", XDG_CONFIG_HOME: "/evil/cfg" },
+    });
+    expect(env.HOME).toBe("/home/real");
+    expect(env.XDG_CONFIG_HOME).toBeUndefined();
+  });
+
   test("PWD is pinned to cwd, overriding an inherited and an extraEnv PWD", () => {
     const env = buildOpencodeEnv({
       tool: "dispatch",
@@ -603,6 +617,15 @@ describe("reduceOpencodeEvent over a real captured successful 2.x stream", () =>
     } as never);
     expect(accum.endedOnText).toBe(false);
     expect(accum.lastAssistantText).toBe("let me apply the change");
+  });
+
+  test("a mid-loop step_finish (tool-calls) after a text clears endedOnText; a stop keeps it", () => {
+    const text = { type: "text", part: { type: "text", text: "narration" } };
+    const finish = (reason: string) => ({ type: "step_finish", part: { reason } });
+    let accum = reduceOpencodeEvent(INITIAL_OPENCODE_ACCUM, text as never);
+    expect(reduceOpencodeEvent(accum, finish("tool-calls") as never).endedOnText).toBe(false);
+    accum = reduceOpencodeEvent(accum, finish("stop") as never);
+    expect(accum.endedOnText).toBe(true);
   });
 
   test("a terminal step_finish closes the final text turn: usageIncomplete is false", () => {
