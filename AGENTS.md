@@ -405,6 +405,16 @@ explicitly — the default `ask` is auto-REJECTED in non-interactive `run`
 mode and silently ends the session, so there is no "ask and it just works"
 here, unlike an interactive opencode session. **Never `--pure`** — measured
 2026-09-24 to hang.
+`buildOpencodeEnv` applies the caller's `extraEnv` FIRST; the module's own values
+(`OPENCODE_CONFIG_CONTENT`, `IU_KEY`/`IU_OPENAI_BASE`, `PWD`) are set after and always win, and
+`OPENCODE_CONFIG`/`OPENCODE_CONFIG_DIR`/`OPENCODE_CLI_CONFIG_CONTENT` are deleted — the
+read-only profile must not be replaceable by a caller. After an opencode upgrade or any change to
+`opencode-runner.ts`, re-run the live proof: `env -u CLAUDECODE bun scripts/opencode-live-probe.ts`
+(real binary, a few cents of IU tokens: read-only verdict parses, edit/non-allowlisted shell are
+refused even under a hostile `extraEnv`, the job runs in the intended directory, and a
+`readOnly:false` control proves the probe discriminates). Known residual on 2.x: the `execute`
+(code-mode) tool also exposes the operator's globally configured MCP servers to a read-only run;
+it exposes no file-write or shell tool.
 
 **A dead IU endpoint must never hang an opencode run.** `opencode run` retries connect errors
 and 5xx forever. `runOpencodeAttempt` therefore probes the IU OpenAI base (`fetch`, abort after

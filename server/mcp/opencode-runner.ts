@@ -360,8 +360,8 @@ export interface OpencodeEnvInput {
  *  as an env value rather than a file also removes the temp-file lifecycle entirely (no
  *  create/chmod/unlink, no window where a `0600` file sits on disk with the IU key baked into
  *  its `{env:...}` — wait, it never was baked in, but the file itself was still a leak
- *  surface for the config SHAPE). `extraEnv` applied last, same as `buildWorkerEnv`
- *  (dispatch's `GIT_DENY_CREDENTIALS_ENV` must win). */
+ *  surface for the config SHAPE). `extraEnv` (e.g. dispatch's `GIT_DENY_CREDENTIALS_ENV`) is
+ *  applied before the module-owned values, which therefore always win. */
 export function buildOpencodeEnv(input: OpencodeEnvInput): Record<string, string> {
   const {
     tool,
@@ -374,19 +374,22 @@ export function buildOpencodeEnv(input: OpencodeEnvInput): Record<string, string
   } = input;
 
   const env = workerBaseEnv(baseEnv, tool);
+  // `extraEnv` first, so every module-owned value below wins over it: a caller (dispatch's
+  // `readOnly: true` plus its own `extraEnv`) must not be able to replace the permission
+  // config, point opencode at another config source, or redirect the IU key to another base.
+  if (extraEnv) Object.assign(env, extraEnv);
   env.IU_KEY = iuKey;
   env.IU_OPENAI_BASE = iuOpenaiBase;
-  // An inherited OPENCODE_CONFIG (a file path) must not coexist with the content env var —
-  // harmless given CONTENT wins, but a stale/irrelevant path left over from the parent
-  // process's own env is not this worker's business to carry.
+  // Every other config source that could merge in or shadow the permission profile is dropped
+  // (an inherited or caller-supplied one is not this worker's business): the file-path
+  // `OPENCODE_CONFIG`, the config dir, and the CLI-config content var.
   delete env.OPENCODE_CONFIG;
+  delete env.OPENCODE_CONFIG_DIR;
+  delete env.OPENCODE_CLI_CONFIG_CONTENT;
   env.OPENCODE_CONFIG_CONTENT = opencodeConfigContent;
-  if (extraEnv) Object.assign(env, extraEnv);
-  // Set AFTER `extraEnv` (and after the verbatim `process.env` copy in `workerBaseEnv`): the
-  // spawn cwd is authoritative, so no inherited or caller-supplied `PWD` may shadow it.
   // opencode 2.x resolves its working directory from `PWD`, not `Bun.spawn`'s cwd — without
   // this pin the session's shell/read tools run against the server's stale ambient `PWD`,
-  // silently breaking per-episode worktree isolation for every opencode-harness dispatch.
+  // silently breaking per-episode worktree isolation. The spawn cwd is authoritative.
   env.PWD = cwd;
   return env;
 }

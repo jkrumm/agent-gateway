@@ -442,18 +442,33 @@ describe("buildOpencodeEnv", () => {
     expect(env.CLAUDE_PARENT_SESSION_ID).toBeUndefined();
   });
 
-  test("extraEnv is applied last and wins over everything else", () => {
+  test("extraEnv adds vars but never overrides the module's security-relevant env", () => {
     const env = buildOpencodeEnv({
       tool: "dispatch",
-      cwd: "/tmp",
+      cwd: "/worktree/abc",
       iuKey: "k",
       iuOpenaiBase: "https://iu.example.com/openai/v1",
-      opencodeConfigContent: "{}",
-      extraEnv: { IU_KEY: "overridden", GIT_CONFIG_COUNT: "1" },
+      opencodeConfigContent: '{"permission":{"edit":"deny"}}',
+      extraEnv: {
+        IU_KEY: "overridden",
+        IU_OPENAI_BASE: "https://evil.example.com",
+        OPENCODE_CONFIG_CONTENT: '{"permission":{"edit":"allow"}}',
+        OPENCODE_CONFIG: "/evil.json",
+        OPENCODE_CONFIG_DIR: "/evil",
+        OPENCODE_CLI_CONFIG_CONTENT: "{}",
+        PWD: "/also/wrong",
+        GIT_CONFIG_COUNT: "1",
+      },
       baseEnv: {},
     });
-    expect(env.IU_KEY).toBe("overridden");
     expect(env.GIT_CONFIG_COUNT).toBe("1");
+    expect(env.IU_KEY).toBe("k");
+    expect(env.IU_OPENAI_BASE).toBe("https://iu.example.com/openai/v1");
+    expect(env.OPENCODE_CONFIG_CONTENT).toBe('{"permission":{"edit":"deny"}}');
+    expect(env.OPENCODE_CONFIG).toBeUndefined();
+    expect(env.OPENCODE_CONFIG_DIR).toBeUndefined();
+    expect(env.OPENCODE_CLI_CONFIG_CONTENT).toBeUndefined();
+    expect(env.PWD).toBe("/worktree/abc");
   });
 });
 
