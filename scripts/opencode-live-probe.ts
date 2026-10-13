@@ -7,11 +7,15 @@
 //   2. in the read-only profile an edit and non-allowlisted shell commands are refused — even
 //      when the caller passes a hostile `extraEnv` that tries to replace the permission config
 //   3. the job runs in the intended directory (not the probe's own cwd)
+//   4. a GLOBAL opencode config (the operator's `$XDG_CONFIG_HOME/opencode/opencode.json`,
+//      where MCP servers live) does NOT reach the worker — `buildOpencodeEnv` pins
+//      `XDG_CONFIG_HOME` to a private empty root
 // Exits non-zero on any failed check. Costs a few cents of IU tokens; never run from CI.
 
 import {
   mkdtempSync,
   existsSync,
+  mkdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -48,6 +52,46 @@ console.log(`probe dir: ${dir}  (process cwd: ${process.cwd()})`);
 
 // ── Part 1: raw run, read-only profile + hostile extraEnv ──────────────────────────────────
 const iu = await getIuConfig();
+// The private empty GLOBAL-config root every worker run gets. Part 0 also shows a global config
+// pointed at by the inherited XDG_CONFIG_HOME cannot leak in past this pin.
+const configHome = realpathSync(mkdtempSync(join(tmpdir(), "oc-probe-cfghome-")));
+
+// ── Part 0: the operator's GLOBAL opencode config (where MCP servers live) must NOT reach a worker ──
+const globalHome = realpathSync(mkdtempSync(join(tmpdir(), "oc-probe-global-")));
+mkdirSync(join(globalHome, "opencode"), { recursive: true });
+const canary = join(globalHome, "canary.log");
+writeFileSync(
+  join(globalHome, "opencode", "opencode.json"),
+  JSON.stringify({
+    $schema: "https://opencode.ai/config.json",
+    mcp: { canary: { type: "local", command: ["sh", "-c", `date >> ${canary}; sleep 300`] } },
+  }),
+);
+const env0 = buildOpencodeEnv({
+  tool: "dispatch",
+  cwd: dir,
+  iuKey: iu.key,
+  iuOpenaiBase: iu.openaiBase,
+  opencodeConfigContent: JSON.stringify(buildOpencodeConfig({ model: MODEL, readOnly: true })),
+  configHome,
+  baseEnv: { ...process.env, XDG_CONFIG_HOME: globalHome },
+});
+const p0 = Bun.spawn(buildOpencodeArgs({ bin: BIN, model: MODEL, prompt: "reply with exactly: OK" }), {
+  cwd: dir,
+  env: env0,
+  stdout: "pipe",
+  stderr: "pipe",
+  stdin: "ignore",
+});
+await Promise.all([new Response(p0.stdout).text(), new Response(p0.stderr).text()]);
+await p0.exited;
+await Bun.sleep(1200);
+check(
+  "0. a global MCP server (XDG_CONFIG_HOME) is NOT started in a worker run",
+  !existsSync(canary),
+);
+rmSync(globalHome, { recursive: true, force: true });
+
 const hostile = JSON.stringify({
   permission: { bash: "allow", edit: "allow", external_directory: "allow" },
 });
@@ -57,6 +101,7 @@ const env = buildOpencodeEnv({
   iuKey: iu.key,
   iuOpenaiBase: iu.openaiBase,
   opencodeConfigContent: JSON.stringify(buildOpencodeConfig({ model: MODEL, readOnly: true })),
+  configHome,
   extraEnv: { OPENCODE_CONFIG_CONTENT: hostile, OPENCODE_CLI_CONFIG_CONTENT: hostile },
 });
 const prompt = [
@@ -143,6 +188,7 @@ const ctlEnv = buildOpencodeEnv({
   iuKey: iu.key,
   iuOpenaiBase: iu.openaiBase,
   opencodeConfigContent: JSON.stringify(buildOpencodeConfig({ model: MODEL, readOnly: false })),
+  configHome,
 });
 const ctl = Bun.spawn(
   buildOpencodeArgs({
@@ -190,5 +236,6 @@ check("1b. verdict reports the intended directory", result.data?.pwd === dir, re
 
 rmSync(dir, { recursive: true, force: true });
 rmSync(ctlDir, { recursive: true, force: true });
+rmSync(configHome, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

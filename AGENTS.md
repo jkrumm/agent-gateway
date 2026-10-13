@@ -411,10 +411,13 @@ here, unlike an interactive opencode session. **Never `--pure`** — measured
 read-only profile must not be replaceable by a caller. After an opencode upgrade or any change to
 `opencode-runner.ts`, re-run the live proof: `env -u CLAUDECODE bun scripts/opencode-live-probe.ts`
 (real binary, a few cents of IU tokens: read-only verdict parses, edit/non-allowlisted shell are
-refused even under a hostile `extraEnv`, the job runs in the intended directory, and a
-`readOnly:false` control proves the probe discriminates). Known residual on 2.x: the `execute`
-(code-mode) tool also exposes the operator's globally configured MCP servers to a read-only run;
-it exposes no file-write or shell tool.
+refused even under a hostile `extraEnv`, the job runs in the intended directory, a
+`readOnly:false` control proves the probe discriminates, and a canary global MCP server is not
+started). `buildOpencodeEnv` pins `XDG_CONFIG_HOME` to a private empty root per run (a `mkdtemp`
+in `runOpencodeAttempt`) so opencode's GLOBAL config — where the operator registers MCP servers,
+a capability the permission profile cannot reach — is never merged into a worker. A bare
+`mcp: {<name>: {enabled: false}}` in `OPENCODE_CONFIG_CONTENT` does NOT suppress an inherited
+server (measured 2026-10-13 on 2.0.25); only pinning the config root does.
 Cost accounting: 2.x drops the final turn's `step_finish`, so that turn's tokens/cost are missing
 from a successful row; the attribution record carries `usageIncomplete: true` (a lower bound,
 not a completion gate). Killing the `opencode run --standalone` parent reaps its private server and
