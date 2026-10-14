@@ -299,22 +299,28 @@ function readServerPasswordOrEmpty(): string {
 describe("buildOpencodeServerConfig", () => {
   const cfg = buildOpencodeServerConfig();
   const providers = cfg.provider as Record<string, Record<string, unknown>>;
-  const modelsOf = (id: string) => providers[id]?.models as Record<string, Record<string, unknown>>;
+  const v2Providers = cfg.providers as Record<string, Record<string, unknown>>;
+  const modelsOf = (id: string) =>
+    ((providers[id] ?? v2Providers[id])?.models ?? {}) as Record<string, Record<string, unknown>>;
 
   test("emits the three providers, each referencing the env-injected key/base, never a literal", () => {
     expect(Object.keys(providers).toSorted()).toEqual(
-      [OPENCODE_PROVIDER_CHAT, OPENCODE_PROVIDER_RESPONSES, OPENCODE_PROVIDER_ANTHROPIC].toSorted(),
+      [OPENCODE_PROVIDER_CHAT, OPENCODE_PROVIDER_RESPONSES].toSorted(),
     );
-    for (const [id, provider] of Object.entries(providers)) {
+    expect(Object.keys(v2Providers)).toEqual([OPENCODE_PROVIDER_ANTHROPIC]);
+    for (const provider of Object.values(providers)) {
       expect(provider.options).toEqual({
-        baseURL:
-          id === OPENCODE_PROVIDER_ANTHROPIC ? "{env:IU_ANTHROPIC_BASE}" : "{env:IU_OPENAI_BASE}",
+        baseURL: "{env:IU_OPENAI_BASE}",
         apiKey: "{env:IU_KEY}",
       });
     }
+    expect(v2Providers[OPENCODE_PROVIDER_ANTHROPIC]?.settings).toEqual({
+      baseURL: "{env:IU_ANTHROPIC_BASE}",
+      apiKey: "{env:IU_KEY}",
+    });
     expect(providers[OPENCODE_PROVIDER_CHAT]?.npm).toBe("@ai-sdk/openai-compatible");
     expect(providers[OPENCODE_PROVIDER_RESPONSES]?.npm).toBe("@ai-sdk/openai");
-    expect(providers[OPENCODE_PROVIDER_ANTHROPIC]?.npm).toBe("@ai-sdk/anthropic");
+    expect(v2Providers[OPENCODE_PROVIDER_ANTHROPIC]?.package).toBe("aisdk:@ai-sdk/anthropic");
   });
 
   test("lists EVERY verified opencode-capable registry model under the provider of its wire — and no other", () => {
@@ -339,7 +345,9 @@ describe("buildOpencodeServerConfig", () => {
   test("Haiku 5.5 EU is served by the iu-anthropic provider", () => {
     expect(modelsOf(OPENCODE_PROVIDER_ANTHROPIC)["claude-haiku-5-5-eu"]).toMatchObject({
       limit: { context: 1_000_000, output: 128_000 },
-      cost: { input: 0.1, output: 0.5, cache_read: 0.01 },
+      cost: { input: 0.1, output: 0.5, cache: { read: 0.01 } },
+      // Without it OpenCode sends thinking.block_binding and IU 503s the -eu id.
+      compatibility: { supportsThinkingBlockBinding: false },
     });
   });
 

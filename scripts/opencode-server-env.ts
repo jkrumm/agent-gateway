@@ -39,9 +39,12 @@ function shellQuote(value: string): string {
 
 const { password } = ensureServerState();
 const iu = await getIuConfig();
-const env = opencodeServerEnv({ iuKey: iu.key, iuOpenaiBase: iu.openaiBase,
+const env = opencodeServerEnv({
+  iuKey: iu.key,
+  iuOpenaiBase: iu.openaiBase,
   iuAnthropicBase: `${iu.anthropicBase.replace(/\/$/, "")}/v1`,
-  password });
+  password,
+});
 
 const lines = Object.entries({
   ...env,

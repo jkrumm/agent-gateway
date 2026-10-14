@@ -318,11 +318,34 @@ export function buildOpencodeServerConfig(): Record<string, unknown> {
         options: providerOptions,
         models: modelsFor("responses"),
       },
+    },
+    // v2-native shape, deliberately: the v1 `provider` form drops `compatibility`, and without
+    // `supportsThinkingBlockBinding: false` OpenCode sends `thinking.block_binding` plus the
+    // `thinking-binding-controls` beta, which IU's gateway answers with a 503 `not_found_error`
+    // for `claude-haiku-5-5-eu` (it falls through to an upstream that has no `-eu` id).
+    // Measured 2026-10-14; `thinking` is then omitted from the request (Haiku 5.5 default).
+    providers: {
       [OPENCODE_PROVIDER_ANTHROPIC]: {
-        npm: "@ai-sdk/anthropic",
+        package: "aisdk:@ai-sdk/anthropic",
         name: "IU unified endpoint (native Anthropic route)",
-        options: { baseURL: "{env:IU_ANTHROPIC_BASE}", apiKey: "{env:IU_KEY}" },
-        models: modelsFor("anthropic"),
+        settings: { baseURL: "{env:IU_ANTHROPIC_BASE}", apiKey: "{env:IU_KEY}" },
+        models: Object.fromEntries(
+          models
+            .filter((m) => m.wire === "anthropic")
+            .map((m) => [
+              m.id,
+              {
+                name: m.name,
+                limit: { context: m.limit.context, output: m.limit.output },
+                cost: {
+                  input: m.rate.in,
+                  output: m.rate.out,
+                  ...(m.rate.cacheRead !== undefined ? { cache: { read: m.rate.cacheRead } } : {}),
+                },
+                compatibility: { supportsThinkingBlockBinding: false },
+              },
+            ]),
+        ),
       },
     },
     agents: {
