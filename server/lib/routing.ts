@@ -161,6 +161,9 @@ export interface ToolRoute {
 
 export const SONNET = "claude-sonnet-5[1m]";
 export const HAIKU = "claude-haiku-4-5";
+/** Haiku 5.5 on IU's Bedrock EU leg — OpenCode-harness only in routing (`iu-anthropic` provider).
+ *  `check` stays on HAIKU: on `claude -p` this id ran 4x slower (237 s vs 60 s median). */
+export const HAIKU_5_5 = "claude-haiku-5-5-eu";
 /** Retired from every route 2026-09-23 (see CLASSIFY below); kept as a named id the
  *  registry documents but, being unverified there, refuses on any route. */
 export const GLM_FLASH = "glm-5.3-flash";
@@ -181,6 +184,11 @@ export const DEEPSEEK_PRO = "DeepSeek-V4-Pro";
 // CLASSIFY: cheap mechanical work (check, overview) — Haiku over IU, thinking capped so cheap
 //   work stays cheap, Haiku on Max as the reverse lane. (DeepSeek-V4-Flash over `claude -p` was
 //   rejected by IU from 2026-10-04: unrecognized_model; opencode's read-only bash cannot run make.)
+// AGENT_OC / AGENT_OC_IMPLEMENT / ANGLE_OC moved from deepseek-v4.1-flash to Haiku 5.5 EU on
+//   2026-10-14 (Wave 5 bench, docs/routing-and-quota.md § Wave 5): 12/12 vs 10/12 implement + investigate
+//   passes, ~6x faster, lower cost, 100% cache reads. Haiku bills 5x above 100K prompt tokens PER
+//   REQUEST (measured mean 38-64K) — a long episode costs more than the registry rate says.
+//   It exposes no effort variants, so these routes carry none.
 // AGENT_OC / AGENT_OC_IMPLEMENT / AGENT_OC_ESCALATION: dispatch (investigate/author),
 //   dispatch_implement and its attempt-3+ escalation on the OpenCode harness — cheaper and
 //   faster than the retired `claude -p` agent tiers; `variant` is the reasoning-effort split
@@ -190,20 +198,18 @@ export const DEEPSEEK_PRO = "DeepSeek-V4-Pro";
 //   (+ Claude model) override, by `dispatch_editorial` below, or — automatically — by the Max
 //   reverse fallback after an IU failure (the only automatic Claude path).
 const AGENT_OC: ToolRoute = {
-  model: DEEPSEEK_V41_FLASH,
+  model: HAIKU_5_5,
   backend: "iu",
   fallback: { backend: "max", model: SONNET },
   transport: "session",
   harness: "opencode",
-  variant: "high",
 };
 const AGENT_OC_IMPLEMENT: ToolRoute = {
-  model: DEEPSEEK_V41_FLASH,
+  model: HAIKU_5_5,
   backend: "iu",
   fallback: { backend: "max", model: SONNET },
   transport: "session",
   harness: "opencode",
-  variant: "max",
 };
 const AGENT_OC_ESCALATION: ToolRoute = {
   model: DEEPSEEK_PRO,
@@ -219,12 +225,11 @@ const AGENT_OC_ESCALATION: ToolRoute = {
 //   positive rate did not clear the rule). Evidence: docs/routing-and-quota.md
 //   § Review-angle A/B (Wave 4).
 const ANGLE_OC: ToolRoute = {
-  model: DEEPSEEK_V41_FLASH,
+  model: HAIKU_5_5,
   backend: "iu",
   fallback: { backend: "max", model: SONNET },
   transport: "session",
   harness: "opencode",
-  variant: "high",
 };
 // JUDGE: judgment-heavy work that stays on Max (review's synthesis/router, the frontend angle,
 //   otel) — a cheap model was measured failing on review's synthesis, and a non-Claude model

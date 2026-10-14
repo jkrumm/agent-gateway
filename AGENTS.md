@@ -355,8 +355,8 @@ MCP tool descriptions print the same route under `MODEL:`, and **`GET
 override.
 
 Per-angle review routes `review_angle_{senior_dev,typescript,frontend,qa}`:
-`senior-dev`, `typescript` and `qa` default to the cheap OpenCode route (the
-Wave-4 measured A/B), `frontend` and every angle without its own key keep the
+`senior-dev`, `typescript` and `qa` default to the OpenCode route (Haiku 5.5 since the
+Wave-5 bench, previously the Wave-4 flash A/B), `frontend` and every angle without its own key keep the
 `review` route. Override via
 `AGENT_GATEWAY_MODEL_`/`AGENT_GATEWAY_HARNESS_`/`AGENT_GATEWAY_VARIANT_REVIEW_ANGLE_<NAME>` (an
 opencode angle needs both the MODEL and HARNESS overrides; pinning one back to
@@ -391,29 +391,33 @@ different way. JUDGE/PROSE (review, otel, narrative, excalidraw) carry no
 **`dispatch`/`dispatch_implement` run on a second harness, OpenCode, not
 `claude -p`** (2026-09-24, `harness: "opencode"` on `ToolRoute` — AGENT_OC/
 AGENT_OC_IMPLEMENT — every other tool stays `"claude"`). An OpenCode session talks
-to the cheap IU model over the IU endpoint's **OpenAI-compatible** route
-(the `iu-chat` provider — a different id and transport from the IU-native-
-Anthropic models every other gateway route
-uses; `claude -p` cannot reach it at all). Measured against the previous
+to Haiku 5.5 EU over the IU native Anthropic route through the `iu-anthropic` provider
+(2026-10-14, `docs/routing-and-quota.md` § Wave 5; before that `deepseek-v4.1-flash` over the
+OpenAI-compatible `iu-chat` route, which stays the SINGLE_SHOT and OCR model). Measured against the previous
 implement model on
 `claude -p` (three re-run implement briefs): ~40x cheaper, ~2-4x faster, a
 blind diff review preferred it on 2 of 3, lost the third on inverted
 volume-floor logic in a HyperDX config — not a clean sweep, and 95-98% cache
 hit vs the previous model's 8%. `variant` (opencode's reasoning-effort knob, folded into
-the model ref as `provider/model#variant` in 2.x) is `"high"` for investigate/author, `"max"` for implement — the same
-higher-stakes-write-tier split AGENT_IMPLEMENT used to encode; opencode's
+the model ref as `provider/model#variant` in 2.x) is carried only by the routes whose model exposes
+one (the `DeepSeek-V4-Pro` escalation at `"max"`; Haiku 5.5 has none); opencode's
 model/harness combination is validated against the model registry
 (`server/lib/models.ts` — id, wire, harnesses, limits, rates, `verified`; also
 served as `models` by `GET /api/routing`) AFTER every override
 (`buildRoutingTable`'s cross-field pass, routing.ts): an unregistered or
 unverified id is refused, a claude-capable id (every Claude id) normalizes
 harness back to `claude`, and an opencode-only id (the OpenAI-route models) with harness `claude` is refused rather than applied. The opencode config
-carries two providers over the same IU OpenAI base — `iu-chat`
+carries three providers generated from the registry: `iu-chat`
 (`@ai-sdk/openai-compatible`) and `iu-responses` (`@ai-sdk/openai`, GPT ids
-only) — generated from the registry.
+only) over the IU OpenAI base, and `iu-anthropic` (`@ai-sdk/anthropic`, Haiku 5.5 EU) over the
+native Anthropic base `IU_ANTHROPIC_BASE` — the one v2-shaped `providers` entry, because only
+that form carries `compatibility.supportsThinkingBlockBinding: false` (§ Wave 5 in
+`docs/routing-and-quota.md`).
 Overrides: `AGENT_GATEWAY_HARNESS_<TOOL>=claude|opencode`, `AGENT_GATEWAY_VARIANT_<TOOL>=<v>`
-(a bare `AGENT_GATEWAY_HARNESS_DISPATCH=claude` is refused on its own — pair it
-with a `AGENT_GATEWAY_MODEL_DISPATCH` override naming a Claude id). A fallback
+(a bare `AGENT_GATEWAY_HARNESS_DISPATCH=claude` is accepted since Haiku 5.5 EU lists the
+`claude` harness, but that path ran 4x slower in the Wave-5 `check` bench — prefer a Sonnet
+`AGENT_GATEWAY_MODEL_DISPATCH` override with it; an opencode-only model such as `DeepSeek-V4-Pro`
+is still refused). A fallback
 attempt (the `iu`→`max` reverse lane) always runs `claude -p` regardless of
 the primary's harness — Max only ever serves a Claude id. Implementation:
 `server/mcp/opencode-runner.ts` (the drive loop + message summarizer) over `server/mcp/opencode-client.ts`

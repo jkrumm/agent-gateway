@@ -377,6 +377,49 @@ the module header's Harness paragraph), so a lane switch here is model AND harne
 transport all changing at once, same as it already was reaching Max from AGENT/
 AGENT_IMPLEMENT's IU-native-Anthropic primary.
 
+### Wave 5 — Haiku 5.5 EU on the OpenCode harness (2026-10-14)
+
+`dispatch`, `dispatch_implement` and the three OC review angles (senior-dev, typescript, qa)
+moved from `deepseek-v4.1-flash` to `claude-haiku-5-5-eu`, served by the `iu-anthropic`
+OpenCode provider (`@ai-sdk/anthropic` on IU's native `/anthropic` leg, so `cache_control` is
+injected). `dispatch_implement_escalation` stays on `DeepSeek-V4-Pro`; `triage`, `review_router`
+and `review_ocr` stay on `deepseek-v4.1-flash`; `check` stays on `claude-haiku-4-5`.
+
+**Method.** `scripts/bench-routes.ts` drives `runSession` against the shared OpenCode server, one
+fresh history-less tree per cell, 2 reps, three arms (flash at variant max/high, Haiku 5.5, Pro at
+max/high). Tasks: three implement briefs replayed from this repo's history (acceptance = the fix
+commit's reference tests + `oxfmt --check`), three read-only investigate questions graded by
+required substrings, and the pipeline's own senior-dev/typescript/qa angle prompts over two real
+commits scored by how many of the defects the repo's later fix commits corrected a finding names
+(regex hints — a proxy; `findings.json` per cell). Raw: `~/.local/share/agent-gateway/bench/wave5-*`.
+
+| arm | implement pass | median s | mean cost | investigate pass | median s | mean cost | review-angle pass | median s | mean cost |
+|-|-|-|-|-|-|-|-|-|-|
+| deepseek-v4.1-flash | 5/6 | 163 | $0.0172 | 5/6 | 6 | $0.0035 | 12/12 | 91 | $0.0198 |
+| claude-haiku-5-5-eu | 6/6 | 26 | $0.0093 | 6/6 | 5 | $0.0007 | 11/12 | 18 | $0.0032 |
+| DeepSeek-V4-Pro | 6/6 | 129 | $0.0609 | 6/6 | 11 | $0.0152 | 11/12 | 113 | $0.0521 |
+
+Cache reads: Haiku 100%, flash 51–97%, Pro 64–98%. Flash's two misses were an `oxfmt`-dirty
+diff and a non-JSON final message; Haiku's one review miss was a ```json-fenced answer
+(production's `extractJson` recovery tolerates it); Pro's one miss was an opencode-server
+request timeout under load. Angle recall on the hint proxy was level across arms (~2 of 4 groups).
+
+**Caveats the route carries.** (1) Haiku 5.5 bills 5x ($0.50/$2.50, cache read $0.05) above 100K
+prompt tokens PER REQUEST; the measured mean per-request prompt was 38–64K, so a long episode
+costs more than the registry's under-100K rate. Re-measure if episodes grow. (2) The `-eu` id is
+Bedrock eu-west-1 only; Max cannot serve it, so the reverse lane stays Sonnet on Max. (3)
+OpenCode's anthropic package sends `thinking.block_binding` plus the `thinking-binding-controls`
+beta, which IU's gateway answers with 503 `not_found_error` for the `-eu` id (it falls through to
+an upstream with no such id); `compatibility.supportsThinkingBlockBinding: false` in the v2-shaped
+provider entry removes both (the v1 `provider` form drops that key — `buildOpencodeServerConfig`
+emits this one provider under `providers`). With it, no `thinking` field is sent.
+
+**`check` on Haiku 5.5: rejected.** On `claude -p` (`scripts/bench-check.ts`, explicit
+format/lint/typecheck commands, 3 runs each) Haiku 4.5 took 60 s median, Haiku 5.5 EU 237 s with
+one turn and no usage row — the `claude` harness sends enabled-budget thinking, which the `-eu`
+id's gateway leg handles slowly. The model is only in the loop for explicit `commands` or a repo
+without a `make check` target anyway; the repo-contract `make check` path is deterministic.
+
 ### dispatch_editorial
 
 dispatch_editorial — 2026-10-10. `kind: "editorial"` on a dispatch routes the episode to the Claude harness on Sonnet (Max, IU reverse fallback), the PROSE shape: AGENTS.md, docs and prose briefs are editorial judgment a cheap model was not measured on. Claude on `dispatch` itself is otherwise opt-in only (`AGENT_GATEWAY_HARNESS_DISPATCH=claude` plus a Claude `AGENT_GATEWAY_MODEL_DISPATCH`).

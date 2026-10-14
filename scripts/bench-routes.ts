@@ -6,11 +6,14 @@
 //
 //   bun scripts/bench-routes.ts [--models a,b,c] [--reps 2] [--tasks implement,investigate] [--out dir]
 //
-// Tasks (a worker only ever sees the brief text, never the reference test or the fix):
+// Tasks (--tasks implement,investigate,review; a worker only ever sees the brief text, never the reference test or the fix):
 //   implement    — three briefs replayed from this repo's history. A throwaway history-less tree is
 //                  cut from the fix commit's parent; acceptance copies the fix commit's test file
 //                  over the worker's and runs it, plus `oxfmt --check` on the changed files.
 //   investigate  — three read-only questions about the tree at HEAD, graded by required substrings.
+//   review       — the pipeline's own senior-dev / typescript / qa angle prompts over two real
+//                  commits' diffs; scored by how many of the defects the repo's later fix commits
+//                  corrected the findings name (hint regexes — a proxy, read findings.json).
 //
 // Reported per cell: pass, turns, wall seconds, cost, input/output/cache-read tokens and the
 // cache-hit ratio, from the attribution row `runSession` writes (one row per tool name).
@@ -21,6 +24,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { ANGLE_JSON_SCHEMA, loadAnglePrompt } from "../server/jobs/handlers/review.ts";
 import { getModel } from "../server/lib/models.ts";
 import { type ToolRoute } from "../server/lib/routing.ts";
 import { runSession } from "../server/mcp/session-runner.ts";
@@ -44,6 +48,67 @@ interface InvestigateTask {
   /** Every one must appear (case-insensitive) in the final answer. */
   expect: string[];
 }
+
+/** One reviewer angle over a real commit's diff. Ground truth is what the repo's own later fix
+ *  commits corrected: each hint group is satisfied when any finding's text matches its regex. */
+interface ReviewTask {
+  kind: "review";
+  label: string;
+  /** Commit under review; the tree is cut from it and its diff is handed over as `REVIEW.diff`. */
+  commit: string;
+  angle: string;
+  hints: Array<{ name: string; re: RegExp }>;
+}
+
+const REVIEW_COMMITS: Array<{ label: string; commit: string; hints: ReviewTask["hints"] }> = [
+  {
+    // Fixed later by 87a9172 / ca5bb60 / 15123c1 (target detection) and a616c37 (group kill).
+    label: "make-check-target",
+    commit: "28d33d4",
+    hints: [
+      {
+        name: "text-vs-rule",
+        re: /define|endef|conditional|ifeq|ifdef|comment|regex|column.?0|false (red|positive)/i,
+      },
+      {
+        name: "file-or-pattern",
+        re: /file (named|called)|named `?check|%:|catch-all|pattern rule|directory/i,
+      },
+      {
+        name: "orphaned-children",
+        re: /orphan|detach|process.?group|background|child|SIGKILL|kill/i,
+      },
+      { name: "env-credentials", re: /oauth|credential|token|secret|env(ironment)? (scrub|leak)/i },
+    ],
+  },
+  {
+    // Fixed later by d055a20, 8285c11, be69bb4, 11ed8d9.
+    label: "opencode-2x-stream",
+    commit: "7abe598",
+    hints: [
+      {
+        name: "final-text",
+        re: /final text|ends? (on|with)|incomplete|truncat|empty (result|output)|no (final )?text/i,
+      },
+      {
+        name: "mid-loop-step-finish",
+        re: /step_finish|mid.?loop|multiple|premature|early|completion/i,
+      },
+      { name: "env-precedence", re: /extraEnv|precedence|override|env.*order/i },
+      { name: "pwd-or-usage", re: /PWD|cwd|unbilled|final turn|usage|cost|token/i },
+    ],
+  },
+];
+
+const REVIEW: ReviewTask[] = REVIEW_COMMITS.flatMap((c) =>
+  ["senior-dev", "typescript", "qa"].map((angle): ReviewTask => ({
+    kind: "review",
+    label: `${c.label}/${angle}`,
+    commit: c.commit,
+    angle,
+    hints: c.hints,
+  })),
+);
 
 const IMPLEMENT: ImplementTask[] = [
   {
@@ -202,9 +267,9 @@ function readUsage(tool: string): Usage {
 
 /** Built literally (not via `routeFor`) so every arm runs exactly the model named.
  *  `fallback: null`: routing a failed arm onto Max's Sonnet would measure a different model. */
-function benchRoute(model: string, kind: "implement" | "investigate"): ToolRoute {
+function benchRoute(model: string, kind: "implement" | "investigate" | "review"): ToolRoute {
   const effort = getModel(model)?.effort ?? [];
-  const preferred = kind === "implement" ? ["max", "high"] : ["high", "max"];
+  const preferred = kind === "implement" ? ["max", "high"] : ["high", "max"]; // review mirrors ANGLE_OC: high
   return {
     model,
     backend: "iu",
@@ -268,7 +333,7 @@ async function changedFiles(treePath: string): Promise<string[]> {
 interface Cell {
   model: string;
   task: string;
-  kind: "implement" | "investigate";
+  kind: "implement" | "investigate" | "review";
   rep: number;
   variant: string | undefined;
   pass: boolean;
@@ -289,34 +354,62 @@ interface Cell {
 
 async function runCell(
   model: string,
-  task: ImplementTask | InvestigateTask,
+  task: ImplementTask | InvestigateTask | ReviewTask,
   rep: number,
   outRoot: string,
 ): Promise<Cell> {
   const route = benchRoute(model, task.kind);
   const tool = `bench:${sanitize(model)}:${task.label}:${rep}:${randomUUID().slice(0, 8)}`;
   const treePath = join(outRoot, "runs", `${sanitize(model)}-${task.label}-${rep}`);
-  await materializeTree(task.kind === "implement" ? task.parent : "HEAD", treePath);
+  await materializeTree(
+    task.kind === "implement" ? task.parent : task.kind === "review" ? task.commit : "HEAD",
+    treePath,
+  );
+  if (task.kind === "review") {
+    const diff = await git(REPO_ROOT, ["show", "--format=", task.commit]);
+    writeFileSync(join(treePath, "REVIEW.diff"), diff.stdout);
+  }
 
+  const sessionPrompt =
+    task.kind === "review"
+      ? (await loadAnglePrompt(task.angle)).replace("[GIT_DIFF_COMMAND]", "Run: `cat REVIEW.diff`")
+      : task.kind === "investigate"
+        ? `${task.text}\n\nReturn {"answer": "<your answer>"}.`
+        : task.text;
   const started = performance.now();
   const result = await runSession<unknown>({
     cwd: treePath,
-    prompt: task.text,
+    prompt: sessionPrompt,
     tool,
     route,
-    readOnly: task.kind === "investigate",
+    readOnly: task.kind !== "implement",
     settingSources: "user,project",
-    // Investigate asks for a structured answer like production does; implement ends in a diff.
+    // Investigate asks for a structured answer like production does; implement ends in a diff;
+    // review uses the pipeline's own angle schema.
     ...(task.kind === "investigate"
-      ? { jsonSchema: ANSWER_SCHEMA, prompt: `${task.text}\n\nReturn {"answer": "<your answer>"}.` }
-      : {}),
+      ? { jsonSchema: ANSWER_SCHEMA }
+      : task.kind === "review"
+        ? { jsonSchema: ANGLE_JSON_SCHEMA as Record<string, unknown> }
+        : {}),
   });
   const wallS = (performance.now() - started) / 1000;
   const usage = readUsage(tool);
 
   let pass = false;
   let detail = "";
-  if (task.kind === "investigate") {
+  if (task.kind === "review") {
+    const data = result.data as
+      | { findings?: Array<{ message?: string; file?: string }> }
+      | undefined;
+    const findings = data?.findings ?? [];
+    const text = findings.map((f) => `${f.file ?? ""} ${f.message ?? ""}`).join("\n");
+    const hit = task.hints.filter((h) => h.re.test(text)).map((h) => h.name);
+    pass = result.ok && hit.length > 0;
+    detail =
+      `${findings.length} findings; hints ${hit.length}/${task.hints.length} (${hit.join(", ") || "none"})` +
+      (result.ok ? "" : ` | session failed: ${result.error ?? "unknown"}`);
+    writeFileSync(join(treePath, "findings.json"), JSON.stringify(findings, null, 2));
+  } else if (task.kind === "investigate") {
     const data = result.data as { answer?: unknown } | undefined;
     const answer = `${result.rawText ?? ""}\n${typeof data?.answer === "string" ? data.answer : ""}`;
     const text = answer.trim() || (result.error ?? "");
@@ -350,7 +443,7 @@ async function runCell(
   const input = usage.inputTokens ?? 0;
   const cacheRead = usage.cacheReadTokens ?? 0;
   const cacheWrite = usage.cacheWriteTokens ?? 0;
-  const prompt = input + cacheRead + cacheWrite;
+  const promptTokens = input + cacheRead + cacheWrite;
   return {
     model,
     task: task.label,
@@ -367,7 +460,7 @@ async function runCell(
     outputTokens: usage.outputTokens ?? 0,
     cacheReadTokens: cacheRead,
     cacheHit: input + cacheRead > 0 ? cacheRead / (input + cacheRead) : null,
-    promptTokens: prompt,
+    promptTokens,
     tree: treePath,
   };
 }
@@ -385,17 +478,20 @@ function render(cells: Cell[], models: string[]): string {
   const out = [
     "# Route bench",
     "",
-    "| model | kind | pass | median s | mean turns | total cost | mean cost | cache-hit | max prompt tok |",
+    "| model | kind | pass | median s | mean turns | total cost | mean cost | cache-hit | max mean prompt/turn |",
     "|-|-|-|-|-|-|-|-|-|",
   ];
   for (const model of models) {
-    for (const kind of ["implement", "investigate"] as const) {
+    for (const kind of ["implement", "investigate", "review"] as const) {
       const rows = cells.filter((c) => c.model === model && c.kind === kind);
       if (!rows.length) continue;
       const costs = rows.map((c) => c.costUsd).filter((c): c is number => c !== null);
       const total = costs.reduce((a, b) => a + b, 0);
       const hits = rows.map((c) => c.cacheHit).filter((c): c is number => c !== null);
-      const maxPrompt = Math.max(...rows.map((c) => c.promptTokens));
+      // Per-request prompt size (cumulative prompt tokens / turns): the 100K surcharge is per request.
+      const maxPrompt = Math.round(
+        Math.max(...rows.map((c) => (c.turns ? c.promptTokens / c.turns : 0))),
+      );
       out.push(
         `| ${model} | ${kind} | ${rows.filter((c) => c.pass).length}/${rows.length} | ` +
           `${median(rows.map((c) => c.wallS)).toFixed(0)} | ` +
@@ -460,6 +556,7 @@ mkdirSync(outRoot, { recursive: true });
 const tasks = [
   ...(kinds.includes("implement") ? IMPLEMENT : []),
   ...(kinds.includes("investigate") ? INVESTIGATE : []),
+  ...(kinds.includes("review") ? REVIEW : []),
 ];
 const jobs = models.flatMap((model) =>
   tasks.flatMap((task) =>

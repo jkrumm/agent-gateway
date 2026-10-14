@@ -78,8 +78,10 @@ describe("the claude harness is an explicit opt-in for dispatch", () => {
       "dispatch_implement_escalation",
     ] as const) {
       expect(routes[key].harness).toBe("opencode");
-      expect(routes[key].model).not.toMatch(/^claude/);
     }
+    // Haiku 5.5 EU is claude-capable but runs here on opencode; only the escalation model is
+    // non-Claude.
+    expect(routes.dispatch_implement_escalation.model).not.toMatch(/^claude/);
   });
 
   test("a code episode never resolves to the editorial route, at any tier", () => {

@@ -11,6 +11,7 @@ import {
   describeRoute,
   GLM_FLASH,
   HAIKU,
+  HAIKU_5_5,
   logRoutingOverrides,
   logStaleQuotaEnvVars,
   ROUTED_TOOLS,
@@ -69,25 +70,25 @@ describe("buildRoutingTable defaults", () => {
     }
   });
 
-  test("dispatch: deepseek-v4.1-flash via opencode on iu with the Sonnet-on-max fallback (the AGENT_OC tier), variant high", () => {
+  test("dispatch: Haiku 5.5 EU via opencode on iu with the Sonnet-on-max fallback (the AGENT_OC tier), no variant", () => {
     expect(routes.dispatch).toEqual({
-      model: DEEPSEEK_V41_FLASH,
+      model: HAIKU_5_5,
       backend: "iu",
       fallback: { backend: "max", model: SONNET },
       transport: "session",
       harness: "opencode",
-      variant: "high",
+      variant: undefined,
     });
   });
 
-  test("dispatch_implement: deepseek-v4.1-flash via opencode on iu with the Sonnet-on-max fallback (implement-tier only), variant max", () => {
+  test("dispatch_implement: Haiku 5.5 EU via opencode on iu with the Sonnet-on-max fallback (implement-tier only), no variant", () => {
     expect(routes.dispatch_implement).toEqual({
-      model: DEEPSEEK_V41_FLASH,
+      model: HAIKU_5_5,
       backend: "iu",
       fallback: { backend: "max", model: SONNET },
       transport: "session",
       harness: "opencode",
-      variant: "max",
+      variant: undefined,
     });
   });
 
@@ -322,7 +323,7 @@ describe("buildRoutingTable env overrides", () => {
   test("a registered but UNVERIFIED model override is refused, default stays", () => {
     for (const id of [GLM_FLASH, "gpt-6-sol", "kimi-k2.7-code"]) {
       const { routes, overrides } = buildRoutingTable({ AGENT_GATEWAY_MODEL_DISPATCH: id });
-      expect(routes.dispatch.model).toBe(DEEPSEEK_V41_FLASH);
+      expect(routes.dispatch.model).toBe(HAIKU_5_5);
       expect(routes.dispatch.harness).toBe("opencode");
       expect(overrides).toEqual([
         {
@@ -335,14 +336,26 @@ describe("buildRoutingTable env overrides", () => {
     }
   });
 
-  test("a verified Responses-wire (GPT) id is accepted on dispatch and keeps the opencode harness", () => {
+  test("a verified Responses-wire (GPT) id is accepted on dispatch and keeps the opencode harness (the default route carries no variant to keep)", () => {
     const { routes, overrides } = buildRoutingTable({
       AGENT_GATEWAY_MODEL_DISPATCH: "gpt-6.1-sol",
     });
     expect(routes.dispatch.model).toBe("gpt-6.1-sol");
     expect(routes.dispatch.harness).toBe("opencode");
-    expect(routes.dispatch.variant).toBe("high");
+    expect(routes.dispatch.variant).toBeUndefined();
     expect(overrides).toEqual([{ tool: "dispatch", field: "model", value: "gpt-6.1-sol" }]);
+  });
+
+  test("a verified Responses-wire (GPT) id keeps the variant it exposes on a route that carries one (escalation)", () => {
+    const { routes, overrides } = buildRoutingTable({
+      AGENT_GATEWAY_MODEL_DISPATCH_IMPLEMENT_ESCALATION: "gpt-6.1-sol",
+    });
+    expect(routes.dispatch_implement_escalation.model).toBe("gpt-6.1-sol");
+    expect(routes.dispatch_implement_escalation.harness).toBe("opencode");
+    expect(routes.dispatch_implement_escalation.variant).toBe("max");
+    expect(overrides).toEqual([
+      { tool: "dispatch_implement_escalation", field: "model", value: "gpt-6.1-sol" },
+    ]);
   });
 
   test("a GPT id on a claude-harness tool is refused — Responses-only ids have no claude -p path", () => {
@@ -360,23 +373,38 @@ describe("buildRoutingTable env overrides", () => {
   });
 
   test("a model override without the route's variant drops it, reported as implied", () => {
+    // dispatch_implement_escalation is the default route that still carries a variant (max).
     const { routes, overrides } = buildRoutingTable({
-      AGENT_GATEWAY_MODEL_DISPATCH: "gemini-3.5-flash",
+      AGENT_GATEWAY_MODEL_DISPATCH_IMPLEMENT_ESCALATION: "gemini-3.5-flash",
     });
-    expect(routes.dispatch.model).toBe("gemini-3.5-flash");
-    expect(routes.dispatch.variant).toBeUndefined();
+    expect(routes.dispatch_implement_escalation.model).toBe("gemini-3.5-flash");
+    expect(routes.dispatch_implement_escalation.variant).toBeUndefined();
     expect(overrides).toContainEqual({
-      tool: "dispatch",
+      tool: "dispatch_implement_escalation",
       field: "variant",
-      value: "high",
+      value: "max",
       implied: expect.stringContaining("exposes no"),
     });
   });
 
   test("a variant the model does not expose is refused", () => {
-    const { routes, overrides } = buildRoutingTable({ AGENT_GATEWAY_VARIANT_DISPATCH: "ultra" });
-    expect(routes.dispatch.variant).toBe("high");
-    expect(overrides[0]?.refused).toContain("exposes no");
+    // Haiku 5.5 (the default dispatch model) exposes no variants at all.
+    const haiku = buildRoutingTable({ AGENT_GATEWAY_VARIANT_DISPATCH: "high" });
+    expect(haiku.routes.dispatch.variant).toBeUndefined();
+    expect(haiku.overrides).toEqual([
+      {
+        tool: "dispatch",
+        field: "variant",
+        value: "high",
+        refused: expect.stringContaining("exposes no"),
+      },
+    ]);
+    // A model that exposes variants still refuses a variant outside its ladder.
+    const pro = buildRoutingTable({
+      AGENT_GATEWAY_VARIANT_DISPATCH_IMPLEMENT_ESCALATION: "ultra",
+    });
+    expect(pro.routes.dispatch_implement_escalation.variant).toBe("max");
+    expect(pro.overrides[0]?.refused).toContain("exposes no");
   });
 
   test("no route runs on GLM any more — retired 2026-09-23, the id stays only as an (unverified, hence refused) registry entry", () => {
@@ -454,13 +482,23 @@ describe("buildRoutingTable env overrides", () => {
     ]);
   });
 
-  test("AGENT_GATEWAY_HARNESS_<TOOL>=claude ALONE (default model stays deepseek-v4.1-flash) is refused — that model has no path through claude -p", () => {
+  test("AGENT_GATEWAY_HARNESS_<TOOL>=claude ALONE is accepted on dispatch — the default Haiku 5.5 model has a claude -p path", () => {
     const { routes, overrides } = buildRoutingTable({ AGENT_GATEWAY_HARNESS_DISPATCH: "claude" });
-    expect(routes.dispatch.harness).toBe("opencode");
-    expect(routes.dispatch.model).toBe(DEEPSEEK_V41_FLASH);
+    expect(routes.dispatch.harness).toBe("claude");
+    expect(routes.dispatch.model).toBe(HAIKU_5_5);
+    expect(routes.dispatch.variant).toBeUndefined();
+    expect(overrides).toEqual([{ tool: "dispatch", field: "harness", value: "claude" }]);
+  });
+
+  test("AGENT_GATEWAY_HARNESS_<TOOL>=claude ALONE (default model stays DeepSeek-V4-Pro) is refused on the escalation route — that model has no path through claude -p", () => {
+    const { routes, overrides } = buildRoutingTable({
+      AGENT_GATEWAY_HARNESS_DISPATCH_IMPLEMENT_ESCALATION: "claude",
+    });
+    expect(routes.dispatch_implement_escalation.harness).toBe("opencode");
+    expect(routes.dispatch_implement_escalation.model).toBe(DEEPSEEK_PRO);
     expect(overrides).toEqual([
       {
-        tool: "dispatch",
+        tool: "dispatch_implement_escalation",
         field: "harness",
         value: "claude",
         refused: expect.stringContaining("reachable only via the opencode harness"),
@@ -526,9 +564,26 @@ describe("buildRoutingTable env overrides", () => {
   });
 
   test("AGENT_GATEWAY_VARIANT_<TOOL> replaces the tier's variant and is reported", () => {
-    const { routes, overrides } = buildRoutingTable({ AGENT_GATEWAY_VARIANT_DISPATCH: "none" });
-    expect(routes.dispatch.variant).toBe("none");
-    expect(overrides).toEqual([{ tool: "dispatch", field: "variant", value: "none" }]);
+    const { routes, overrides } = buildRoutingTable({
+      AGENT_GATEWAY_VARIANT_DISPATCH_IMPLEMENT_ESCALATION: "high",
+    });
+    expect(routes.dispatch_implement_escalation.variant).toBe("high");
+    expect(overrides).toEqual([
+      { tool: "dispatch_implement_escalation", field: "variant", value: "high" },
+    ]);
+  });
+
+  test("AGENT_GATEWAY_VARIANT_<TOOL> sets a variant on a variant-less default once the model override exposes it", () => {
+    const { routes, overrides } = buildRoutingTable({
+      AGENT_GATEWAY_MODEL_DISPATCH: DEEPSEEK_V41_FLASH,
+      AGENT_GATEWAY_VARIANT_DISPATCH: "high",
+    });
+    expect(routes.dispatch.model).toBe(DEEPSEEK_V41_FLASH);
+    expect(routes.dispatch.variant).toBe("high");
+    expect(overrides).toEqual([
+      { tool: "dispatch", field: "model", value: DEEPSEEK_V41_FLASH },
+      { tool: "dispatch", field: "variant", value: "high" },
+    ]);
   });
 
   test("a variant override on a fixed iu-openai transport tool is refused, whatever the value", () => {
@@ -592,12 +647,12 @@ describe("per-angle review routes", () => {
       "review_angle_qa",
     ] as const) {
       expect(routes[key], key).toEqual({
-        model: DEEPSEEK_V41_FLASH,
+        model: HAIKU_5_5,
         backend: "iu",
         fallback: { backend: "max", model: SONNET },
         transport: "session",
         harness: "opencode",
-        variant: "high",
+        variant: undefined,
       });
     }
     expect(routes.review_angle_frontend).toEqual(routes.review);
@@ -684,9 +739,15 @@ describe("per-angle review routes", () => {
     expect(overrides.some((o) => o.refused)).toBe(false);
   });
 
-  test("a variant override on an opencode angle applies; on a claude-harness angle it is refused", () => {
-    const ok = buildRoutingTable({ AGENT_GATEWAY_VARIANT_REVIEW_ANGLE_QA: "none" });
+  test("a variant override on an opencode angle applies when the model exposes it, is refused when it does not; on a claude-harness angle it is refused", () => {
+    const ok = buildRoutingTable({
+      AGENT_GATEWAY_MODEL_REVIEW_ANGLE_QA: DEEPSEEK_V41_FLASH,
+      AGENT_GATEWAY_VARIANT_REVIEW_ANGLE_QA: "none",
+    });
     expect(ok.routes.review_angle_qa.variant).toBe("none");
+    const noVariants = buildRoutingTable({ AGENT_GATEWAY_VARIANT_REVIEW_ANGLE_QA: "none" });
+    expect(noVariants.routes.review_angle_qa.variant).toBeUndefined();
+    expect(noVariants.overrides[0]?.refused).toContain("exposes no");
     const refused = buildRoutingTable({ AGENT_GATEWAY_VARIANT_REVIEW_ANGLE_FRONTEND: "high" });
     expect(refused.routes.review_angle_frontend.variant).toBeUndefined();
     expect(refused.overrides[0]?.refused).toContain("opencode-only");
@@ -733,9 +794,13 @@ describe("withModel", () => {
   });
 
   test("withModel(opencode-capable verified id) keeps the route's own harness and a variant the model exposes", () => {
-    const r = withModel(routeFor("dispatch"), "gpt-6.1-sol");
+    const r = withModel(routeFor("dispatch_implement_escalation"), "gpt-6.1-sol");
     expect(r.harness).toBe("opencode");
-    expect(r.variant).toBe("high");
+    expect(r.variant).toBe("max");
+    // The variant-less default dispatch route has none to carry over.
+    const d = withModel(routeFor("dispatch"), "gpt-6.1-sol");
+    expect(d.harness).toBe("opencode");
+    expect(d.variant).toBeUndefined();
   });
 
   test("withModel drops a variant the new model does not expose", () => {
@@ -795,11 +860,12 @@ describe("routeFor / describeRoute", () => {
   });
 
   test("describeRoute renders an opencode-harness route's harness and variant", () => {
+    // Haiku 5.5 exposes no variant, so the default routes render without a variant suffix.
     expect(describeRoute(routeFor("dispatch"))).toBe(
-      `${DEEPSEEK_V41_FLASH} on iu via opencode (variant high) (fallback ${SONNET} on max)`,
+      `${HAIKU_5_5} on iu via opencode (fallback ${SONNET} on max)`,
     );
     expect(describeRoute(routeFor("dispatch_implement"))).toBe(
-      `${DEEPSEEK_V41_FLASH} on iu via opencode (variant max) (fallback ${SONNET} on max)`,
+      `${HAIKU_5_5} on iu via opencode (fallback ${SONNET} on max)`,
     );
     expect(describeRoute(routeFor("dispatch_implement_escalation"))).toBe(
       `${DEEPSEEK_PRO} on iu via opencode (variant max)`,
