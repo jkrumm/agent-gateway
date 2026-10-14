@@ -118,8 +118,8 @@ warden, agent-gateway and dotfiles. Before editing a repo, check `rd agents` and
 - One implement per repo: `scripts/lifecycle/policy.py:196`, plus the agw repo lease.
 - There are no embeddings anywhere, and none are needed at this scale.
 
-## Wave 1 — measure v2 server mode for real            <!-- status: active -->
-- [ ] Write `scripts/opencode-v2-probe.ts`. It starts a **dedicated** `opencode serve`
+## Wave 1 — measure v2 server mode for real            <!-- status: done -->
+- [x] Write `scripts/opencode-v2-probe.ts`. It starts a **dedicated** `opencode serve`
       (own port, own `XDG_CONFIG_HOME`, own `OPENCODE_DB`, IU credentials from agw's
       env) and measures:
       - a session created with location, model and permissions
@@ -130,17 +130,39 @@ warden, agent-gateway and dotfiles. Before editing a repo, check `rd agents` and
       - **durability:** kill the server mid-run, restart it, and record whether the
         session resumes or what state it is left in
       - permission behaviour when a tool is denied
-- [ ] Decide `@opencode/client` vs a thin typed fetch over the OpenAPI spec. Base it on
+- [x] Decide `@opencode/client` vs a thin typed fetch over the OpenAPI spec. Base it on
       Bun compatibility and the version churn, and record why. Then decide supervision:
       launchd plist vs an agw-supervised child process.
-- [ ] Verify the suspected shared-service credential break for `oc` / `rd wave --kind opencode`.
+- [x] Verify the suspected shared-service credential break for `oc` / `rd wave --kind opencode`.
       If it is real, fix it in dotfiles: `opencode service set env`, or credentials
       through `/api/credential`, with no secret in git. Verify a pane gets a real reply.
-- [ ] Write `docs/opencode-v2.md`: the measured facts, the chosen design, and the version
+- [x] Write `docs/opencode-v2.md`: the measured facts, the chosen design, and the version
       pin and upgrade gate. Link it from AGENTS.md.
 **Left behind:**
+- `scripts/opencode-v2-probe.ts` (56 checks, all green on 2.0.25; sections `session pagination
+  concurrency interrupt steer events permissions permission-order permission-order-reversed
+  durability`) and `docs/opencode-v2.md` (measured facts, design, pin + upgrade gate). Read the
+  doc, not the probe, for Wave 2.
+- **Decisions:** transport = thin zod-typed `fetch` client (`@opencode/client` peers on effect@4 +
+  solid-js, six releases that week). Supervision = a **separate LaunchAgent**
+  `com.jkrumm.agent-gateway-opencode` + wrapper script (agw reload must not kill episodes; Wave 4
+  re-attaches). Per-run config moves onto the session: model, `permissions` (last-match-wins, deny-all
+  first), `location.directory`, `PUT …/environment`.
+- **Measured surprises Wave 2/3 must honour:** messages are newest-first, default page 50, `limit`
+  max 200 — paginate with `order=asc` + `cursor.next` until empty; the session rollup exceeds the
+  message sum (a background call, ~600 tokens); `ask` rules block forever (allow/deny only);
+  `edit: deny` does not stop shell redirects; a killed server leaves the session without an `idle`
+  message and does **not** auto-resume — `prompt {resume:true}` re-attaches; `GET /api/config`
+  returns the IU key in plaintext (loopback + password only, never log bodies).
+- **Done outside agw:** dotfiles 4034e11 fixed the shared-service credential break (confirmed: pane
+  with correct `IU_*` got `requires an endpoint baseURL`; now a real reply). `brew pin opencode`
+  (mini-local, 2.0.25).
+- **Open for Wave 2:** real `READ_ONLY_BASH_RULES` as session rules (only `git status*` proven);
+  decide 2.0.29; whether title generation can be disabled; pin check in `/api/jobs/health` and
+  `make verify`. Review findings deliberately not taken: splitting the probe into modules, unit tests
+  for its helpers, parallelising the pagination seed.
 
-## Wave 2 — agw owns its server; episodes attach with `--server`            <!-- status: pending -->
+## Wave 2 — agw owns its server; episodes attach with `--server`            <!-- status: active -->
 - [ ] Add a server lifecycle as the Wave 1 design chose: start, health, restart on
       crash, and a version pin with the live probe as the upgrade gate. Expose server
       health on `/api/jobs/health` and `make verify`.
