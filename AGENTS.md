@@ -58,7 +58,7 @@ on `bun scripts/opencode-v2-probe.ts` (`docs/opencode-v2.md`).
 - Port 7705 is owned by the LaunchAgent. Starting a second process there causes conflicts.
 
 ```bash
-make reload          # After code changes: self-initiated drain (POST /api/shutdown, ≤50 min — launchd's real signal-and-wait timer never engages on this path) + restart. Refuses while jobs run — FORCE=1 discards them (force=1 request, or a real SIGINT), escalating an in-progress drain if one is running. Falls back to `launchctl kill` (short window, capped by launchd's measured 60s ExitTimeOut) if the endpoint doesn't answer. Also refuses on tracked/installed plist drift (file AND launchd's live state) — see docs/deployment.md § Two shutdown paths, two windows
+make reload          # After code changes: self-initiated drain (POST /api/shutdown, ≤50 min — launchd's real signal-and-wait timer never engages on this path) + restart. Refuses while jobs run — FORCE=1 aborts the drain at once (force=1 request, or a real SIGINT): claude workers are killed and resumed on boot, a worktree dispatch's OpenCode session is detached and re-attached on boot, everything else is discarded, escalating an in-progress drain if one is running. Falls back to `launchctl kill` (short window, capped by launchd's measured 60s ExitTimeOut) if the endpoint doesn't answer. Also refuses on tracked/installed plist drift (file AND launchd's live state) — see docs/deployment.md § Two shutdown paths, two windows
 make install-agent   # One-time: install + start LaunchAgent
 make uninstall-agent # Remove LaunchAgent
 
@@ -125,7 +125,7 @@ Full forensic story (why BTM denies this specific label/executable):
 agent-gateway exposes workflow tools (`check`, `review`, `dispatch`, `update_pr`, `overview`,
 `narrative`, `triage`, `otel`) plus the synchronous multimodal tools (`read_image`,
 `read_drawing`, `excalidraw_diagram`) plus the job-polling tools
-(`job_status`, `job_wait`, `job_cancel`) as an MCP server — a **separate process** from the
+(`job_status`, `job_wait`, `job_steer`, `job_cancel`) as an MCP server — a **separate process** from the
 LaunchAgent, spawned on-demand by Claude Code via stdio transport.
 `GET /api/agents` (below) is HTTP-only, deliberately outside this MCP
 surface — see `### agents, overview, narrative`. `otel` alone runs inline via
@@ -157,7 +157,7 @@ MCP:
 agw dispatch --repo warden --tier implement --workspace in-place 'the brief'
 agw check --repo agent-gateway          # submit + wait, progress on stderr
 agw review --pr 42 --json          # stdout carries ONLY the result JSON
-agw jobs --running · status|wait|cancel <jobId> · routing · policy · health
+agw jobs --running · status|wait|cancel <jobId> · steer <jobId> <text> · routing · policy · health
 ```
 
 `--no-wait` prints the jobId and exits; `--json` makes stdout machine-readable
@@ -238,6 +238,14 @@ cap** (`AGENT_GATEWAY_JOB_CONCURRENCY`, default 3) queues excess submissions as
 `pending` so parallel agents can't trip the IU unified endpoint's rate
 limits — while draining, that queue backs up too, which `GET
 /api/jobs/health`'s `draining: true` flag distinguishes from a wedged queue.
+
+**Durable and steerable OpenCode episodes (Wave 4, `docs/opencode-v2.md`).** A drain/restart
+DETACHES a worktree dispatch's OpenCode session instead of interrupting it (`SessionOptions.reattachable`,
+`SessionDetachedError`; the handler keeps the worktree), and the next boot's `recover()` re-attaches:
+live session → wait only, finished while down → read the result, cut off → `prompt {resume:true}`.
+Cancel still interrupts. **`POST /api/jobs/:id/steer {text}`** (MCP `job_steer`, CLI `agw steer`)
+injects `delivery: steer` text into a RUNNING dispatch's session (409 when nothing is live; logged
+`job.steer`). A new MCP tool needs a `/mcp` reconnect before a connected client sees it.
 
 **`POST /api/jobs/:id/cancel`** (MCP: `job_cancel`, CLI: `agw cancel`) cancels one job — `pending` lands `cancelled`
 immediately, `running` gets a best-effort SIGTERM (`terminateSessionsForJob`)
@@ -529,8 +537,9 @@ paired with a Claude `AGENT_GATEWAY_MODEL_DISPATCH`, the `kind: "editorial"` par
 Max reverse fallback after an IU failure — so it works with that
 repo's own `AGENTS.md`/`CLAUDE.md`/rules/skills in context. Callers are warden and
 interactive sessions; an observer like Hermes files work through `warden run`, not
-directly. One episode, one verdict, no steering (mid-run redirection is an
-`rd wave` tab + `rd say`, not this).
+directly. One episode, one verdict. Mid-run, the caller can inject new facts
+with `job_steer` / `agw steer` (a running OpenCode episode only); anything beyond that —
+redirecting the whole task — is an `rd wave` tab + `rd say`, not this.
 
 **Tiers.** `investigate` (read-only → verdict), `author` (read-only → verdict
 + issue), `implement` (write → verdict + branch + **draft** PR). The artifact

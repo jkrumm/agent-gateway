@@ -37,6 +37,7 @@ import {
   isIdleTimedOut,
   runnerLogger,
   SessionCancelledError,
+  SessionDetachedError,
   trackExternalSession,
   unclassifiedOutputFailure,
   writeAttribution,
@@ -315,8 +316,13 @@ export interface OpencodeDriveInput {
   cwd: string;
   sessionId: string;
   prompt: string;
-  /** Re-attach a session whose turn was cut off. */
+  /** Re-attach a session whose turn was cut off (no turn is running: prompt `resume`). */
   resume?: boolean;
+  /** Attach to a session that is running its turn (or already finished it) on its own: no prompt
+   *  is sent, only waited on. */
+  attach?: boolean;
+  /** A drain detaches the session instead of interrupting it (see `SessionOptions.reattachable`). */
+  reattachOnDrain?: boolean;
   /** The newest `idle` message id BEFORE this prompt (resume only) — completion needs a newer one. */
   baselineIdleId?: string;
   logContext: Record<string, unknown>;
@@ -337,6 +343,8 @@ export interface OpencodeDriveResult {
   finished: boolean;
   /** `stop` fired: a job cancel or a drain. */
   stopped: boolean;
+  /** `stopped` by a drain that left the session running for the next boot to re-attach. */
+  detached: boolean;
   killReason: "idle" | null;
   idleMsAtKill: number | null;
 }
@@ -366,6 +374,7 @@ export async function driveOpencodeSession(
   const pollMs = input.pollMs ?? ACTIVITY_POLL_MS;
   const abort = new AbortController();
   let stopped = false;
+  let detached = false;
   let finished = false;
   let killReason: "idle" | null = null;
   let idleMsAtKill: number | null = null;
@@ -387,11 +396,12 @@ export async function driveOpencodeSession(
     );
   };
 
-  const untrack = trackExternalSession(jobId, () => {
+  const untrack = trackExternalSession(jobId, (reason) => {
     if (stopped) return;
     stopped = true;
+    detached = reason === "drain" && input.reattachOnDrain === true;
     abort.abort();
-    void interrupt("stop");
+    if (!detached) void interrupt("stop");
   });
 
   let heartbeatTick = 0;
@@ -424,10 +434,12 @@ export async function driveOpencodeSession(
   const finishedTurns = new Set<string>();
 
   try {
-    await client.prompt(sessionId, {
-      text: input.prompt,
-      ...(input.resume ? { resume: true } : {}),
-    });
+    if (!input.attach) {
+      await client.prompt(sessionId, {
+        text: input.prompt,
+        ...(input.resume ? { resume: true } : {}),
+      });
+    }
     let waiting = startWait();
     for (;;) {
       const tick = delay(pollMs);
@@ -513,7 +525,7 @@ export async function driveOpencodeSession(
       "opencode messages unreadable after the run — usage not attributed",
     );
   }
-  return { messages, messagesError, finished, stopped, killReason, idleMsAtKill };
+  return { messages, messagesError, finished, stopped, detached, killReason, idleMsAtKill };
 }
 
 // ── Attempt runner ─────────────────────────────────────────────────────────────────────
@@ -725,10 +737,32 @@ export async function runOpencodeAttempt<T>(
   let sessionId = resumeSessionId;
   try {
     let baselineIdleId: string | undefined;
+    let attach = false;
     if (sessionId) {
-      baselineIdleId = (await client.recentMessages(sessionId, 1)).find(
-        (m) => m.type === "idle",
-      )?.id;
+      // A boot-recovery resume. The session lives on the server, so it is in one of three states:
+      // running its turn (a detached drain — attach, never prompt: a second prompt would steer
+      // a nudge into live work), already idle after a succeeded turn (finished while agw was
+      // down — read the result), or cut off (a killed server — prompt `resume`).
+      // `active` FIRST: a session that finishes between the two reads is then caught by the
+      // messages read (finished) instead of falling through to a re-prompt of a done episode.
+      const live = (await client.active()).includes(sessionId);
+      const [newest] = await client.recentMessages(sessionId, 1);
+      // Any idle that is not a failed/interrupted turn is a finished one (an absent outcome too).
+      const finishedOnItsOwn =
+        newest?.type === "idle" && newest.outcome !== "failed" && newest.outcome !== "interrupted";
+      attach = live || finishedOnItsOwn;
+      baselineIdleId = !finishedOnItsOwn && newest?.type === "idle" ? newest.id : undefined;
+      const mode = live ? "live" : finishedOnItsOwn ? "finished" : "resume";
+      runnerLogger().info(
+        {
+          event: "session.opencode_reattach",
+          project: cwd,
+          ...errCtx,
+          sessionId,
+          mode,
+        },
+        "opencode session re-attached after a restart",
+      );
     } else {
       sessionId = await client.createSession({
         directory: cwd,
@@ -739,13 +773,15 @@ export async function runOpencodeAttempt<T>(
       });
     }
     announceOpencodeSessionId(sessionId, { iuOpenaiBase, model, backend, tool, onSessionId });
-    await client.setEnvironment(sessionId, sessionEnv);
+    if (!attach) await client.setEnvironment(sessionId, sessionEnv);
     drive = await driveOpencodeSession(client, {
       jobId,
       cwd,
       sessionId,
       prompt: finalPrompt,
-      resume: resumeSessionId !== undefined,
+      resume: !attach && resumeSessionId !== undefined,
+      attach,
+      reattachOnDrain: opts.reattachable === true,
       baselineIdleId,
       logContext: errCtx,
       onActivity,
@@ -780,6 +816,16 @@ export async function runOpencodeAttempt<T>(
       reason: "opencode_session_error",
     });
     return { ok: false, error, classificationText: error, hadApiRetry: false, backend, model };
+  }
+  // A drain detached the session: it keeps running on the server and the next boot attaches to it.
+  // Its usage is NOT attributed here (the attaching attempt reads the whole turn), so nothing is
+  // billed twice.
+  if (drive.detached) {
+    runnerLogger().warn(
+      { event: "session.opencode_detached", project: cwd, ...errCtx, sessionId },
+      "opencode session left running for re-attach after the restart",
+    );
+    throw new SessionDetachedError(jobId);
   }
   // The run ended on its own but its messages could not be read: outcome and usage are unknown.
   // Fail as a transport-class error (connection text) instead of collapsing into "no output".

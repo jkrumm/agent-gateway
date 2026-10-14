@@ -2,7 +2,12 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerCheckTool } from "./check.ts";
 import { registerDispatchTool } from "./dispatch.ts";
 import { registerExcalidrawDiagramTool } from "./excalidraw-diagram.ts";
-import { registerJobCancelTool, registerJobStatusTool, registerJobWaitTool } from "./jobs.ts";
+import {
+  registerJobCancelTool,
+  registerJobStatusTool,
+  registerJobSteerTool,
+  registerJobWaitTool,
+} from "./jobs.ts";
 import { registerNarrativeTool } from "./narrative.ts";
 import { registerOtelTool } from "./otel.ts";
 import { registerOverviewTool } from "./overview.ts";
@@ -22,6 +27,7 @@ export const MCP_TOOLS: ReadonlyArray<{ name: string; register: (server: McpServ
   { name: "excalidraw_diagram", register: registerExcalidrawDiagramTool },
   { name: "job_cancel", register: registerJobCancelTool },
   { name: "job_status", register: registerJobStatusTool },
+  { name: "job_steer", register: registerJobSteerTool },
   { name: "job_wait", register: registerJobWaitTool },
   { name: "narrative", register: registerNarrativeTool },
   { name: "otel", register: registerOtelTool },

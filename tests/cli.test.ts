@@ -171,6 +171,17 @@ describe("argv parsing → POST body", () => {
     expect(parseArgs(["status", "abc"]).command).toEqual({ kind: "status", jobId: "abc" });
     expect(parseArgs(["wait", "abc"]).command).toEqual({ kind: "wait", jobId: "abc" });
     expect(parseArgs(["cancel", "abc"]).command).toEqual({ kind: "cancel", jobId: "abc" });
+    expect(parseArgs(["steer", "abc", "CI", "is", "red"]).command).toEqual({
+      kind: "steer",
+      jobId: "abc",
+      text: "CI is red",
+    });
+    expect(parseArgs(["steer", "abc", "--file", "-"]).command).toEqual({
+      kind: "steer",
+      jobId: "abc",
+      file: "-",
+    });
+    expect(() => parseArgs(["steer", "abc"])).toThrow();
     expect(parseArgs(["routing"]).command).toEqual({ kind: "routing" });
     expect(parseArgs(["policy"]).command).toEqual({ kind: "policy" });
     expect(parseArgs(["health"]).command).toEqual({ kind: "health" });
@@ -651,6 +662,23 @@ describe("inspect commands — mocked round trips", () => {
     expect(method).toBe("POST");
     expect(code).toBe(0);
     expect(out).toBe("cancelled j1\n");
+  });
+
+  test("steer: POST /api/jobs/:id/steer with the text, exit 0; a 409 is a usage-class refusal", async () => {
+    let body: unknown;
+    const ok = await runWith(["steer", "j1", "CI", "is", "red"], {
+      "POST /api/jobs/j1/steer": (init) => {
+        body = JSON.parse(String(init?.body));
+        return { body: { ok: true, jobId: "j1", sessionId: "ses_x" } };
+      },
+    });
+    expect(body).toEqual({ text: "CI is red" });
+    expect(ok.code).toBe(0);
+    expect(ok.out).toBe("steered j1\n");
+    const refused = await runWith(["steer", "j1", "x"], {
+      "POST /api/jobs/j1/steer": () => ({ status: 409, body: { ok: false, error: "not running" } }),
+    });
+    expect(refused.code).toBe(1);
   });
 });
 

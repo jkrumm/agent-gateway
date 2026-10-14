@@ -81,3 +81,28 @@ export async function requestJobCancel(jobId: string): Promise<CancelResult> {
   }
   return { kind: "accepted", job: data.job };
 }
+
+/** Outcome of `POST /api/jobs/:id/steer`. 404/409/400 are expected answers (nothing live to
+ *  steer), so they are values; transport trouble throws. */
+export type SteerJobResult =
+  | { kind: "steered"; sessionId: string }
+  | { kind: "not_found" }
+  | { kind: "not_steerable"; error: string };
+
+export async function requestJobSteer(jobId: string, text: string): Promise<SteerJobResult> {
+  const res = await fetch(`${BASE}/api/jobs/${encodeURIComponent(jobId)}/steer`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text }),
+    signal: AbortSignal.timeout(35_000),
+  });
+  if (res.status === 404) return { kind: "not_found" };
+  const data = (await res.json()) as { ok?: boolean; error?: string; sessionId?: string };
+  if (res.status === 409 || res.status === 400) {
+    return { kind: "not_steerable", error: data.error ?? "job cannot be steered" };
+  }
+  if (!res.ok || !data.ok || !data.sessionId) {
+    throw new Error(data.error ?? `job steer failed with status ${res.status}`);
+  }
+  return { kind: "steered", sessionId: data.sessionId };
+}

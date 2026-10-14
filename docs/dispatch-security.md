@@ -158,6 +158,17 @@ dispatch workers** with no sudo and no HomeLab grant — an ACL change, not a
 Claude Code flag. Do not reach for `--disallowedTools` or the sandbox for this;
 both were tested and neither holds.
 
+## Steering a running episode
+
+`POST /api/jobs/:id/steer` (`job_steer`, `agw steer`) injects text into a running OpenCode
+episode's live loop. The steering caller is trusted exactly like a `dispatch` submitter: the API
+is loopback-only and carries no auth, so anyone who can steer could already submit a brief. The
+text is therefore framed as new facts from the caller but NOT nonce-fenced as hostile data (the
+brief is fenced because it may embed attacker-influenced content; a caller that relays such
+content — warden quoting an alert — must quote it as data itself, as `steer_live_episode` does).
+Only `running` dispatches with a live session accept it; a steer never widens the episode's
+permission profile.
+
 ## Worktree isolation
 
 - **EVERY tier runs in its own worktree**, torn down in the same `finally`. For

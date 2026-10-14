@@ -37,6 +37,7 @@ refuses if it detects the tracked plist has drifted from the installed one.
 | `GET /api/routing` | effective per-tool model/backend table + applied/refused/implied overrides |
 | `POST /api/jobs` · `GET /api/jobs[/:id]` | submit / list / poll jobs |
 | `POST /api/jobs/:id/cancel` | cancel one job — `pending` lands `cancelled` immediately, `running` gets a best-effort SIGTERM and lands `cancelled` once the worker exits; 404 unknown id, 409 already terminal |
+| `POST /api/jobs/:id/steer` | `{text}` → post new facts into a RUNNING dispatch's OpenCode session (`delivery: steer`); 400 empty/oversized, 404 unknown, 409 nothing live to steer, 502 server unreachable |
 | `GET /api/jobs/health` | queue health for monitoring (`ok` false on ≥3 failures/h or a >15 min pending job) |
 | `GET /api/agents[.txt]` | deterministic agent snapshot (no LLM), incl. `humanQueue` |
 | `GET /api/overview[.txt]` | snapshot + the latest `overview` job's recommendations; `.txt` takes `?color=1&cols=N` |

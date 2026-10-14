@@ -1681,7 +1681,7 @@ function describeLeftover(path: string): { main: string; branch: string } {
  * both already handle either shape (see the `rmSync(..., { recursive: true })` below and
  * `git checkout <base> -- <path>`'s own directory-pathspec support).
  */
-const PROJECT_SETTINGS_FILES = [
+export const PROJECT_SETTINGS_FILES = [
   ".claude/settings.json",
   ".claude/settings.local.json",
   "opencode.json",

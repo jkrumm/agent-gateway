@@ -5,11 +5,13 @@ Spec order for this migration: `docs/waves/PLAN.md` > this file > dotfiles
 **opencode 2.0.25** (Homebrew) with `scripts/opencode-v2-probe.ts` on 2026-10-14; the probe is
 the executable form of this page and the upgrade gate (below).
 
-**Status: Wave 3 shipped (2026-10-14).** An episode is a session on one agw-owned OpenCode v2
+**Status: Wave 4 shipped (2026-10-14).** An episode is a session on one agw-owned OpenCode v2
 server (`com.jkrumm.agent-gateway-opencode`, `server/mcp/opencode-server.ts`), driven over HTTP by
 `runOpencodeAttempt` through the `OpencodeClient` port (`server/mcp/opencode-client.ts`): create →
 environment → prompt → wait → messages. No `opencode run` child process, no NDJSON parser, no CLI
-fallback. Wave 4 (re-attach after an agw restart, steer) is still ahead.
+fallback. Since Wave 4 a drain detaches a worktree dispatch's session (it keeps running on the
+server), the next boot re-attaches it, and `POST /api/jobs/:id/steer` injects new facts into a
+running episode.
 
 ## Measured
 
@@ -148,9 +150,29 @@ long-poll is open; SSE is not used. A `wait` that returns before a freshly admit
 started is re-checked until the newest message is a new `idle`. Cancel and drain call the
 session's registered `stop` (`trackExternalSession`), which interrupts it.
 
-**Durability (Wave 4).** `recover()` lists `running` dispatch jobs, checks `session/active`; a
-session that is not active but has no `idle` message is re-attached with `prompt {resume:true}`.
-A server restart (crash, SIGTERM, upgrade) therefore costs at most the in-flight tool call.
+**Durability (Wave 4, shipped).** A dispatch worktree episode runs with `reattachable: true`. On a
+drain/SIGTERM (`terminateActiveSessions` → `stop("drain")`) its session is DETACHED: not
+interrupted, still running on the shared server, `SessionDetachedError` thrown, so the dispatch
+handler skips salvage and worktree teardown and the job stays `running` for the next boot. A job
+cancel (`stop("cancel")`) still interrupts. `recover()` keeps `session_id` + `worktree_meta`
+(requeue-for-resume, as for the claude harness) and `runOpencodeAttempt` re-attaches by state:
+the session is in `GET /api/session/active` → wait only (no prompt, no environment call); newest
+message is a `succeeded` idle → it finished while agw was down, read the result; otherwise (cut
+off, e.g. a killed server) `prompt {resume:true}`. `session.opencode_reattach` logs the mode. A
+detach writes no attribution row (the attaching attempt reads the whole turn, so nothing bills
+twice); a resumed attempt after an earlier COUNTED attempt can still double-count that attempt's
+turns — rare, accepted. A detached session whose job is NOT resumed (recover → `interrupted`, or a
+fresh re-run) is interrupted on boot so it cannot keep editing an orphaned worktree. In-place
+episodes and non-dispatch tools are never `reattachable`: a drain interrupts them as before.
+
+**Steer (Wave 4, shipped).** `POST /api/jobs/:id/steer {text}` (MCP `job_steer`, CLI `agw steer
+<jobId> <text…|--file F|->`, `server/lib/steer.ts`) posts `delivery: "steer"` into the running
+dispatch's session after checking it is `running`, a `dispatch`, carries an OpenCode session id
+(`ses_…`) and the session is in `session/active`. 400 empty/oversized (20 000 chars), 404 unknown,
+409 nothing live to steer, 502 server unreachable. The text is framed as new facts from the caller
+and logged as `job.steer` (the measurable source for steers per episode). Warden steers when a
+duplicate occurrence is attached to an item whose episode is still running
+(`loop/triaging.py` `steer_live_episode`); a finished episode still goes through a revision.
 
 **Not changing:** the dispatch handler's invariants (`docs/dispatch-security.md`), the repo
 lease, `assertInPlaceOpencodeConfigAllowed`, the IU endpoint preflight.

@@ -22,6 +22,8 @@ import {
   classifyBreakerOutcome,
   isRetryableSessionError,
   SessionCancelledError,
+  SessionDetachedError,
+  terminateActiveSessions,
   terminateSessionsForJob,
   type SessionOptions,
   type SessionResult,
@@ -629,5 +631,99 @@ describe("runOpencodeAttempt — transport failures and secret redaction", () =>
     expect(result.error).toContain("[REDACTED]");
     expect(JSON.stringify(result)).not.toContain(PASSWORD);
     expect(JSON.stringify(result)).not.toContain(key);
+  });
+});
+
+describe("runOpencodeAttempt — durable episodes (Wave 4)", () => {
+  const hangingRun = async (opts: Opts) => {
+    const { client, run } = setup({
+      hang: true,
+      visibleNow: [{ content: [text("halfway there")] }],
+    });
+    const running = run({ jobId: "job-7", ...opts }, {}, { idleTimeoutMs: 60_000 });
+    const settled = running.then(
+      (value) => ({ value, error: undefined as unknown }),
+      (error: unknown) => ({ value: undefined, error }),
+    );
+    const deadline = Date.now() + 5_000;
+    while (activeSessionCount() === 0 && Date.now() < deadline) await Bun.sleep(2);
+    await Bun.sleep(10);
+    return { client, settled };
+  };
+
+  test("a drain DETACHES a reattachable session: no interrupt, SessionDetachedError, no usage row", async () => {
+    const { client, settled } = await hangingRun({ reattachable: true });
+    expect(terminateActiveSessions()).toEqual(["job-7"]);
+    const { error } = await settled;
+    expect(error).toBeInstanceOf(SessionDetachedError);
+    expect(client.interrupts).toEqual([]);
+    expect(client.only.turn).toBeDefined(); // still running server-side
+    expect(attemptRows()).toEqual([]);
+  });
+
+  test("a drain still INTERRUPTS a session nobody will re-attach", async () => {
+    const { client, settled } = await hangingRun({});
+    terminateActiveSessions();
+    const { value, error } = await settled;
+    expect(error).toBeUndefined();
+    expect(value?.error).toContain("interrupted by request");
+    expect(client.interrupts).toEqual(["ses_fake_1"]);
+  });
+
+  test("a job cancel interrupts even a reattachable session", async () => {
+    const { client, settled } = await hangingRun({ reattachable: true });
+    expect(terminateSessionsForJob("job-7")).toBe(true);
+    const { value } = await settled;
+    expect(value?.error).toContain("interrupted by request");
+    expect(client.interrupts).toEqual(["ses_fake_1"]);
+  });
+
+  test("re-attach to a LIVE session waits on it: no prompt, no environment, no new session", async () => {
+    const { client, run } = setup();
+    const session = client.seed("ses_live", [assistantMessage({ content: [text("working")] })]);
+    session.turn = { assistant: [{ content: [text('{"answer":3}')] }] };
+    const result = await run({ resumeSessionId: "ses_live", reattachable: true });
+    expect(result).toMatchObject({ ok: true, data: { answer: 3 } });
+    expect(client.created).toEqual([]);
+    expect(client.prompts).toEqual([]);
+    expect(client.environments).toEqual([]);
+    expect(client.callLog).toContain("wait");
+  });
+
+  test("an idle with no outcome counts as finished; a failed idle is resumed with a prompt", async () => {
+    const noOutcome = setup();
+    noOutcome.client.seed("ses_a", [
+      assistantMessage({ content: [text('{"answer":5}')] }),
+      { ...idleMessage("succeeded"), outcome: undefined },
+    ]);
+    expect(await noOutcome.run({ resumeSessionId: "ses_a" })).toMatchObject({
+      ok: true,
+      data: { answer: 5 },
+    });
+    expect(noOutcome.client.prompts).toEqual([]);
+
+    const failed = setup({ assistant: [{ content: [text('{"answer":6}')] }] });
+    failed.client.seed("ses_b", [
+      assistantMessage({ content: [text("x")] }),
+      idleMessage("failed"),
+    ]);
+    expect(await failed.run({ resumeSessionId: "ses_b" })).toMatchObject({ ok: true });
+    expect(failed.client.prompts[0]?.input.resume).toBe(true);
+  });
+
+  test("re-attach to a session that FINISHED while agw was down reads its result without prompting", async () => {
+    const { client, run } = setup();
+    client.seed("ses_done", [
+      assistantMessage({
+        content: [text('{"answer":4}')],
+        tokens: { input: 7, output: 3 },
+        cost: 0.2,
+      }),
+      idleMessage("succeeded"),
+    ]);
+    const result = await run({ resumeSessionId: "ses_done" });
+    expect(result).toMatchObject({ ok: true, data: { answer: 4 } });
+    expect(client.prompts).toEqual([]);
+    expect(lastRow()).toMatchObject({ outcome: "ok", costUsd: 0.2, inputTokens: 7 });
   });
 });

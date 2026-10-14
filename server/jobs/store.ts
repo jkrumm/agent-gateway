@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { appLogger as logger } from "../logger.ts";
+import { interruptOpencodeSession } from "../mcp/opencode-server.ts";
 import { terminateSessionsForJob } from "../mcp/session-runner.ts";
 import {
   __resetRepoLeasesForTests,
@@ -426,6 +427,21 @@ export function createJob(tool: JobTool, params: Record<string, unknown>): JobVi
 export function getJob(id: string): JobView | null {
   const row = fetchRow(id);
   return row ? viewOf(rowToRecord(row)) : null;
+}
+
+/** What `POST /api/jobs/:id/steer` needs: the job's status, tool and recorded worker session id
+ *  (an OpenCode session id starts `ses_`; a `claude -p` transcript id is a UUID). */
+export function jobSteerTarget(
+  id: string,
+): { status: JobRecord["status"]; tool: JobTool; sessionId: string | null } | null {
+  const row = fetchRow(id);
+  return row
+    ? {
+        status: row.status as JobRecord["status"],
+        tool: row.tool as JobTool,
+        sessionId: row.session_id,
+      }
+    : null;
 }
 
 /** The job holding the repo lease a `pending` job is waiting on, or undefined when it is not
@@ -1067,6 +1083,9 @@ function recover(): void {
         );
         recordJobStats(row.id);
         interrupted++;
+        // A detached OpenCode session (a drain left it running) that will NOT be re-attached
+        // must not keep editing a worktree nobody owns any more. Best-effort, never throws.
+        if (row.session_id?.startsWith("ses_")) void interruptOpencodeSession(row.session_id);
         if (metaIsInPlace) {
           // Named explicitly rather than left to be found by grepping — an in-place episode
           // interrupted mid-run leaves its edits sitting UNCOMMITTED in the repo's live
@@ -1106,6 +1125,7 @@ function recover(): void {
       }
       // "fresh" — clear both markers so the handler creates a new worktree, same as an
       // ordinary first attempt.
+      if (row.session_id?.startsWith("ses_")) void interruptOpencodeSession(row.session_id);
       db.run(
         `UPDATE jobs SET status = 'pending', progress = NULL, started_at = NULL, error = NULL,
            session_id = NULL, worktree_meta = NULL WHERE id = ?`,

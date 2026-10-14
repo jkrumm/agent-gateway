@@ -5,6 +5,7 @@ import { resolveDispatchTarget } from "../lib/dispatch-policy.ts";
 import { computeHealth } from "../lib/health.ts";
 import { dispatchSubmitRefusal } from "../jobs/handlers/dispatch.ts";
 import { validateModel } from "../lib/routing.ts";
+import { steerJob } from "../lib/steer.ts";
 
 // HTTP surface for the async job system. The MCP tools are thin clients of these
 // routes (server/mcp/job-client.ts). Hosted in the always-on HTTP server so jobs
@@ -104,4 +105,20 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
       return { ok: false as const, error: result.error };
     }
     return { ok: true as const, job: result.job };
-  });
+  })
+
+  // Steer a running dispatch episode: posts the text into its live OpenCode session
+  // (`delivery: "steer"`) so new facts reach the agent loop without a kill-and-restart.
+  // 409 = nothing live to steer (not running, not a dispatch, no OpenCode session, between turns).
+  .post(
+    "/:id/steer",
+    async ({ params, body, set }) => {
+      const result = await steerJob(params.id, body.text);
+      if (!result.ok) {
+        set.status = result.status;
+        return { ok: false as const, error: result.error };
+      }
+      return { ok: true as const, jobId: params.id, sessionId: result.sessionId };
+    },
+    { body: t.Object({ text: t.String() }) },
+  );

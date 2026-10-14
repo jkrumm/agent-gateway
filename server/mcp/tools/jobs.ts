@@ -1,7 +1,13 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { isTerminal, type JobStatus, type JobView } from "../../jobs/types.ts";
-import { getJobStatus, httpReachable, requestJobCancel, HTTP_DOWN_MESSAGE } from "../job-client.ts";
+import {
+  getJobStatus,
+  httpReachable,
+  requestJobCancel,
+  requestJobSteer,
+  HTTP_DOWN_MESSAGE,
+} from "../job-client.ts";
 import { mcpProgressCallback } from "../session-runner.ts";
 
 // Polling tools for the async job system. The four long tools return a jobId;
@@ -280,6 +286,65 @@ OUTPUT: the job's state (same fields as job_status) plus \`outcome\`: "cancelled
         }
         const view = await getJobStatus(jobId);
         return view ? okCancel(toCancelState(view, "already_terminal")) : notFound(jobId);
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: JSON.stringify({ error: String(err) }) }],
+          isError: true,
+        };
+      }
+    },
+  );
+}
+
+const JOB_STEER_OUTPUT = z.object({
+  jobId: z.string(),
+  outcome: z
+    .enum(["steered", "not_steerable"])
+    .describe(
+      "steered=the text was posted into the running episode's session. not_steerable=nothing live to steer — see `reason`.",
+    ),
+  reason: z.string().optional().describe("Why the job could not be steered (not_steerable only)."),
+});
+
+export function registerJobSteerTool(server: McpServer): void {
+  server.registerTool(
+    "job_steer",
+    {
+      title: "Steer Running Episode",
+      description: `Post new facts into a RUNNING dispatch episode's live agent session (HTTP \`POST /api/jobs/:id/steer\`, \`delivery: steer\`) so it changes course without a kill-and-restart.
+
+WHEN TO CALL: a dispatch you submitted is still running and new information matters to it — a CI failure, a review finding, an owner's answer, a corrected assumption. Prefer this over job_cancel + a new dispatch while the episode is live: the worker keeps its context and worktree.
+SIDE EFFECTS: the text is injected into the worker's current turn; it may change what the episode does and produces. Cannot be undone.
+OUTPUT: \`outcome\` "steered", or "not_steerable" with a \`reason\` (job not running, not a dispatch, no OpenCode session yet, or the session is between turns) — then re-dispatch or wait. An unknown id is an error.`,
+      inputSchema: {
+        jobId: z.string().describe("The running dispatch's job id."),
+        text: z
+          .string()
+          .min(1)
+          .max(20_000)
+          .describe("The new facts, written for the worker: what changed and what to do about it."),
+      },
+      outputSchema: JOB_STEER_OUTPUT.shape,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ jobId, text }) => {
+      if (!(await httpReachable())) return down();
+      try {
+        const result = await requestJobSteer(jobId, text);
+        if (result.kind === "not_found") return notFound(jobId);
+        const structured: z.infer<typeof JOB_STEER_OUTPUT> =
+          result.kind === "steered"
+            ? { jobId, outcome: "steered" }
+            : { jobId, outcome: "not_steerable", reason: result.error };
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(structured) }],
+          structuredContent: structured,
+        };
       } catch (err) {
         return {
           content: [{ type: "text", text: JSON.stringify({ error: String(err) }) }],

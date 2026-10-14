@@ -2,7 +2,7 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
-import { runSession, type SessionResult } from "../../mcp/session-runner.ts";
+import { runSession, SessionDetachedError, type SessionResult } from "../../mcp/session-runner.ts";
 import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
 import { parseParams } from "./util.ts";
@@ -60,6 +60,7 @@ import {
   salvageWorktree,
   scanForSecrets,
   snapshotInPlace,
+  PROJECT_SETTINGS_FILES,
   stripProjectSettings,
   summarizeDiff,
   writeWithheldVerdict,
@@ -981,6 +982,7 @@ export async function runDispatch(
   // and the store releases it. Taken inside the try so a throw between acquiring it and setting
   // this flag is impossible by construction: the two happen on the same line.
   let lockHeld = false;
+  let detachedForRestart = false;
   // Set when the session runner declined the reactive Max fallback for this write-tier episode
   // (it had already produced output on the primary route). Surfaced in the verdict + a field.
   let fallbackWithheld: FallbackWithheld | undefined;
@@ -1060,6 +1062,10 @@ export async function runDispatch(
       worktreeMeta = worktree;
       sessionCwd = worktree.path;
       strippedSettings = stripProjectSettings(worktree);
+      // A resumed worktree was stripped by the invocation a restart interrupted, so the strip
+      // above finds nothing: restore from the base for EVERY settings path (restoreStrippedSettings
+      // skips the ones the base does not carry) or the push would read as deleting them.
+      if (resumingWorktree) strippedSettings = [...PROJECT_SETTINGS_FILES];
       // A read-tier worker is told which tree it is actually reading: its worktree is cut
       // from the remote default branch by default, not the live checkout's HEAD (see
       // createReadWorktree), and `baseRef` would otherwise only be logged — a verdict that
@@ -1099,6 +1105,10 @@ export async function runDispatch(
         validate: workerValidator(tier),
         onActivity: relayProgress,
         onSessionId: resumeCtx?.onSessionId,
+        // A worktree episode's session survives a restart on the OpenCode server and the next boot
+        // re-attaches it (recover() keeps session_id + worktree_meta); an in-place one is never
+        // resumed, so a detached session would be orphaned in the live checkout.
+        reattachable: !inPlace,
       });
     const runEpisode = async (p: string, opts: { resumeSessionId?: string } = {}) => {
       const r = await spawnEpisode(p, opts);
@@ -1331,6 +1341,12 @@ export async function runDispatch(
       project: cwd,
     });
   } catch (err) {
+    // A drain detached the OpenCode session: it is still working in this worktree and the next
+    // boot re-attaches it, so neither salvage nor teardown may touch the tree.
+    if (err instanceof SessionDetachedError) {
+      detachedForRestart = true;
+      throw err;
+    }
     // A throw here (unlike a deliberate refusal or a fully-salvaged serialization failure,
     // neither of which throws) means the episode's fate was never resolved — the same "died
     // mid-work" shape a SIGKILL leaves for the boot sweep, just synchronous. Salvage before
@@ -1355,7 +1371,7 @@ export async function runDispatch(
     // its whole admission rested on, but ONLY if this invocation is the one that actually
     // acquired it: a refused acquisition (another job already holds it) must never release
     // that other job's lock.
-    if (worktree) await removeWorktree(cwd, worktree);
+    if (worktree && !detachedForRestart) await removeWorktree(cwd, worktree);
     if (lockHeld) releaseRepoLease(cwd);
   }
 }

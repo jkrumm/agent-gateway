@@ -133,6 +133,14 @@ export interface JobRefCommand {
   jobId: string;
 }
 
+export interface SteerCommand {
+  kind: "steer";
+  jobId: string;
+  /** Inline text, or a file to read it from (`--file`, `-` = stdin). */
+  text?: string;
+  file?: string;
+}
+
 export interface SimpleCommand {
   kind: "routing" | "policy" | "health";
 }
@@ -150,6 +158,7 @@ export type ParsedCommand =
   | TriageCommand
   | JobsCommand
   | JobRefCommand
+  | SteerCommand
   | SimpleCommand
   | HelpCommand;
 
@@ -238,6 +247,8 @@ export function parseArgs(argv: string[]): Parsed {
     case "wait":
     case "cancel":
       return { command: { kind: name, jobId: oneJobId(rest.slice(1), name) }, options };
+    case "steer":
+      return { command: parseSteer(rest.slice(1)), options };
     case "routing":
     case "policy":
     case "health":
@@ -458,6 +469,22 @@ function parseUpdatePr(args: string[]): UpdatePrCommand {
   };
 }
 
+function parseSteer(args: string[]): SteerCommand {
+  const { flags, positionals } = parseFlags(args, { "--file": "value" }, "steer");
+  const [jobId, ...words] = positionals;
+  const file = flagValue(flags, "--file");
+  if (!jobId) throw new CliUsageError("agw steer requires a <jobId>");
+  if (file === undefined && words.length === 0) {
+    throw new CliUsageError("agw steer requires <text...> or --file <path|->");
+  }
+  if (file !== undefined && words.length > 0) {
+    throw new CliUsageError("agw steer takes <text...> or --file, not both");
+  }
+  return file === undefined
+    ? { kind: "steer", jobId, text: words.join(" ") }
+    : { kind: "steer", jobId, file };
+}
+
 function parseTriage(args: string[]): TriageCommand {
   const { flags, positionals } = parseFlags(
     args,
@@ -625,7 +652,8 @@ export function renderVerdictResult(r: DispatchOutput): string {
   lines.push(`nextAction: ${r.nextAction}`);
   if (typeof r.rootCause === "string") lines.push(`rootCause: ${r.rootCause}`);
   if (typeof r.decisionQuestion === "string") lines.push(`decisionQuestion: ${r.decisionQuestion}`);
-  if (typeof r.escalationCategory === "string") lines.push(`escalationCategory: ${r.escalationCategory}`);
+  if (typeof r.escalationCategory === "string")
+    lines.push(`escalationCategory: ${r.escalationCategory}`);
   if (typeof r.owningRepo === "string") lines.push(`owningRepo: ${r.owningRepo}`);
   lines.push(`recommendation: ${r.recommendation}`);
   if (typeof r.artifactUrl === "string") lines.push(`artifact: ${r.artifactUrl}`);
@@ -937,6 +965,27 @@ async function execute(
       const data = r.data as { error?: string };
       throw new CliServerError(data.error ?? `cancel failed (${r.status})`);
     }
+    case "steer": {
+      const text =
+        command.text ?? readFileSync(command.file === "-" ? 0 : (command.file as string), "utf8");
+      const r = await request(
+        ctx.fetchFn,
+        base,
+        `/api/jobs/${encodeURIComponent(command.jobId)}/steer`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text }),
+        },
+      );
+      const data = r.data as { ok?: boolean; error?: string; sessionId?: string };
+      if (r.status === 200) {
+        if (options.json) io.out(`${JSON.stringify(data, null, 2)}\n`);
+        else io.out(`steered ${command.jobId}\n`);
+        return 0;
+      }
+      throw new CliServerError(`steer refused: ${data.error ?? `HTTP ${r.status}`}`);
+    }
     case "health": {
       const r = await request(ctx.fetchFn, base, "/api/jobs/health");
       if (r.status !== 200) throw new CliServerError(`health check failed (${r.status})`);
@@ -1124,6 +1173,7 @@ Usage:
   agw status <jobId>                     one-shot job state
   agw wait <jobId>                       block until a job reaches a terminal state
   agw cancel <jobId>                     cancel a pending/running job
+  agw steer <jobId> <text...|--file F>   post new facts into a running dispatch episode
   agw routing                            the model/backend table (GET /api/routing)
   agw policy                             the dispatch repo policy (GET /api/dispatch-policy)
   agw health                             queue health (GET /api/jobs/health)

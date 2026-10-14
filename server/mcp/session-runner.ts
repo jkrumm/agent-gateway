@@ -314,6 +314,14 @@ export interface SessionOptions<T = unknown> {
    * Fire-and-forget; errors are swallowed by the runner, same contract as `onActivity`.
    */
   onSessionId?: (sessionId: string) => void;
+  /**
+   * The caller will re-attach this session after a restart (dispatch worktree episodes: the
+   * worktree is preserved and `recover()` hands the recorded session id back as
+   * `resumeSessionId`). A drain then DETACHES an OpenCode session — leaves it running on the
+   * shared server and throws `SessionDetachedError` — instead of interrupting it. Ignored by the
+   * claude harness (a killed `claude -p` is resumed from its transcript).
+   */
+  reattachable?: boolean;
 }
 
 /** JSON-stringify for diagnostics only. Never throws — a value that cannot be serialized
@@ -1515,8 +1523,13 @@ const activeProcs = new Map<ReturnType<typeof Bun.spawn>, ActiveProcEntry>();
  *  server-side session — exactly as they reach a subprocess through a signal. */
 interface ActiveRemoteEntry {
   jobId: string | undefined;
-  stop: () => void;
+  stop: (reason: RemoteStopReason) => void;
 }
+
+/** Why a remote worker is being stopped: `cancel` is an owner's `job_cancel` (the session must
+ *  die), `drain` is this process going away (a re-attachable session may keep running on the
+ *  server and be re-attached by the next boot — Wave 4). */
+export type RemoteStopReason = "cancel" | "drain";
 const activeRemote = new Set<ActiveRemoteEntry>();
 
 export function activeSessionCount(): number {
@@ -1525,7 +1538,10 @@ export function activeSessionCount(): number {
 
 /** Register a remote (HTTP-driven) worker so `POST /api/jobs/:id/cancel` and a drain can stop it.
  *  Returns the untrack fn; the caller runs it in a `finally` once the session is over. */
-export function trackExternalSession(jobId: string | undefined, stop: () => void): () => void {
+export function trackExternalSession(
+  jobId: string | undefined,
+  stop: (reason: RemoteStopReason) => void,
+): () => void {
   const entry: ActiveRemoteEntry = { jobId, stop };
   activeRemote.add(entry);
   return () => activeRemote.delete(entry);
@@ -1601,7 +1617,7 @@ export function terminateActiveSessions(): string[] {
     }
   }
   for (const entry of activeRemote) {
-    entry.stop();
+    entry.stop("drain");
     if (entry.jobId !== undefined) jobIds.push(entry.jobId);
   }
   return jobIds;
@@ -1627,7 +1643,7 @@ export function terminateSessionsForJob(jobId: string): boolean {
   for (const entry of activeRemote) {
     if (entry.jobId !== jobId) continue;
     signalled = true;
-    entry.stop();
+    entry.stop("cancel");
   }
   if (!signalled) {
     // Not necessarily a bug: the job may still be `pending` (no proc yet — `cancelJob` handles
@@ -1653,6 +1669,17 @@ export class SessionCancelledError extends Error {
   constructor(jobId: string) {
     super(`session cancelled by request (job ${jobId})`);
     this.name = "SessionCancelledError";
+  }
+}
+
+/** Thrown by a re-attachable remote session (OpenCode, `SessionOptions.reattachable`) when a
+ *  drain detached it: the session keeps running on the server and the next boot's `recover()`
+ *  re-attaches it. The handler must leave everything the session is using (its worktree) in
+ *  place — this is not a failure and not a cancel. */
+export class SessionDetachedError extends Error {
+  constructor(jobId: string | undefined) {
+    super(`session detached for a restart (job ${jobId ?? "unknown"}) — re-attached on boot`);
+    this.name = "SessionDetachedError";
   }
 }
 
