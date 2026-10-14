@@ -103,6 +103,49 @@ describe("runCheck — deterministic make check path", () => {
     expect(out.summary).toBe("canned");
   });
 
+  test("with fallow installed and a git remote, fallow audit runs after make check", async () => {
+    await writeFile(join(cwd, "Makefile"), "check:\n\t@echo ran-make-check\n");
+    await Bun.$`git init -q && git remote add origin https://example.com/r.git`.cwd(cwd).quiet();
+    const bin = join(cwd, "bin");
+    await Bun.$`mkdir -p ${bin}`.quiet();
+    await writeFile(join(bin, "fallow"), "#!/bin/sh\necho fail-verdict >&2\nexit 1\n", {
+      mode: 0o755,
+    });
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    const runSessionSpy = spyOnSession();
+    try {
+      const out = await runCheck({ cwd });
+
+      expect(runSessionSpy).not.toHaveBeenCalled();
+      expect(out.passed).toBe(false);
+      expect(out.steps.map((s) => s.name)).toEqual(["check", "fallow"]);
+      expect(out.steps[0]?.passed).toBe(true);
+      expect(out.steps[1]?.errors?.some((e) => e.includes("fail-verdict"))).toBe(true);
+      expect(out.summary).toBe("make check passed; fallow audit --quiet failed (exit 1)");
+    } finally {
+      process.env.PATH = path;
+    }
+  });
+
+  test("without a git remote, fallow is skipped even when installed", async () => {
+    await writeFile(join(cwd, "Makefile"), "check:\n\t@echo ran-make-check\n");
+    const bin = join(cwd, "bin");
+    await Bun.$`mkdir -p ${bin}`.quiet();
+    await writeFile(join(bin, "fallow"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    spyOnSession();
+    try {
+      const out = await runCheck({ cwd });
+
+      expect(out.passed).toBe(true);
+      expect(out.steps).toEqual([{ name: "check", passed: true }]);
+    } finally {
+      process.env.PATH = path;
+    }
+  });
+
   test("an explicit commands param beats the Makefile check target", async () => {
     await writeFile(join(cwd, "Makefile"), "check:\n\t@echo should-not-run\n");
     const runSessionSpy = spyOnSession();
