@@ -26,16 +26,15 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-describe("hasMakeCheckTarget — parses `make -p` for an explicit check rule", () => {
+describe("hasMakeCheckTarget — parses `make -p` for a registered check target", () => {
   // Detection delegates to `make -p`'s database dump rather than `make -q check`'s exit code:
   // exit 0 also fires for a file/dir named `check` (or a recipe-less `check:` target), exit 1
   // for a catch-all `%:` pattern rule, and exit 2 both for "No rule to make target 'check'" and
   // for a genuine `check:` target whose prerequisite has no rule — so no exit code cleanly means
-  // "real target with a recipe". The dump prints a `check:` header only for a registered rule,
-  // and a `#  commands/recipe to execute (from …)` marker only for one that actually has a
-  // recipe, so a `check:`-shaped line inside a `define … endef` block or a disabled conditional
-  // — text, not a rule — is correctly rejected where the old regex matched it and produced a
-  // false red.
+  // "real target". The dump lists registered rules in its `# Files` section (non-targets marked
+  // `# Not a target:`), so a `check:`-shaped line inside a `define … endef` block or a disabled
+  // conditional — text, not a rule — is correctly rejected where the old regex matched it and
+  // produced a false red.
   async function declares(makefile: string): Promise<boolean> {
     await writeFile(join(cwd, "Makefile"), makefile);
     return hasMakeCheckTarget(cwd);
@@ -112,6 +111,10 @@ describe("hasMakeCheckTarget — parses `make -p` for an explicit check rule", (
     // `make check` prints "Nothing to be done" and exits 0 — zero real validation. A `check:`
     // header with no recipe has no `commands/recipe to execute` marker in the database.
     expect(await declares("check:\n")).toBe(false);
+  });
+
+  test("a prerequisite-only `check: lint test` target is detected", async () => {
+    expect(await declares("lint:\n\t@true\ntest:\n\t@true\ncheck: lint test\n")).toBe(true);
   });
 
   test("a `check:` target with an unavailable prerequisite is still detected", async () => {
