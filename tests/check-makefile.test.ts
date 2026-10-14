@@ -1,7 +1,7 @@
 // The deterministic `make check` path: when the repo root Makefile declares a `check:` target
 // that Make itself registers, and the caller passed no `commands`, `runCheck` runs it verbatim as
-// one step (no model session) instead of loading the discovery skill. Detection delegates to
-// `make -q check`; the run is exercised against throwaway Makefiles in a tmp dir with `runSession`
+// one step (no model session) instead of loading the discovery skill. Detection parses
+// `make -p -q`'s database; the run is exercised against throwaway Makefiles in a tmp dir with `runSession`
 // spied on, so "no model call" is asserted rather than assumed.
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
@@ -111,6 +111,15 @@ describe("hasMakeCheckTarget — parses `make -p` for a registered check target"
     // `make check` prints "Nothing to be done" and exits 0 — zero real validation. A `check:`
     // header with no recipe has no `commands/recipe to execute` marker in the database.
     expect(await declares("check:\n")).toBe(false);
+  });
+
+  test("`check` only as another target's prerequisite is not a match", async () => {
+    expect(await declares("all: check\n\t@true\n")).toBe(false);
+  });
+
+  test("a lowercase `makefile` with a check target is detected", async () => {
+    await writeFile(join(cwd, "makefile"), "check:\n\t@echo hi\n");
+    expect(await hasMakeCheckTarget(cwd)).toBe(true);
   });
 
   test("a prerequisite-only `check: lint test` target is detected", async () => {

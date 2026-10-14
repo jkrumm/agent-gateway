@@ -144,7 +144,8 @@ export function makeDatabaseHasCheckTarget(db: string): boolean {
  *  and produced the false red this path exists to avoid. A missing Makefile, a missing `make`,
  *  or a probe that overruns its budget all fall through to the skill path. */
 export async function hasMakeCheckTarget(cwd: string): Promise<boolean> {
-  if (!existsSync(join(cwd, "Makefile"))) return false;
+  // GNU make's own lookup order; any of the three is the repo's Makefile.
+  if (!["GNUmakefile", "makefile", "Makefile"].some((f) => existsSync(join(cwd, f)))) return false;
   if (!Bun.which("make")) return false;
 
   // Same env hygiene as `runStep`: the probe spawns `make` in the server process, so a
@@ -177,7 +178,9 @@ export async function hasMakeCheckTarget(cwd: string): Promise<boolean> {
 
   // Drain stdout concurrently so a large database dump can't block the child (and a spurious
   // timeout) while we wait for it to exit.
-  const stdoutText = new Response(proc.stdout).text();
+  // A read that fails (the timeout branch kills the group mid-dump) resolves empty, so the probe
+  // can only ever produce a false negative — never an unhandled rejection.
+  const stdoutText = new Response(proc.stdout).text().catch(() => "");
   let timer: ReturnType<typeof setTimeout> | undefined;
   const outcome = await Promise.race([
     proc.exited,
