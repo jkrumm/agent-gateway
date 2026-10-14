@@ -423,6 +423,12 @@ from a successful row; the attribution record carries `usageIncomplete: true` (a
 not a completion gate). Killing the `opencode run --standalone` parent reaps its private server and
 tool children (measured 2026-10-13 on 2.0.25) — no process-group kill needed.
 
+**OpenCode v2 server mode is being adopted (waves in `docs/waves/PLAN.md`).** The spawn path
+above is still what runs; the measured server API (sessions, usage per message, interrupt,
+steer, restart re-attach, permission semantics), the chosen design, the Homebrew version pin
+and the upgrade gate (`bun scripts/opencode-v2-probe.ts`) are in `docs/opencode-v2.md`. Never
+`brew upgrade opencode` without that gate.
+
 **A dead IU endpoint must never hang an opencode run.** `opencode run` retries connect errors
 and 5xx forever. `runOpencodeAttempt` therefore probes the IU OpenAI base (`fetch`, abort after
 `AGENT_GATEWAY_OPENCODE_PREFLIGHT_MS`, default 5000; any HTTP response counts as reachable)
