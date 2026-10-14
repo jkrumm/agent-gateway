@@ -181,19 +181,26 @@ warden, agent-gateway and dotfiles. Before editing a repo, check `rd agents` and
 - **Open:** the 2.0.29 upgrade (not decided; gate = `opencode-v2-probe.ts` + `opencode-live-probe.ts`), title generation off, the flaky 5 s timeouts in `tests/review-opencode-config.test.ts` under load.
 
 
-## Wave 3 — native HTTP runner            <!-- status: active -->
-- [ ] Replace the spawn with the HTTP API: create → prompt → wait → messages.
+## Wave 3 — native HTTP runner            <!-- status: done -->
+- [x] Replace the spawn with the HTTP API: create → prompt → wait → messages.
       Replace, don't layer: no CLI fallback path.
-- [ ] Take usage from the message records (exact tokens and cost per turn), so
+- [x] Take usage from the message records (exact tokens and cost per turn), so
       `usageIncomplete` is gone.
-- [ ] Cancel via `interrupt`. Drive the idle watchdog from session/message activity
+- [x] Cancel via `interrupt`. Drive the idle watchdog from session/message activity
       (SSE as a hint only). Keep structured-output parsing.
-- [ ] Update `scripts/opencode-live-probe.ts` and the tests to the new boundary
+- [x] Update `scripts/opencode-live-probe.ts` and the tests to the new boundary
       (a fake server adapter, port/adapter style).
-- [ ] Gate, deploy and verify with the same jobs as Wave 2, plus a cancel mid-run.
-**Left behind:**
+- [x] Gate, deploy and verify with the same jobs as Wave 2, plus a cancel mid-run.
+**Left behind:** shipped in 0185d5a, deployed (`make deploy` → `verify OK … opencode server ok`).
+- **Shape:** `server/mcp/opencode-client.ts` is the port (`OpencodeClient` + zod-typed fetch adapter, `OpencodeHttpError`); `opencode-runner.ts` is `driveOpencodeSession` (prompt → race(`wait`, 3 s activity poll)) + `summarizeOpencodeMessages` + `runOpencodeAttempt`. No child process, no NDJSON, no `--server` CLI, `usageIncomplete`/`computeOpencodeCostUsd`/`assertExtraEnvCarriedByServer`/`OPENCODE_DROPPED_EXTRA_ENV` deleted. Tests use an in-memory `FakeOpencodeClient` (`tests/helpers/`). 1454 tests green.
+- **Cancel/drain:** `trackExternalSession(jobId, stop)` in session-runner; `terminateSessionsForJob`/`terminateActiveSessions` call `stop` → `POST …/interrupt`. Any non-clean exit interrupts too. NOTE for Wave 4: a drain currently interrupts sessions; re-attach needs the drain NOT to interrupt (or `recover()` to `resume:true` after). Sessions carry `metadata.agw.{jobId,tool}` and title `agw <tool>`; `opencodeSessionId` is on the attribution row.
+- **Measured (2.0.25):** the shell tool starts from a SANITIZED env (HOME LOGNAME PATH PWD TERM + OPENCODE_*) — the server's env never reaches it, so `PUT …/environment` is the only channel (research-gateway creds now reach OC review angles; `GIT_DENY_CREDENTIALS_ENV` is delivered per session, no longer in the server env). Blanking server creds per session stays as defense in depth. A session created with a `title` has rollup == message sum (no background title call; delta 0 vs ~9e-5 without). Messages carry assistant `error`/`finish`; idle `outcome` is succeeded|failed|interrupted. The Wave 2 claim "server env reaches the shell" did not reproduce.
+- **Live proof:** `bun scripts/opencode-live-probe.ts` all green (readonly refusals + controls, session env, usage, `terminateSessionsForJob` interrupt with `late.txt` control, 3 concurrent, no lock). Real jobs after deploy: `dispatch investigate` ×2 (167c4a8f, 8f68147b), a `review` with 7 OC angles (244f7bf3; attribution rows e.g. `ses_ec52607a3ffe…`, 17–41 turns, exact tokens/cost; one angle `json_parse`, model behaviour), 3 jobs concurrently, zero `database is locked`. Cancel mid-run: dispatch implement `0730d5bb` → `job.cancel_requested` → `session.opencode_interrupt reason=stop interrupted=true` (`ses_ec51ee75…`) → `job.cancelled`, `/api/session/active` empty after.
+- **Incident:** foreign load never left a gap, so I deployed with `FORCE=1` while only `review` jobs ran (guarded: no dispatch running); `recover()` re-queues reviews once. No dispatch was touched.
+- **Review (job e71fbab6):** fixed the wait-false busy loop starving the watchdog, resumed-session double billing (baseline slice), unreadable-messages collapsing into `no_output`, 403 treated as poll-again, `opts.idleTimeoutMs` ignored, blank/extraEnv ordering. Not taken: a "leaked session" when `setEnvironment` fails (an unprompted idle session holds nothing), splitting the 360-line `runOpencodeAttempt`, the pre-existing session-runner↔opencode-runner import cycle, fallow duplicates in check.ts/dispatch-git.ts.
+- **Open:** `CLAUDE_LOG_DIR` in session-runner is fixed at module load, so attempt tests append fake `session_env` rows to the real `~/.claude/logs` (pre-existing); SSE not used (polling only); 2.0.29 not decided; `tests/review-opencode-config.test.ts` 5 s timeouts passed this run.
 
-## Wave 4 — durable and steerable episodes            <!-- status: pending -->
+## Wave 4 — durable and steerable episodes            <!-- status: active -->
 - [ ] On agw restart, `recover()` re-attaches running OpenCode sessions instead of
       resuming or interrupting them. Prove it by restarting agw mid-dispatch.
 - [ ] Add `POST /api/jobs/:id/steer` (+ MCP tool + `agw steer`), which posts
