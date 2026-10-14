@@ -1,88 +1,245 @@
-# sideclaw — the single worker engine
+# OpenCode v2 — build the platform around the server
 
-**Goal:** sideclaw matches `~/SourceRoot/dotfiles/docs/agent-platform.md` §Sideclaw:
-a model registry, a single-shot `triage` job, safe dispatch git flow, review
-angles off Max where measured equal, and no model id outside `GET /api/routing`.
+**Goal:** agent-gateway runs every OpenCode episode as a session on one agw-owned
+OpenCode v2 server (durable, steerable, interruptible, exact usage). Warden triage
+runs a decision model with rich context, measured in shadow before it decides.
+Routes are picked by measurement (Haiku 5.5 vs the DeepSeek tiers). Every doc that
+described the old spawn model is current. The warden improve loop watches all of it.
 
-**Gate:** `bun run typecheck && bun run lint && bun test` green (`make check` once W3 adds it), plus `/review` on each wave's diff.
+**Gate (every wave):**
+- `make check` green in every repo the wave touched.
+- `/review` on the wave's diff, with findings fixed.
+- **Live verification:** `make deploy && make verify` in each touched repo, plus a
+  real job through the changed path, shown by evidence (job id, session id, ledger
+  row, log line). This uses `@verifier` when the proof is traces or UI. A wave is
+  never `done` on a claim.
 
-**Spec:** `~/SourceRoot/dotfiles/docs/agent-platform.md` — read it first. It wins over older docs here.
+**Autonomy contract.** The owner is not a gate (`brain/wiki` + the global CLAUDE.md
+"no human gates").
+- Waves commit, push, deploy and verify their own work in every repo they touch.
+  All repos here are direct-to-master.
+- Reversible choices are made, written into **Left behind**, and carried forward.
+  Only spend outside the IU budget or a product/business question stops the chain.
+  Haiku on IU's endpoint is IU budget, so it is pre-approved.
+- Do not add friction. No new `ask` permissions, no confirmation steps, no human
+  queues. Every new failure path must self-heal (retry, re-attach, fall back) or
+  fail loud into warden's ledger as an item warden itself can work.
 
-**Deploy is the orchestrator's.** Never run `make reload` / `install-agent` from a wave. A wave whose next step is deploy stops and says so in **Left behind**.
+**Concurrency.** The `warden-improve` tab and warden's own episodes also edit
+warden, agent-gateway and dotfiles. Before editing a repo, check `rd agents` and
+`warden status` for in-flight work on it. Rebase before pushing. Never force-push.
 
-**Consumers:** warden (`warden/scripts/clients/sideclaw.py`) calls `POST /api/jobs`. Keep every existing job contract backward compatible; new fields are additive.
+**Spec order:** this plan > `docs/opencode-v2.md` (written in Wave 1) >
+`~/SourceRoot/dotfiles/docs/agent-platform.md` > older docs.
 
-## Wave 1 — registry, triage job, honest IU errors            <!-- status: done -->
-- [x] `server/lib/models.ts`: one registry (`id`, `wire: anthropic|chat|responses`, `harnesses`, `limit {context, output, minOutput}`, `rate {in, out, cacheRead, source, date}`, `effort`, `jsonObject`, `verified`). Seed it from `routing.ts` and `~/SourceRoot/dotfiles/config/opencode/opencode.json`; mark only ids with probe evidence as verified (deepseek-v4.1-flash, DeepSeek-V4-Flash, claude-sonnet-5, gpt-5.6-terra …). Routing validates every route against it.
-- [x] OpenCode runner accepts any registry id whose `harnesses` include `opencode` (drop the single-model throw at `opencode-runner.ts:~771` and the routing.ts cross-check). `buildOpencodeConfig` emits two providers: `iu-chat` (`@ai-sdk/openai-compatible`) and `iu-responses` (`@ai-sdk/openai`, same base URL) — GPT ids go over Responses only. Probe gpt-6.1-sol over Responses once with a trivial tool call; record the result in the registry (`verified` date or leave unverified).
-- [x] New job `triage`: single-shot via `textComplete` on the `iu-openai` transport, deepseek-v4.1-flash, `response_format: json_object`, `max_completion_tokens ≥ 16000`, zod-validated, one retry. Input `{ prompt, schema }` (caller supplies the schema); exposed on `POST /api/jobs` and as an MCP tool. Move the review **router** onto the same single-shot path.
-- [x] IU error envelopes: a non-zero exit with an `is_error` envelope reports the real cause (e.g. `IU 503: …`), not "exited with code 1 after a success result envelope" (`classifyExitFailure`). An IU 5xx after first output falls back to the route's fallback backend once.
-- [x] Dispatch verdict schema (`jobs/handlers/dispatch.ts`): add `rootCause` (≤80 chars, a stable kebab key) and `decisionQuestion` (≤200, only when `nextAction=human`); cap `verdict` ≤600 and `recommendation` ≤400; `summary` stays ≤200. Update `server/skills/dispatch/_common.md` to demand terse output.
-**Left behind:** (4 commits d6f507b..HEAD, all uncommitted-to-deploy — **server not reloaded**; the running build still has the old `classifyExitFailure`, so `check`/`review` jobs can still die with "exited with code 1 after a success result envelope" until the orchestrator runs `make reload`; the MCP process also needs `/mcp` reconnect to see the new `triage` tool.)
-- Registry `server/lib/models.ts`; unverified/unknown ids refused in routing (env overrides) and at `POST /api/jobs` for **any** tool with a string `model` param (400 `<tool> refused: model X is not a verified registry model`). Warden's escalation model (DeepSeek-V4-Pro) is unverified → refused until probed. gpt-6.1-sol verified 2026-10-02 over Responses (tool call); deepseek-v4.1-flash `json_object` probed 2026-10-02. Unprobed: `@ai-sdk/openai` Responses inside real `opencode run` (no episode run).
-- `triage` job (`POST /api/jobs` tool `triage`, params `{prompt, schema}` JSON Schema, MCP tool + `sideclaw triage` CLI); review router now single-shot (not cancellable mid-call). Triage caller prompt is not fenced (it is the task itself).
-- 5xx-after-output fallback is read-only/`retryAfterOutput` sessions only — write tiers (implement) excluded (half-applied worktree); dispatch boot-resume + forced fallback passes a resume id (pre-existing, makes it useless there).
-- Dispatch verdict: `rootCause`/`decisionQuestion` optional (compat with warden's schema-version 3 pin; no version bump); human-without-question only logs a warning; `DISPATCH_OUTPUT` keeps loose caps, worker-side caps are tight and normalized leniently.
-- `bun run typecheck` checks nothing (`tsconfig.json` has `files: []`); real check is `tsc -p tsconfig.server.json --allowImportingTsExtensions` — ~85 pre-existing errors (e.g. `DispatchTier` re-export, `executor.ts:44`). Fix in W3 with `make check`.
-- Open review items not done: `buildRoutingTable` override-validation duplication + stale "accepted" entry when model+harness overrides conflict (routing.ts ~547); `getModel(...) as ModelEntry` repeated; opencode default effort hardcoded `"high"`; fallow clones between opencode-runner/session-runner and unused exports; test gaps (triage over-limit inputs, `dispatch.human_without_question` e2e, `addUsage` null cost).
-- Intermediate commits d6f507b/062b646/3ebe193 may not typecheck alone (registry↔routing coupling); HEAD is green (1033 tests, lint 0 errors, oxfmt clean).
+## Established facts (2026-10-14, researched; do not re-derive)
 
-## Wave 2 — dispatch git safety            <!-- status: done -->
-- [x] Read tiers fetch `origin/<default>` and cut from it, not the live checkout HEAD (landed 12fa41b).
-- [x] `revisionOf: <branch>` parameter on implement: the handler (which has credentials) fetches the prior branch and cuts the worktree from it; the worker never fetches. Same PR is updated (push to the same `dispatch/*` branch with `--force-with-lease`), no new PR per revision.
-- [x] Before push: fetch, rebase onto the latest default branch, re-run the repo checks; a conflict fails the job with `conflict` (caller re-dispatches) — never hand-resolved by the worker.
-- [x] New job `update_pr {repo, pr}`: rebase a `dispatch/*` PR onto the latest base, re-run checks, force-with-lease push; returns the new head SHA + check result. This is warden's merge-train primitive.
-- [x] Per-repo lease for implement episodes across all callers (MCP, CLI, warden), not only in-place ones.
-**Left behind:** (**server not reloaded, MCP not reconnected** — `make reload` + `/mcp` reconnect needed for `update_pr`, `revisionOf` and the `conflict`/`pr_updated` outcomes; deploy is the orchestrator's.)
-- **Warden coordination needed before/with deploy:** `DISPATCH_SCHEMA_VERSION` stays 3 on purpose (a bump makes warden's pin refuse every verdict). New outcomes `conflict` (can occur on ANY implement episode now) and `pr_updated` must be handled in `warden/scripts/clients/sideclaw.py`, then bump to 4 in one step.
-- `update_pr` takes `cwd` (like dispatch), not `repo`; CLI `sideclaw update-pr --repo R --pr N` resolves the name. Result: `{status: updated|up_to_date|conflict, headSha, previousHeadSha, baseSha?, checks?{passed,summary,failed?}, prUrl}`; `checks.passed` = not-blocking (fallow-only failures are advisory, as in dispatch); no check run when `up_to_date`; red checks are still pushed.
-- Lease is per **repo**, not per branch, and **refuses** (does not queue) a second implement/`update_pr`: warden must retry a refused job. Per-branch locking for many parallel `update_pr`s is a possible follow-up (review discussion). A resumed-after-boot dispatch row that races another for the same repo fails with the same refusal.
-- Rebase fetch of the default branch is mandatory (offline → job fails, retry); `createWorktree`'s own fetch stays best-effort. Conflict bundles the episode's commits in the salvage dir (path in the verdict note).
-- `revisionOf` PR lookup: GitHub path (`findOpenPullRequest`/`getPullRequest`) is untested live (octokit); the GitLab path is tested through a stubbed `glab`. Not covered: `depositBranch`'s `pr_updated` outcome end-to-end (needs a forge), two concurrent worktree `runDispatch` calls (identity resolution precedes the lease and needs a forge; lease logic itself is unit-tested).
-- Not done from review (judgment): extracting `runRepoCheck`/`checksBlockPush` out of `dispatch.ts` into a shared module; splitting the forge adapter out of `dispatch-git.ts` (~1900 lines); `GET /api/update-pr-schema`; discriminated-union output schema; runDispatch complexity. W3 `make check` should own the fallow findings.
-- Gate: 1065 tests pass, lint 0 errors, tsc (`tsconfig.server.json`) 66 errors all pre-existing (down from 75; none new). `tests/jobs-submit-model.test.ts` still fails `oxfmt --check` (W1 leftover, untouched).
+**OpenCode v2 server and API**
+- Installed `opencode` 2.0.25 (Homebrew). npm latest is `@opencode/cli` 2.0.29.
+- The v2 client packages are `@opencode/client`, which talks to a server over HTTP,
+  and `@opencode/sdk`, an in-process host with no listener. `@opencode-ai/sdk` is
+  still 1.19, so do not use it.
+- Release notes exist only from v2.0.26, at https://opencode.ai/changelog.
+  - Migration guide: https://opencode.ai/v2/docs/migrate-v1/
+  - Client docs: https://opencode.ai/v2/docs/build/client
+- v2 runs one shared background server per user (`opencode serve --service`, port
+  49374, password, registered at `~/.local/state/opencode/service.json`).
+  `--standalone` gives each invocation its own private server; `--server <url>`
+  targets a given server.
+- The OpenAPI spec is at `opencode api GET /openapi.json`; plain curl gets 401, so
+  use `opencode api` for auth. It is labelled "experimental 0.0.1". The
+  operations that matter:
+  - `POST /api/session`: `{location:{directory}, model, agent, permissions, metadata, parentID, title, id}`.
+  - `POST /api/session/{id}/prompt`: `{text, files, agents, skills, metadata, delivery: steer|queue, resume, id}`.
+    The spec describes it as "durably admit one session input and schedule
+    agent-loop execution".
+  - `POST /api/experimental/session/{id}/wait`: block until idle.
+  - `POST /api/session/{id}/interrupt?resume=`.
+  - `GET /api/session/active`, `GET /api/session/{id}/inbox`, `GET /api/session/{id}/message`, `GET /api/session/{id}/diff`.
+  - `PUT /api/session/{id}/environment`: the shell env for that session.
+  - `POST /api/session/{id}/background`, `POST /api/session/{id}/fork`, `POST /api/session/{id}/compact`.
+  - `/api/worktree`, `/api/vcs/diff`, `/api/permission/request`, `/api/form`.
+  - `GET /api/event` (SSE). The spec calls it "volatile by contract": slow
+    consumers are dropped and nothing is replayed. Use it for liveness only.
+    Correctness comes from messages, `session/active` and `wait`.
+- State lives in SQLite `opencode.db`, which `OPENCODE_DB` relocates.
+  `XDG_CONFIG_HOME` / `XDG_DATA_HOME` scope config and data.
+- v2 config keys are plural (`providers`, `permissions`, `agents`, `mcp.servers`).
+  Packages are `aisdk:@ai-sdk/...` or `@opencode/ai/providers/...`. The v1 schema
+  still loads (it is normalized) but is legacy.
 
-## Wave 3 — review off Max, repo contract, one source for model ids            <!-- status: done -->
-- [~] Per-angle route keys (keys done; A/B NOT run — see Left behind) (`review_angle_<name>`, default = current). A/B senior-dev, typescript, frontend, qa on OpenCode deepseek-v4.1-flash `high` against Sonnet over ≥5 recent real PR diffs; adopt an angle only where findings are equal or better; record the comparison in `docs/routing-and-quota.md`. Synthesis, security and architect stay Sonnet.
-- [x] Repo contract (spec §Repo contract): Make targets `check`, `deploy` (= the current reload/install path, with health check and rollback to the previous commit on failure), `verify` (`/api/health` + `/api/jobs/health` no degraded routes), `logs`; AGENTS.md sections `## Validate`, `## Deploy`, `## Verify & Monitor`, `## Gotchas`.
-- [x] Remove every model id from prose (AGENTS.md, README, `server/skills/review/README.md`, `docs/agent-overview-internals.md`, `dispatch.ts` param descriptions, `.env.example`) → "see `GET /api/routing`". Move the dated history comments out of `routing.ts` into `docs/routing-and-quota.md`.
-- [x] Fix `warden-board.ts` schema (allow `repo: null`) so the 18k `warden.board_unavailable` warnings stop.
-**Left behind:** (4 commits 71377b5..4a2dfc1; **server not reloaded, MCP not reconnected** — new `review_angle_*` keys and the warden-board fix are not live until the orchestrator runs `make reload`; deploy is the orchestrator's.)
-- **Open: the angle A/B was not run, no angle left Max.** Keys `review_angle_{senior_dev,typescript,frontend,qa}` exist (default = `review`, behavior unchanged). The A/B needs the keys live (reload), and an OpenCode angle has gaps to close first — no Max fallback on an overridden angle; no `opencode.json`/`.opencode/` strip in review's cwd (a plugin in the reviewed branch executes); OpenCode `readOnly` denies only `edit` (Bash/web stay allowed); `settingSources` ignored. Detail in `docs/routing-and-quota.md` §Per-angle review routes → "A/B status". Follow-up wave: fix those, reload, run the ≥5-diff comparison, adopt per angle.
-- Bug fixed beyond the brief: opencode-only model + `claude` harness override reverted the model but left the implied Max→IU backend switch (Max-default routes would run the default model on IU with no fallback). `buildRoutingTable` now undoes it; pinned by a test.
-- Repo contract: `make check` = oxfmt --check + oxlint + `bun test` (green: 1072 tests, 0 lint errors). tsc is deliberately NOT in it (server ~66 pre-existing errors; frontend tsc fails on a cross-project include) — fixing tsc is still open. `make deploy` (`scripts/deploy.sh`) = reload + verify (5 retries); rollback only on a clean tree via `git switch --detach HEAD~1` + reload (leaves the checkout detached, loudly); not exercised (it reloads). `make verify` and `make logs` were run and work. AGENTS.md has Validate/Deploy/Verify & Monitor/Gotchas; Kuma monitor and OTel `service.name`: none exist.
-- Prose model ids removed from AGENTS.md, README, review README, agent-overview-internals, `.env.example`, dispatch param description; `.claude/skills/claude-cli/references/*.md` left (CLI reference). `routing.ts` history comments moved to `docs/routing-and-quota.md` §Route history.
-- `warden-board`: `repo` nullable (item + render `—`); test added. Not live until reload.
-- **Review not obtained:** sideclaw `review` ran 8 angles but synthesis died with "OAuth session expired" (Max auth) → `needs-human`, no findings; the earlier `check` job failed with the known `is_error` envelope. Gate was run directly: `make check` green. Re-run `/review` on 71377b5..4a2dfc1 after reload / Max re-auth. Unreviewed risk is highest in the `buildRoutingTable` refusal-branch fix and `scripts/deploy.sh`.
-- Docs not touched: `docs/deployment.md` doesn't mention `make deploy`.
+**Today's agw path**
+- agw spawns `opencode run --standalone -m … --format json` per attempt
+  (`server/mcp/opencode-runner.ts:129`), with config in `OPENCODE_CONFIG_CONTENT`.
+- It works around three problems: "database is locked" between concurrent
+  standalone servers (`:745`, `:1114`), the lost final `step_finish`
+  (`usageIncomplete`), and a 5-minute idle watchdog with SIGTERM/SIGKILL.
+- The 2026-10-11 brew upgrade broke every dispatch (warden JOURNAL:96).
+  OpenCode's version must be pinned, and upgrades must be gated on
+  `scripts/opencode-live-probe.ts`.
 
-## Wave 4 — review angles off Max, measured            <!-- status: done -->
-Needs Max auth working on the mini (synthesis + the Sonnet baseline).
-- [x] Close the OpenCode-angle gaps from W3's Left behind: Max fallback on an overridden angle, strip `opencode.json`/`.opencode/` in review's cwd, a true read-only OpenCode profile (deny edit + bash-writes), `settingSources` parity.
-- [x] A/B `review_angle_{senior_dev,typescript,frontend,qa}` on OpenCode vs Sonnet over ≥5 recent real diffs (warden/sideclaw/weatherorb PRs); record the table in `docs/routing-and-quota.md`; adopt per angle only where equal or better.
-- [x] Fix the `tsc` errors so `make check` can include typecheck.
-- [x] Add route `dispatch_implement_escalation` (warden reads `routes.dispatch_implement_escalation.model` from `GET /api/routing` for attempt 3+): probe DeepSeek-V4-Pro and gpt-6.1-sol as OpenCode implement workers on one real brief each, mark the winner verified, route it.
-**Left behind:** (commits 68ae512..HEAD; **server must be reloaded** (`make deploy`) for the new angle defaults, the `dispatch_implement_escalation` route and the registry change to go live; MCP reconnect not needed — no tool schema changed.)
-- **Angles adopted off Max: senior-dev, typescript, qa** (OpenCode, cheap model, `high`, Sonnet-on-Max reverse lane); **frontend stays on Max** (recall tied 58%, fp 12.5% vs 0%). 7 real diffs (sideclaw/warden/weatherorb), 0 failed runs, 0 fallbacks; cost per angle over the set ~$0.02-0.14 vs $0.61-3.49. Table + rule + re-run recipe in `docs/routing-and-quota.md` §Review-angle A/B. Caveats: one blind Sonnet judge, one run per cell, recall advantage is mostly improvement-level findings (blocking 4 vs 4). Pin an angle back with `SIDECLAW_MODEL_/BACKEND_/HARNESS_REVIEW_ANGLE_<NAME>` (tested). Security and architect angles, synthesis, router untouched.
-- **OpenCode angle gaps closed:** Max fallback, ref-mode strip of `opencode.json`/`.opencode/`, scope-mode angle falls back to the claude route when the live checkout carries opencode config, true read-only profile (default-deny bash allowlist, webfetch/websearch denied). Review (8 angles) found allowlist bypasses (curl -o/-T/-K, rg --pre, git --output, find -exec) — fixed. Residuals: combined short flags like `curl -fsSLo f` are not matched by the deny globs; `curl` can still POST data out (research-gateway recipe needs it); scope `uncommitted` builds a compound printf/xargs diff command the allowlist blocks (ranges, `head`, `pr`, `branch` are fine).
-- **tsc:** server + frontend typecheck with 0 errors; `bun run typecheck` is now real and part of `make check` (1083 tests green). Review's claimed TS6304/TS6306 composite breakage is false (`make check` passes).
-- **Escalation route:** `routes.dispatch_implement_escalation` = DeepSeek-V4-Pro, OpenCode `max`, no fallback — read by warden for attempt 3+. Probe (2 replayed implement briefs, one run each): V4-Pro 2/2 pass, 5-8 turns, 51-70 s, ~$0.06; gpt-6.1-sol 2/2 pass but 594-1330 s (one idle-watchdog hit), ~$0.32-0.39; flash 2/2 pass, 31-97 s, ~$0.01. Honest read: the briefs were easy, flash passed them too — the evidence picks V4-Pro as the best *escalation* candidate (cheap, fast, no stall), not that escalation beats flash. Thin sample (n=2) on a no-fallback route; re-probe on a brief flash fails. `scripts/probe-implement.ts` / `scripts/ab-review-angles.ts` need `IU_API_KEY`/`IU_BASE_URL` in env (Keychain unreadable headless: `secrets-run read op://common/anthropic/API_KEY|BASE_URL`).
-- **Not done (review improvements, 15 + 4 test gaps):** left in the review result, not applied — notably tests for `opencodeRepoConfigPresent` refusal and ref-mode strip wiring in review.ts, `.catchall` behavior in warden-board, kiosk status refactor. `fallow` still reports unused files/exports (scripts, `server/mcp/tools/dispatch.ts` false positive) — not gating. dotfiles `docs/agent-platform.md` status row still says "review angles off Max still pending (W4)" — update it (outside this repo).
-## Wave 5 — review fixes            <!-- status: done -->
-From the `/review` of `062b646~1..9205e38` (2026-10-05). Fix, `make check`, `/review` the fix diff.
-- [x] `scripts/deploy.sh`: roll back only when reload succeeded and verify failed; a reload refusal (running jobs, plist drift) aborts with exit 1 and no rollback.
-- [x] `dispatch.ts` `DispatchTier` TS2304 (fold into W4's tsc step if not done there).
-- [x] `triage` jobs honour cancel: thread a cancel predicate through `singleShotJson` (checked before the retry) and pass `isCancelRequested` in executor.ts.
-- [x] GitLab `findOpenPullRequest`: require `sameRepo` (fork MR with the same branch name must not be "the existing PR").
-- [x] `repo-lease.ts`: guard `realpathSync` like the release path. `single-shot.ts`: skip the dead retry-prompt work on the last attempt.
-- [x] `session-runner.ts`: derive the 5xx regex from `SERVER_ERROR_STATUSES`, drop the unreachable alternative; replace the nested ternary at ~1185.
-- [x] Move `runRepoCheck`/`checksBlockPush`/`renderFailedChecks` out of dispatch.ts into a shared module next to check.ts (update-pr.ts stops importing dispatch.ts). Extract the verdict-schema cluster into `dispatch-verdict.ts`.
-- [x] `routing.ts`: `requireModel()` helper instead of `getModel(...) as ModelEntry` casts.
-- [x] Test gaps: executor routes `update_pr`; MCP `update_pr` registration; HTTP refusal of a disallowed cwd for `update_pr`; CLI `update-pr` render + exit codes for `conflict`/`up_to_date`.
-- Deferred, owner call: typed `DispatchRefusal` instead of string-matched refusal messages; `buildRoutingTable` resolve-then-validate restructure.
-**Left behind:** (**server not reloaded** — `make deploy` is the orchestrator's; no tool schema changed, no MCP reconnect.)
-- Gate: `make check` green (1133 tests, 0 lint errors, tsc 0). `/review` of the wave diff found 2 blocking (deploy.sh rollback after a post-restart reload failure; repo-lease raw-cwd fallback) — both fixed, plus 7 improvements and 4 test gaps; the fix round itself was not re-reviewed.
-- `deploy.sh`: refusals are now `scripts/reload-preflight.sh` (exit 3; make collapses recipe failures to exit 2, so it can't be read off `make reload`). Refusal → exit 1, no rollback; any later reload/verify failure → rollback on a clean tree. Tested with stubbed make (`tests/deploy-script.test.ts`).
-- Beyond the brief: `warden-board.ts` was parsing warden's OLD states and rejecting the real board (schema 15: new/triaged/working/merging/verifying/needs_decision/failed) — fixed, header is now `needs_decision · failed · in flight`; docs/code drift in AGENTS.md, README, agent-overview-internals, dispatch-security, routing-and-quota corrected. `hermes-agent` lifted to the permissive default (implement) in `dispatch-policy.ts`; brain and the two private repos unchanged. Takes effect on reload — warden's 'dispatch refused: tier' items retry then.
-- W4 Left behind: added tests for `opencodeRepoConfigPresent`, ref-mode strip wiring (review.ts) and warden-board `.catchall`. Kiosk status refactor not done.
-- Open, owner call: CLI `update-pr` prints raw JSON and exits 0 on `conflict` (a successful job) — callers must read `.status`; `dispatch.ts` is still ~1540 lines (`runDispatch` ~470, split push/in-place paths); opencode-runner ↔ session-runner import cycle + clones; `DispatchRefusal` typed errors; `buildRoutingTable` restructure; the outcome `.describe()` in the published verdict schema now names dispatch-verdict.ts.
+**Shared-service credentials (suspected break)**
+- The shared service (pid observed up for 3 days) lists providers `iu`/`iu-responses`
+  with no API key. It doesn't have `_oc_env`'s environment.
+- So interactive `oc` and `rd wave --kind opencode` panes that attach to it are
+  likely unauthenticated. This is not verified.
+
+**Models**
+- agw routes `dispatch`/review angles to `iu/deepseek-v4.1-flash`, with
+  `DeepSeek-V4-Pro` as the attempt-3 escalation. `check` runs `claude-haiku-4-5`
+  over IU.
+- "DeepSeek V4.1 Pro" does not exist.
+- Haiku 5.5:
+  - List price $0.10/$0.50 per M; above 100K prompt it is 5× ($0.50/$2.50).
+    Cache read 0.1×.
+  - Terminal-Bench 4.0 33–36% vs V4.1-Flash 31.2 (vendor figure).
+  - 1M context, 128K output.
+- On IU it is `claude-haiku-5-5-eu` (Bedrock eu) on the native `/anthropic` leg,
+  as hermes-agent uses it (see `hermes-agent/AGENTS.md:393`). It is not in `/v1/models`.
+- In OpenCode, use an anthropic provider package so OpenCode injects `cache_control`.
+
+**Decision models**
+- email-gateway's Jev lane is the reference (`email-gateway/src/llm/jev.ts`, README §Jev).
+  - It uses the AI SDK's experimental `decide` with `@ai-sdk/typesafe-ai`
+    (`createTypeSafeAi({baseURL, apiKey}).decisionModel(id)`) against IU's
+    `POST /decisions/v1/systemone`.
+  - Models: `pplx-decider-v1-27b` ($0.04/M) and `decision-1-eu`. Other ids come
+    from `GET /decisions/v1/models`.
+  - Typed answers come with calibrated confidence. The model generates no text and
+    cannot search, so context quality is everything.
+  - Clef via Workers AI truncates state at about 2K tokens.
+
+**Warden triage today**
+- Jaccard ≥ 0.8 dedupe (`scripts/loop/intake.py:68`).
+- Alert fingerprints (`scripts/watchdog-poll.py:814`).
+- A single-shot LLM `triage` job answering attach / new / fixed_by / ignore
+  (`scripts/lifecycle/intake.py:21`), plus the post-merge fixed_by sweep (`:36`).
+- rootCause merge.
+- One implement per repo: `scripts/lifecycle/policy.py:196`, plus the agw repo lease.
+- There are no embeddings anywhere, and none are needed at this scale.
+
+## Wave 1 — measure v2 server mode for real            <!-- status: active -->
+- [ ] Write `scripts/opencode-v2-probe.ts`. It starts a **dedicated** `opencode serve`
+      (own port, own `XDG_CONFIG_HOME`, own `OPENCODE_DB`, IU credentials from agw's
+      env) and measures:
+      - a session created with location, model and permissions
+      - prompt → wait → message list, including per-turn tokens and cost
+      - 5 concurrent sessions in different worktrees (no db lock)
+      - interrupt, and `delivery: steer` into a running session
+      - SSE event names and shapes
+      - **durability:** kill the server mid-run, restart it, and record whether the
+        session resumes or what state it is left in
+      - permission behaviour when a tool is denied
+- [ ] Decide `@opencode/client` vs a thin typed fetch over the OpenAPI spec. Base it on
+      Bun compatibility and the version churn, and record why. Then decide supervision:
+      launchd plist vs an agw-supervised child process.
+- [ ] Verify the suspected shared-service credential break for `oc` / `rd wave --kind opencode`.
+      If it is real, fix it in dotfiles: `opencode service set env`, or credentials
+      through `/api/credential`, with no secret in git. Verify a pane gets a real reply.
+- [ ] Write `docs/opencode-v2.md`: the measured facts, the chosen design, and the version
+      pin and upgrade gate. Link it from AGENTS.md.
+**Left behind:**
+
+## Wave 2 — agw owns its server; episodes attach with `--server`            <!-- status: pending -->
+- [ ] Add a server lifecycle as the Wave 1 design chose: start, health, restart on
+      crash, and a version pin with the live probe as the upgrade gate. Expose server
+      health on `/api/jobs/health` and `make verify`.
+- [ ] Switch `--standalone` to `--server <agw server>`, keeping the JSON-stream parser
+      for now. Move per-run config onto session/agent level wherever v2 allows it.
+- [ ] Delete the db-lock retry and any other workaround the server makes obsolete,
+      but only where it is measured as unneeded.
+- [ ] Gate, deploy and verify: a real `dispatch investigate`, a `review` with 3 OC
+      angles, and 3 concurrent jobs, all with no lock error.
+**Left behind:**
+
+## Wave 3 — native HTTP runner            <!-- status: pending -->
+- [ ] Replace the spawn with the HTTP API: create → prompt → wait → messages.
+      Replace, don't layer: no CLI fallback path.
+- [ ] Take usage from the message records (exact tokens and cost per turn), so
+      `usageIncomplete` is gone.
+- [ ] Cancel via `interrupt`. Drive the idle watchdog from session/message activity
+      (SSE as a hint only). Keep structured-output parsing.
+- [ ] Update `scripts/opencode-live-probe.ts` and the tests to the new boundary
+      (a fake server adapter, port/adapter style).
+- [ ] Gate, deploy and verify with the same jobs as Wave 2, plus a cancel mid-run.
+**Left behind:**
+
+## Wave 4 — durable and steerable episodes            <!-- status: pending -->
+- [ ] On agw restart, `recover()` re-attaches running OpenCode sessions instead of
+      resuming or interrupting them. Prove it by restarting agw mid-dispatch.
+- [ ] Add `POST /api/jobs/:id/steer` (+ MCP tool + `agw steer`), which posts
+      `delivery: steer` into the episode's session.
+- [ ] Warden: where a running episode needs new facts (a CI failure, a review finding
+      during a revision, an owner answer), steer instead of kill-and-restart wherever
+      the episode is still live. Measure the revision rounds and cost saved.
+- [ ] Gate, deploy (agw + warden) and verify: a live steer changes a running episode's
+      outcome, shown by evidence.
+**Left behind:**
+
+## Wave 5 — routes by measurement            <!-- status: pending -->
+- [ ] Add a Haiku 5.5 OpenCode provider on IU's native `/anthropic` leg using the
+      anthropic package, so caching works. Confirm cache reads in the usage records.
+- [ ] Move `check` to Haiku 5.5 if it holds the measured `make check` timing.
+- [ ] Bench `dispatch` / `dispatch_implement` / review angles on a fixed real task set
+      (modelpick or an agw script): `deepseek-v4.1-flash` vs Haiku 5.5 vs `DeepSeek-V4-Pro`.
+      Measure pass rate, cost (mind the >100K surcharge), wall time and cache hits.
+      Set routes from the data, with route history. Model ids live only in `GET /api/routing`.
+- [ ] Convert dotfiles `config/opencode/opencode.json` (+ `mini.json`) to the v2 schema
+      and sync its model rows with agw's registry.
+- [ ] Gate, deploy and verify through `GET /api/routing` plus one real job per changed route.
+**Left behind:**
+
+## Wave 6 — decision model for warden triage, in shadow            <!-- status: pending -->
+- [ ] Add an agw `decide` job/route using `@ai-sdk/typesafe-ai` on IU's decision API,
+      mirroring email-gateway's Jev lane, including cost computation and usage records.
+      Warden calls it through its agw client.
+- [ ] Build the **context**, which is the whole game because the model cannot search:
+      the incoming item, every same-repo candidate (title, summary, rootCause, state,
+      linked PR/branch, last activity), the recent merged PRs for the fixed_by sweep,
+      and the repo's one-line purpose. Budget it per model's context and log what was
+      truncated.
+- [ ] Add questions for the triage action (attach/new/fixed_by/ignore), the attach
+      target (a choice over candidate ids) and fixed_by (per waiting item). Run them in
+      **shadow** next to the LLM triage, recording both answers plus confidence in the
+      ledger.
+- [ ] Compare `pplx-decider-v1-27b`, `decision-1-eu` and the other listed models on
+      replayed ledger history (closed items are labelled ground truth). Pick a default
+      by agreement and cost. Write the promotion rule, e.g. ≥ N shadow items at ≥ X%
+      agreement, then the decision model decides above confidence C with LLM fallback
+      below.
+- [ ] Gate, deploy and verify: real intake items show shadow decisions in the ledger.
+**Left behind:**
+
+## Wave 7 — no stale word left            <!-- status: pending -->
+- [ ] Update every doc that describes the old spawn model or the DeepSeek-only tiers.
+      Known list:
+      - agent-gateway `docs/routing-and-quota.md`, `README.md`, `AGENTS.md`
+      - brain `wiki/engineering/{agent-harness,model-routing}.md`, `projects/agent-gateway.md`
+      - dotfiles `docs/{opencode,agent-platform,agents-md}.md`
+      - `docs/diagrams/agent-platform.architecture.json` + `dispatch-path.sequence.json`:
+        regenerate the HTML and copy it to `jkrumm.com/public/diagrams/`
+      - `brain/wiki/career/dossier.md` stack line
+- [ ] Do a deep sweep for anything missed: `Explore` across all repos for `--standalone`,
+      `opencode run`, `usageIncomplete`, `database is locked`, `OPENCODE_CONFIG_CONTENT`,
+      `opencode-safe`, `deepseek`, `step_finish`, "spawns". Warden JOURNAL is history;
+      leave it.
+- [ ] Re-read warden `DESIGN.md`/`STATE.md` and hermes-agent's dispatch skill against
+      the new episode model (steer, durability, the 5-min watchdog text).
+- [ ] Gate (`make check` in dotfiles runs the architecture check), commit per repo,
+      deploy and verify jkrumm.com.
+**Left behind:**
+
+## Wave 8 — hand the platform to the improve loop            <!-- status: pending -->
+- [ ] Extend warden `docs/improve/LOOP.md` measurement with:
+      - OpenCode server health and restarts
+      - sessions re-attached after agw restarts
+      - steers per episode and their effect
+      - decision-model shadow agreement and confidence
+      - per-route cost and pass rate
+      - promoting the decision model when Wave 6's rule is met
+- [ ] Run one real item end to end through warden (intake → decision shadow → dispatch
+      on the server → steer → review → merge train → deploy → verify) and record the
+      evidence in `docs/opencode-v2.md`.
+- [ ] Tell the `warden-improve` tab about the new measurements with `rd say`, and
+      confirm it acts on the next trigger.
+**Left behind:**
