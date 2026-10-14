@@ -92,8 +92,9 @@ export type CheckOutput = z.infer<typeof CHECK_OUTPUT>;
 // among the per-tool targets, so a worker hand-picks raw `bun run typecheck`/`lint` and fails on
 // the missing deps rather than on the diff — a correct PR goes red. When the caller passed no
 // explicit `commands` and the repo root Makefile declares a real `check:` target, run it
-// verbatim instead: one deterministic step, no LLM, no ecosystem sniffing, so the verdict is the
-// repo's own contract rather than the model's guess at a step list.
+// verbatim instead, followed by the same `fallow audit` the skill path runs: deterministic steps,
+// no LLM, no ecosystem sniffing, so the verdict is the repo's own contract rather than the
+// model's guess at a step list.
 
 /** Whether a Makefile declares a real `check:` target. Anchored at a line start so a substring
  *  like `precheck:` or `check-all:` never counts, and a `# check:` comment never does either.
@@ -133,26 +134,37 @@ function makeCheckErrorLines(output: string): string[] {
     );
 }
 
-/** Run the repo's own `make check` as one deterministic step. No worker session and no model
- *  call — the exit code is the verdict and the output tail is the error detail, exactly the
- *  shape the skill path produces, minus the model's judgement. Idle-watchdogged (never a
+type CheckStep = CheckOutput["steps"][number];
+
+/** One deterministic step's verdict and its one-line summary fragment. */
+interface StepResult {
+  step: CheckStep;
+  summary: string;
+}
+
+/** Run one command (`make check`, `fallow audit`) as a deterministic step. No worker session and
+ *  no model call — the exit code is the verdict and the output tail is the error detail, exactly
+ *  the shape the skill path produces, minus the model's judgement. Idle-watchdogged (never a
  *  wall-clock ceiling) and registered for `POST /api/jobs/:id/cancel`, like every other child. */
-async function runMakeCheck(
+async function runStep(
+  argv: string[],
+  name: string,
   cwd: string,
   idleSeconds: number,
   jobId: string | undefined,
   isCancelled: ((jobId: string) => boolean) | undefined,
   onProgress: ProgressSink | undefined,
-): Promise<CheckOutput> {
+): Promise<StepResult> {
+  const label = argv.join(" ");
   const idleMs = idleSeconds * 1000;
   // A worker session scrubs credential-shaped env before its `claude -p` spawn; this path
-  // spawns `make` directly in the server process, so it needs the same scrub — a `check`
+  // spawns the command directly in the server process, so it needs the same scrub — a `check`
   // target in an untrusted dispatch worktree must not be able to read the LaunchAgent's tokens.
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
   scrubSensitiveEnv(env);
 
-  const proc = Bun.spawn(["make", "check"], {
+  const proc = Bun.spawn(argv, {
     cwd,
     stdin: "ignore",
     stdout: "pipe",
@@ -209,17 +221,13 @@ async function runMakeCheck(
   };
 
   try {
-    onProgress?.({ turns: 0, lastAction: "make check", lastActivityAt: Date.now() });
+    onProgress?.({ turns: 0, lastAction: label, lastActivityAt: Date.now() });
     await Promise.all([drain(proc.stdout), drain(proc.stderr)]);
     const exitCode = await proc.exited;
     if (cancelled) throw new SessionCancelledError(jobId ?? "check");
 
     if (!idleKilled && exitCode === 0) {
-      return {
-        passed: true,
-        steps: [{ name: "check", passed: true }],
-        summary: "make check passed",
-      };
+      return { step: { name, passed: true }, summary: `${label} passed` };
     }
     const errors = idleKilled
       ? [
@@ -228,18 +236,14 @@ async function runMakeCheck(
         ]
       : makeCheckErrorLines(tail);
     return {
-      passed: false,
-      steps: [
-        {
-          name: "check",
-          passed: false,
-          errors:
-            errors.length > 0 ? errors : [`make check failed (exit ${exitCode}) with no output`],
-        },
-      ],
+      step: {
+        name,
+        passed: false,
+        errors: errors.length > 0 ? errors : [`${label} failed (exit ${exitCode}) with no output`],
+      },
       summary: idleKilled
-        ? `make check failed: no output for ${idleSeconds}s`
-        : `make check failed (exit ${exitCode})`,
+        ? `${label} failed: no output for ${idleSeconds}s`
+        : `${label} failed (exit ${exitCode})`,
     };
   } finally {
     clearInterval(watchdog);
@@ -249,6 +253,48 @@ async function runMakeCheck(
     if (sigkillTimer) clearTimeout(sigkillTimer);
     untrack();
   }
+}
+
+/** Whether the skill path's `fallow audit` rule applies here: fallow is installed and the repo
+ *  has at least one git remote (its changed-file base is the remote default branch). */
+async function fallowApplies(cwd: string): Promise<boolean> {
+  if (!Bun.which("fallow")) return false;
+  const proc = Bun.spawn(["git", "remote"], { cwd, stdout: "pipe", stderr: "ignore" });
+  const out = await new Response(proc.stdout).text();
+  return (await proc.exited) === 0 && out.trim() !== "";
+}
+
+/** The repo contract's check: `make check`, then the same `fallow audit` the skill path runs
+ *  after its language steps (fallow exits 1 on a `fail` verdict, so the exit code is the
+ *  verdict). */
+async function runRepoContractCheck(
+  cwd: string,
+  idleSeconds: number,
+  jobId: string | undefined,
+  isCancelled: ((jobId: string) => boolean) | undefined,
+  onProgress: ProgressSink | undefined,
+): Promise<CheckOutput> {
+  const results = [
+    await runStep(["make", "check"], "check", cwd, idleSeconds, jobId, isCancelled, onProgress),
+  ];
+  if (await fallowApplies(cwd)) {
+    results.push(
+      await runStep(
+        ["fallow", "audit", "--quiet"],
+        "fallow",
+        cwd,
+        idleSeconds,
+        jobId,
+        isCancelled,
+        onProgress,
+      ),
+    );
+  }
+  return {
+    passed: results.every((r) => r.step.passed),
+    steps: results.map((r) => r.step),
+    summary: results.map((r) => r.summary).join("; "),
+  };
 }
 
 // ── Skill prompt loader ────────────────────────────────────────────────────────
@@ -409,7 +455,7 @@ export async function runCheck(
   // above). A caller-supplied `commands` always overrides it.
   if ((!commands || commands.length === 0) && hasMakeCheckTarget(cwd)) {
     // `make check` bundles the test step, so it gets the test step's (higher) idle window.
-    return runMakeCheck(cwd, testSeconds, jobId, isCancelled, onProgress);
+    return runRepoContractCheck(cwd, testSeconds, jobId, isCancelled, onProgress);
   }
 
   const prompt = await loadSkillPrompt(commands, stepSeconds, testSeconds);
