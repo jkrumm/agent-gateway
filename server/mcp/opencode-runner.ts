@@ -193,8 +193,30 @@ function lastToolAction(newestFirst: OpencodeMessage[]): string | undefined {
   return undefined;
 }
 
-/** Pure fold over a session's messages, OLDEST FIRST (`OpencodeClient.allMessages`). */
-export function summarizeOpencodeMessages(messages: OpencodeMessage[]): OpencodeSummary {
+/** One assistant message's cost. OpenCode prices a message at the model's flat config rates, so a
+ *  model with a long-context tier (`rate.longContext`) is repriced from the message's own tokens
+ *  once ITS prompt crosses the threshold — the surcharge is per request, not per session. */
+function messageCostUsd(message: OpencodeMessage, model: ModelEntry | undefined): number {
+  const tier = model?.rate.longContext;
+  const tokens = message.tokens;
+  if (!tier || !tokens) return message.cost ?? 0;
+  const input = tokens.input ?? 0;
+  const cacheRead = tokens.cache?.read ?? 0;
+  const cacheWrite = tokens.cache?.write ?? 0;
+  if (input + cacheRead + cacheWrite <= tier.above) return message.cost ?? 0;
+  const out = (tokens.output ?? 0) + (tokens.reasoning ?? 0);
+  return (
+    (input * tier.in + cacheRead * tier.cacheRead + cacheWrite * tier.cacheWrite + out * tier.out) /
+    1_000_000
+  );
+}
+
+/** Pure fold over a session's messages, OLDEST FIRST (`OpencodeClient.allMessages`). `model`
+ *  enables the long-context repricing in `messageCostUsd`. */
+export function summarizeOpencodeMessages(
+  messages: OpencodeMessage[],
+  model?: ModelEntry,
+): OpencodeSummary {
   const summary: OpencodeSummary = {
     turns: 0,
     lastAction: "starting",
@@ -223,7 +245,7 @@ export function summarizeOpencodeMessages(messages: OpencodeMessage[]): Opencode
       summary.cacheReadTokens += message.tokens.cache?.read ?? 0;
       summary.cacheWriteTokens += message.tokens.cache?.write ?? 0;
     }
-    summary.costUsd += message.cost ?? 0;
+    summary.costUsd += messageCostUsd(message, model);
     const text = (message.content ?? [])
       .filter((block) => block.type === "text" && block.text?.trim())
       .map((block) => block.text)
@@ -852,7 +874,7 @@ export async function runOpencodeAttempt<T>(
   // read the password FILE or be asked to echo anything — redact both out of everything that could
   // echo them back BEFORE it is used to build an error message or parsed/returned as data.
   const redact = (text: string): string => redactSecret(redactSecret(text, iuKey), password);
-  const summary = summarizeOpencodeMessages(drive.messages);
+  const summary = summarizeOpencodeMessages(drive.messages, registryModel);
   summary.lastAssistantText = redact(summary.lastAssistantText);
   if (summary.errorMessage) summary.errorMessage = redact(summary.errorMessage);
   turnsRef.current = summary.turns;

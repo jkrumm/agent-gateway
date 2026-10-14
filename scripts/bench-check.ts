@@ -11,6 +11,8 @@ import { runCheck } from "../server/jobs/handlers/check.ts";
 import { routeFor } from "../server/lib/routing.ts";
 
 const reps = Number.parseInt(Bun.argv[2] ?? "3", 10);
+if (!Number.isInteger(reps) || reps < 1)
+  throw new Error(`reps must be a positive integer, got "${Bun.argv[2]}"`);
 const cwd = resolve(import.meta.dir, "..");
 const commands = ["bun run format:check", "bun run lint", "bun run typecheck"];
 console.error(`route: ${JSON.stringify(routeFor("check"))}`);

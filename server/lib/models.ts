@@ -13,7 +13,8 @@
 // allow-list. Promote an id only with evidence, and say what the evidence is in its comment.
 //
 // `wire` is the transport an agent loop speaks to the id, which decides the harness:
-//   anthropic — the IU native Anthropic route (`/anthropic/v1/messages`); what `claude -p` needs
+//   anthropic — the IU native Anthropic route (`/anthropic/v1/messages`); what `claude -p` needs,
+//               and (Haiku 5.5 EU only) opencode's `iu-anthropic` provider
 //   chat      — the IU OpenAI-compatible Chat Completions route; opencode's `iu-chat` provider
 //   responses — the IU OpenAI Responses route; opencode's `iu-responses` provider. GPT ids are
 //               Responses-only for agent loops (reasoning items must survive tool calls).
@@ -42,7 +43,19 @@ export interface ModelEntry {
   };
   /** USD per MTok. `cacheRead` absent → billed at 0.1x `in` (modelpick's convention — a
    *  missing cache rate must never make cached tokens look free). */
-  rate: { in: number; out: number; cacheRead?: number; source: string; date: string };
+  rate: {
+    in: number;
+    out: number;
+    cacheRead?: number;
+    /** USD per MTok to WRITE a prompt-cache entry; absent → not billed separately (the DeepSeek
+     *  routes report no cache writes). Anthropic bills 1.25x `in`. */
+    cacheWrite?: number;
+    /** Rates applying to a single request whose prompt (input + cache read + cache write) exceeds
+     *  `above` tokens — a request-level surcharge, not a session total. */
+    longContext?: { above: number; in: number; out: number; cacheRead: number; cacheWrite: number };
+    source: string;
+    date: string;
+  };
   /** Reasoning-effort variants the id accepts (opencode `provider/model#variant`); [] = none exposed. */
   effort: readonly string[];
   /** Whether `response_format: {type: "json_object"}` is probed to work on the chat wire. */
@@ -103,8 +116,9 @@ const MODELS: readonly ModelEntry[] = [
   // `/anthropic` only, so OpenCode reaches it through `@ai-sdk/anthropic` (`iu-anthropic`), which
   // injects `cache_control`. Not in `/v1/models` — probed by name 2026-10-14: HTTP 200, a 4512-token
   // system block written then read back (`cache_read_input_tokens: 4512`). List $0.10/$0.50 per MTok,
-  // cache read 0.1x, and 5x ($0.50/$2.50) above 100K prompt tokens — the rate here is the
-  // under-100K tier; a long-context episode costs more than `rate` says. Max cannot serve it.
+  // cache read 0.1x, cache write 1.25x, and 5x ($0.50/$2.50) above 100K prompt tokens per request —
+  // `rate.longContext` carries the surcharge tier, `summarizeOpencodeMessages` applies it.
+  // Max cannot serve it.
   {
     id: "claude-haiku-5-5-eu",
     name: "Claude Haiku 5.5 (EU)",
@@ -116,7 +130,10 @@ const MODELS: readonly ModelEntry[] = [
       in: 0.1,
       out: 0.5,
       cacheRead: 0.01,
-      source: "hermes-agent docs/model-context-reasoning.md (vendor list, >100K prompt 5x)",
+      cacheWrite: 0.125,
+      longContext: { above: 100_000, in: 0.5, out: 2.5, cacheRead: 0.05, cacheWrite: 0.625 },
+      source:
+        "hermes-agent docs/model-context-reasoning.md (vendor list, >100K prompt 5x); cache write 1.25x in",
       date: "2026-10-14",
     },
     effort: [],

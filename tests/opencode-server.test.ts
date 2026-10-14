@@ -592,6 +592,40 @@ describe("getOpencodeServerStatus", () => {
     expect(auth).toBe(`Basic ${btoa(`opencode:${readServerPassword()}`)}`);
   });
 
+  test("a server whose model list lacks a registry model is NOT ok: stale config, with the fix command", async () => {
+    fake((req) => {
+      const path = new URL(req.url).pathname;
+      if (path === "/api/info") return Response.json({ version: OPENCODE_PINNED_VERSION });
+      if (path === "/api/model") {
+        return Response.json({
+          data: [{ providerID: "iu-chat", id: "deepseek-v4.1-flash" }],
+        });
+      }
+      return Response.json([]);
+    });
+    const status = await getOpencodeServerStatus();
+    expect(status.up).toBe(true);
+    expect(status.ok).toBe(false);
+    expect(status.error).toContain("iu-anthropic/claude-haiku-5-5-eu");
+    expect(status.error).toContain("make install-opencode-agent");
+  });
+
+  test("a server listing every registry model is ok", async () => {
+    fake((req) => {
+      const path = new URL(req.url).pathname;
+      if (path === "/api/info") return Response.json({ version: OPENCODE_PINNED_VERSION });
+      if (path === "/api/model") {
+        return Response.json({
+          data: listModels()
+            .filter((m) => m.verified !== null && m.harnesses.includes("opencode"))
+            .map((m) => ({ providerID: opencodeProviderForWire(m.wire), id: m.id })),
+        });
+      }
+      return Response.json([]);
+    });
+    expect((await getOpencodeServerStatus()).ok).toBe(true);
+  });
+
   test("a v-prefixed version still matches the pin", async () => {
     fake(() => Response.json({ version: `v${OPENCODE_PINNED_VERSION}` }));
     expect((await getOpencodeServerStatus()).ok).toBe(true);

@@ -45,7 +45,14 @@ function modelRow(m: ModelEntry) {
     cost: {
       input: m.rate.in,
       output: m.rate.out,
-      ...(m.rate.cacheRead !== undefined ? { cache: { read: m.rate.cacheRead } } : {}),
+      ...(m.rate.cacheRead !== undefined
+        ? {
+            cache: {
+              read: m.rate.cacheRead,
+              ...(m.rate.cacheWrite !== undefined ? { write: m.rate.cacheWrite } : {}),
+            },
+          }
+        : {}),
     },
     ...(m.effort.length > 0
       ? {

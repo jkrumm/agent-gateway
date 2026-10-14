@@ -6,6 +6,7 @@
 // tests/opencode-server.test.ts and the HTTP adapter in tests/opencode-client.test.ts.
 
 import { describe, expect, test } from "bun:test";
+import { getModel } from "../server/lib/models.ts";
 import {
   appendJsonSchemaInstruction,
   opencodeActivityFingerprint,
@@ -73,6 +74,28 @@ describe("summarizeOpencodeMessages", () => {
       cacheWriteTokens: 0,
       costUsd: 0,
     });
+  });
+
+  test("a long-context tier reprices only the messages whose own prompt crosses the threshold", () => {
+    const haiku = getModel("claude-haiku-5-5-eu");
+    const small = assistantMessage({
+      content: [text("a")],
+      tokens: { input: 10, output: 1_000, reasoning: 0, cacheRead: 50_000, cacheWrite: 1_000 },
+      cost: 0.0123,
+    });
+    const big = assistantMessage({
+      content: [text("b")],
+      tokens: { input: 10, output: 1_000, reasoning: 0, cacheRead: 150_000, cacheWrite: 0 },
+      cost: 0.0045, // OpenCode's flat-rate price, which the tier replaces
+    });
+    const summary = summarizeOpencodeMessages([small, big], haiku);
+    // big: 10*0.5 + 150000*0.05 + 1000*2.5 per MTok = 0.0000050 + 0.0075 + 0.0025
+    expect(summary.costUsd).toBeCloseTo(
+      0.0123 + (10 * 0.5 + 150_000 * 0.05 + 1_000 * 2.5) / 1e6,
+      8,
+    );
+    // without the model the flat OpenCode cost is summed unchanged
+    expect(summarizeOpencodeMessages([small, big]).costUsd).toBeCloseTo(0.0168, 8);
   });
 
   test("sums tokens, cost and turns over every assistant message", () => {

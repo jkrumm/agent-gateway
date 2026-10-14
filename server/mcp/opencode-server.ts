@@ -252,18 +252,13 @@ export function ensureServerState(): { password: string } {
 
 // ── Config ──────────────────────────────────────────────────────────────────────
 
-type OpencodeWire = ModelWire;
-
 /** Registry models the server must list: `verified` and drivable by the opencode harness. */
-function opencodeServerModels(): Array<ModelEntry & { wire: OpencodeWire }> {
-  return listModels().filter(
-    (m): m is ModelEntry & { wire: OpencodeWire } =>
-      m.verified !== null && m.harnesses.includes("opencode"),
-  );
+function opencodeServerModels(): ModelEntry[] {
+  return listModels().filter((m) => m.verified !== null && m.harnesses.includes("opencode"));
 }
 
 /** `iu-chat`, `iu-responses` or `iu-anthropic` — the only place a registry `wire` is mapped to a provider id. */
-export function opencodeProviderForWire(wire: OpencodeWire): string {
+export function opencodeProviderForWire(wire: ModelWire): string {
   if (wire === "responses") return OPENCODE_PROVIDER_RESPONSES;
   return wire === "anthropic" ? OPENCODE_PROVIDER_ANTHROPIC : OPENCODE_PROVIDER_CHAT;
 }
@@ -297,7 +292,7 @@ function modelConfigEntry(entry: ModelEntry) {
 export function buildOpencodeServerConfig(): Record<string, unknown> {
   const providerOptions = { baseURL: "{env:IU_OPENAI_BASE}", apiKey: "{env:IU_KEY}" };
   const models = opencodeServerModels();
-  const modelsFor = (wire: OpencodeWire) =>
+  const modelsFor = (wire: ModelWire) =>
     Object.fromEntries(
       models.filter((m) => m.wire === wire).map((m) => [m.id, modelConfigEntry(m)]),
     );
@@ -340,7 +335,14 @@ export function buildOpencodeServerConfig(): Record<string, unknown> {
                 cost: {
                   input: m.rate.in,
                   output: m.rate.out,
-                  ...(m.rate.cacheRead !== undefined ? { cache: { read: m.rate.cacheRead } } : {}),
+                  ...(m.rate.cacheRead !== undefined
+                    ? {
+                        cache: {
+                          read: m.rate.cacheRead,
+                          ...(m.rate.cacheWrite !== undefined ? { write: m.rate.cacheWrite } : {}),
+                        },
+                      }
+                    : {}),
                 },
                 compatibility: { supportsThinkingBlockBinding: false },
               },
@@ -544,7 +546,43 @@ export async function getOpencodeServerStatus(
       error: `opencode server version ${version ?? "unknown"} != pinned ${OPENCODE_PINNED_VERSION}`,
     };
   }
+  const missing = await missingServerModels(get);
+  if (missing.length > 0) {
+    return {
+      ...found,
+      ok: false,
+      error:
+        `opencode server config is stale: it does not list ${missing.join(", ")} ` +
+        "(registry models changed since it started) — `make install-opencode-agent` loads the current config",
+    };
+  }
   return { ...found, ok: true };
+}
+
+const ModelListSchema = z.object({
+  data: z.array(z.object({ providerID: z.string(), id: z.string() })),
+});
+
+/** Registry models the running server does not list as `<provider>/<id>`. A server started
+ *  before a registry change keeps its old `OPENCODE_CONFIG_CONTENT` (`make reload` never restarts
+ *  it), so a new route model would fail every session while the version check stays green. A
+ *  response that is not a model list (or a failed request) proves nothing and reports no drift. */
+async function missingServerModels(get: (path: string) => Promise<Response>): Promise<string[]> {
+  try {
+    const res = await get("/api/model");
+    if (res.status !== 200) {
+      await res.body?.cancel();
+      return [];
+    }
+    const parsed = ModelListSchema.safeParse(await res.json());
+    if (!parsed.success) return [];
+    const listed = new Set(parsed.data.data.map((m) => `${m.providerID}/${m.id}`));
+    return opencodeServerModels()
+      .map((m) => `${opencodeProviderForWire(m.wire)}/${m.id}`)
+      .filter((ref) => !listed.has(ref));
+  } catch {
+    return [];
+  }
 }
 
 // ── Interrupt ───────────────────────────────────────────────────────────────────

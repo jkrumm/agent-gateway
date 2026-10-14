@@ -269,7 +269,7 @@ function readUsage(tool: string): Usage {
  *  `fallback: null`: routing a failed arm onto Max's Sonnet would measure a different model. */
 function benchRoute(model: string, kind: "implement" | "investigate" | "review"): ToolRoute {
   const effort = getModel(model)?.effort ?? [];
-  const preferred = kind === "implement" ? ["max", "high"] : ["high", "max"]; // review mirrors ANGLE_OC: high
+  const preferred = kind === "implement" ? ["max", "high"] : ["high", "max"];
   return {
     model,
     backend: "iu",

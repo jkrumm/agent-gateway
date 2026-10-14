@@ -50,12 +50,12 @@
 //   AGENT_GATEWAY_MODEL_<TOOL>=<id>             e.g. AGENT_GATEWAY_MODEL_CHECK=claude-haiku-4-5
 //   AGENT_GATEWAY_BACKEND_<TOOL>=iu|max         e.g. AGENT_GATEWAY_BACKEND_REVIEW=iu
 //   AGENT_GATEWAY_THINKING_TOKENS_<TOOL>=<n>    e.g. AGENT_GATEWAY_THINKING_TOKENS_CHECK=4096
-//   AGENT_GATEWAY_HARNESS_<TOOL>=claude|opencode e.g. AGENT_GATEWAY_HARNESS_DISPATCH=claude, PAIRED
-//     with AGENT_GATEWAY_MODEL_DISPATCH=claude-sonnet-5[1m] — dispatch's default model
-//     (deepseek-v4.1-flash) is only reachable via the opencode harness, so a bare
-//     AGENT_GATEWAY_HARNESS_DISPATCH=claude with no matching model override is refused (see the
-//     cross-field validation in buildRoutingTable below)
-//   AGENT_GATEWAY_VARIANT_<TOOL>=<v>            e.g. AGENT_GATEWAY_VARIANT_DISPATCH=max
+//   AGENT_GATEWAY_HARNESS_<TOOL>=claude|opencode e.g. AGENT_GATEWAY_HARNESS_DISPATCH=claude, best PAIRED
+//     with AGENT_GATEWAY_MODEL_DISPATCH=claude-sonnet-5[1m]. dispatch's default model (Haiku 5.5 EU)
+//     lists both harnesses, so a bare harness=claude is accepted (and ran 4x slower in the Wave-5
+//     bench); a model reachable only via opencode (DeepSeek-V4-Pro, GPT ids) with harness=claude is
+//     refused (see the cross-field validation in buildRoutingTable below)
+//   AGENT_GATEWAY_VARIANT_<TOOL>=<v>            e.g. AGENT_GATEWAY_VARIANT_DISPATCH_IMPLEMENT_ESCALATION=high
 // <TOOL> is the route key upper-cased. EVERY model id — default, env override or per-job
 // override — is validated against the registry (`server/lib/models.ts`): an unregistered or
 // UNVERIFIED id is refused (default stays, reported in `overrides` with `refused`); the
@@ -69,7 +69,8 @@
 // overrides above — there is no `runSession` call for either to affect. AFTER every
 // per-field override, `buildRoutingTable` validates the resulting model/harness COMBINATION
 // against the registry: a model whose `harnesses` include `claude` but not the route's harness
-// (every Claude id) normalizes harness to `claude` (implied, not refused); a model with no
+// (every Claude id except those that also list `opencode`, e.g. Haiku 5.5 EU) normalizes harness to
+// `claude` (implied, not refused); a model with no
 // `claude` harness (deepseek-v4.1-flash, GPT ids) landing on harness `claude` is refused back
 // to the tool's own defaults (no code path through `claude -p` at all). A
 // `AGENT_GATEWAY_THINKING_TOKENS_<TOOL>` on a route whose (possibly just-normalized) harness is
@@ -191,8 +192,8 @@ export const DEEPSEEK_PRO = "DeepSeek-V4-Pro";
 //   It exposes no effort variants, so these routes carry none.
 // AGENT_OC / AGENT_OC_IMPLEMENT / AGENT_OC_ESCALATION: dispatch (investigate/author),
 //   dispatch_implement and its attempt-3+ escalation on the OpenCode harness — cheaper and
-//   faster than the retired `claude -p` agent tiers; `variant` is the reasoning-effort split
-//   (higher for the write tiers). The escalation route carries no Max fallback — a gateway
+//   faster than the retired `claude -p` agent tiers; only the escalation route carries a
+//   `variant` (its model exposes effort levels, Haiku 5.5 does not). The escalation route carries no Max fallback — a gateway
 //   model cannot run there, so the caller retries instead. The `claude` harness is NOT a
 //   default of any dispatch route: it is reached only by an explicit AGENT_GATEWAY_HARNESS_DISPATCH=claude
 //   (+ Claude model) override, by `dispatch_editorial` below, or — automatically — by the Max
