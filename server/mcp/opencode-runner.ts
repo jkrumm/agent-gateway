@@ -76,17 +76,17 @@ const DEFAULT_PREFLIGHT_MS = 5_000;
 // ── Pure helpers ────────────────────────────────────────────────────────────────────
 
 /** The registry entry for a model this harness can drive, or a thrown refusal: unregistered,
- *  or no `opencode` in its `harnesses` (e.g. the Anthropic-wire ids, which only `claude -p`
+ *  or no `opencode` in its `harnesses` (the Max-served Claude ids, which only `claude -p`
  *  reaches). */
-export function opencodeModel(model: string): ModelEntry & { wire: "chat" | "responses" } {
+export function opencodeModel(model: string): ModelEntry {
   const entry = getModel(model);
   if (!entry) {
     throw new Error(`opencode harness: unknown model "${model}" — not in the registry`);
   }
-  if (!entry.harnesses.includes("opencode") || entry.wire === "anthropic") {
+  if (!entry.harnesses.includes("opencode")) {
     throw new Error(`opencode harness: model "${model}" is not usable on the opencode harness`);
   }
-  return entry as ModelEntry & { wire: "chat" | "responses" };
+  return entry;
 }
 
 /** Appended to the prompt when `SessionOptions.jsonSchema` is set — opencode has no

@@ -99,6 +99,31 @@ const MODELS: readonly ModelEntry[] = [
     verified: "2026-04-05",
   },
 
+  // Haiku 5.5 on IU's Bedrock EU leg (the `-eu` suffix; the bare id is us-east-1, never). Native
+  // `/anthropic` only, so OpenCode reaches it through `@ai-sdk/anthropic` (`iu-anthropic`), which
+  // injects `cache_control`. Not in `/v1/models` — probed by name 2026-10-14: HTTP 200, a 4512-token
+  // system block written then read back (`cache_read_input_tokens: 4512`). List $0.10/$0.50 per MTok,
+  // cache read 0.1x, and 5x ($0.50/$2.50) above 100K prompt tokens — the rate here is the
+  // under-100K tier; a long-context episode costs more than `rate` says. Max cannot serve it.
+  {
+    id: "claude-haiku-5-5-eu",
+    name: "Claude Haiku 5.5 (EU)",
+    wire: "anthropic",
+    harnesses: ["claude", "opencode"],
+    backends: ["iu"],
+    limit: { context: 1_000_000, output: 128_000, minOutput: MIN_OUTPUT_PLAIN },
+    rate: {
+      in: 0.1,
+      out: 0.5,
+      cacheRead: 0.01,
+      source: "hermes-agent docs/model-context-reasoning.md (vendor list, >100K prompt 5x)",
+      date: "2026-10-14",
+    },
+    effort: [],
+    jsonObject: false,
+    verified: "2026-10-14",
+  },
+
   // ── DeepSeek ─────────────────────────────────────────────────────────────────────────
   // DeepSeek-V4-Flash over the IU Anthropic route (`claude -p`): CLASSIFY tier. Verified by
   // modelpick ccbench + the warden POC, 2026-09-20/21 (routing.ts AGENT note); in routing.ts

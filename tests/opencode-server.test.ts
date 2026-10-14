@@ -20,6 +20,8 @@ import {
   OPENCODE_AGENT_READONLY,
   OPENCODE_IMPLEMENT_PERMISSIONS,
   OPENCODE_PINNED_VERSION,
+  OPENCODE_PROVIDER_ANTHROPIC,
+  opencodeProviderForWire,
   OPENCODE_PROVIDER_CHAT,
   OPENCODE_PROVIDER_RESPONSES,
   OPENCODE_READONLY_PERMISSIONS,
@@ -299,37 +301,46 @@ describe("buildOpencodeServerConfig", () => {
   const providers = cfg.provider as Record<string, Record<string, unknown>>;
   const modelsOf = (id: string) => providers[id]?.models as Record<string, Record<string, unknown>>;
 
-  test("emits both providers, each referencing the env-injected key/base, never a literal", () => {
+  test("emits the three providers, each referencing the env-injected key/base, never a literal", () => {
     expect(Object.keys(providers).toSorted()).toEqual(
-      [OPENCODE_PROVIDER_CHAT, OPENCODE_PROVIDER_RESPONSES].toSorted(),
+      [OPENCODE_PROVIDER_CHAT, OPENCODE_PROVIDER_RESPONSES, OPENCODE_PROVIDER_ANTHROPIC].toSorted(),
     );
-    for (const provider of Object.values(providers)) {
+    for (const [id, provider] of Object.entries(providers)) {
       expect(provider.options).toEqual({
-        baseURL: "{env:IU_OPENAI_BASE}",
+        baseURL:
+          id === OPENCODE_PROVIDER_ANTHROPIC ? "{env:IU_ANTHROPIC_BASE}" : "{env:IU_OPENAI_BASE}",
         apiKey: "{env:IU_KEY}",
       });
     }
     expect(providers[OPENCODE_PROVIDER_CHAT]?.npm).toBe("@ai-sdk/openai-compatible");
     expect(providers[OPENCODE_PROVIDER_RESPONSES]?.npm).toBe("@ai-sdk/openai");
+    expect(providers[OPENCODE_PROVIDER_ANTHROPIC]?.npm).toBe("@ai-sdk/anthropic");
   });
 
   test("lists EVERY verified opencode-capable registry model under the provider of its wire — and no other", () => {
     const expected = listModels().filter(
-      (m) => m.verified !== null && m.harnesses.includes("opencode") && m.wire !== "anthropic",
+      (m) => m.verified !== null && m.harnesses.includes("opencode"),
     );
     expect(expected.length).toBeGreaterThan(2);
     for (const m of expected) {
-      const provider =
-        m.wire === "responses" ? OPENCODE_PROVIDER_RESPONSES : OPENCODE_PROVIDER_CHAT;
-      expect(modelsOf(provider)[m.id], m.id).toBeDefined();
+      expect(modelsOf(opencodeProviderForWire(m.wire))[m.id], m.id).toBeDefined();
     }
-    const listed = [OPENCODE_PROVIDER_CHAT, OPENCODE_PROVIDER_RESPONSES].flatMap((p) =>
-      Object.keys(modelsOf(p)),
-    );
+    const listed = [
+      OPENCODE_PROVIDER_CHAT,
+      OPENCODE_PROVIDER_RESPONSES,
+      OPENCODE_PROVIDER_ANTHROPIC,
+    ].flatMap((p) => Object.keys(modelsOf(p)));
     expect(listed.toSorted()).toEqual(expected.map((m) => m.id).toSorted());
     // Unverified (glm-5.3-flash) and claude-harness-only (anthropic wire) ids are absent.
     expect(listed).not.toContain("glm-5.3-flash");
     expect(listed).not.toContain("DeepSeek-V4-Flash");
+  });
+
+  test("Haiku 5.5 EU is served by the iu-anthropic provider", () => {
+    expect(modelsOf(OPENCODE_PROVIDER_ANTHROPIC)["claude-haiku-5-5-eu"]).toMatchObject({
+      limit: { context: 1_000_000, output: 128_000 },
+      cost: { input: 0.1, output: 0.5, cache_read: 0.01 },
+    });
   });
 
   test("a chat-wire model entry is generated from the registry (limits, cost, variants)", () => {
@@ -385,7 +396,12 @@ describe("buildOpencodeServerConfig", () => {
 
 describe("opencodeServerEnv", () => {
   test("carries no git credential-deny key — per-job env is delivered per session, not by the server", () => {
-    const env = opencodeServerEnv({ iuKey: "k", iuOpenaiBase: "b", password: "pw" });
+    const env = opencodeServerEnv({
+      iuKey: "k",
+      iuOpenaiBase: "b",
+      iuAnthropicBase: "a",
+      password: "pw",
+    });
     for (const name of Object.keys(GIT_DENY_CREDENTIALS_ENV)) {
       expect(Object.keys(env), name).not.toContain(name);
     }
@@ -393,8 +409,14 @@ describe("opencodeServerEnv", () => {
   });
 
   test("OPENCODE_SESSION_BLANKED_ENV is exactly the credentials the server env carries", () => {
-    const env = opencodeServerEnv({ iuKey: "k", iuOpenaiBase: "b", password: "pw" });
+    const env = opencodeServerEnv({
+      iuKey: "k",
+      iuOpenaiBase: "b",
+      iuAnthropicBase: "a",
+      password: "pw",
+    });
     expect([...OPENCODE_SESSION_BLANKED_ENV].toSorted()).toEqual([
+      "IU_ANTHROPIC_BASE",
       "IU_KEY",
       "IU_OPENAI_BASE",
       "OPENCODE_SERVER_PASSWORD",
@@ -416,7 +438,12 @@ describe("opencodeServerEnv", () => {
     process.env.RESEARCH_GATEWAY_URL = "https://r.example";
     process.env.RESEARCH_GATEWAY_TOKEN = "research-secret";
     try {
-      const env = opencodeServerEnv({ iuKey: "k", iuOpenaiBase: "b", password: "pw" });
+      const env = opencodeServerEnv({
+        iuKey: "k",
+        iuOpenaiBase: "b",
+        iuAnthropicBase: "a",
+        password: "pw",
+      });
       expect(Object.keys(env)).not.toContain("RESEARCH_GATEWAY_URL");
       expect(Object.keys(env)).not.toContain("RESEARCH_GATEWAY_TOKEN");
       expect(Object.values(env)).not.toContain("research-secret");
@@ -435,12 +462,14 @@ describe("opencodeServerEnv", () => {
     const env = opencodeServerEnv({
       iuKey: "sk-test",
       iuOpenaiBase: "https://iu.example/openai/v1",
+      iuAnthropicBase: "https://iu.example/anthropic/v1",
       password: "pw",
     });
     expect(env.GITHUB_TOKEN).toBeUndefined();
     expect(JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "")).toEqual(buildOpencodeServerConfig());
     expect(env.IU_KEY).toBe("sk-test");
     expect(env.IU_OPENAI_BASE).toBe("https://iu.example/openai/v1");
+    expect(env.IU_ANTHROPIC_BASE).toBe("https://iu.example/anthropic/v1");
     expect(env.OPENCODE_SERVER_PASSWORD).toBe("pw");
     const root = process.env.AGENT_GATEWAY_OPENCODE_STATE_DIR ?? "";
     expect(env.XDG_CONFIG_HOME).toBe(join(root, "cfg"));

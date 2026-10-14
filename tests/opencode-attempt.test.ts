@@ -232,6 +232,7 @@ describe("runOpencodeAttempt — session environment", () => {
       OPENCODE_SERVER_PASSWORD: "",
       IU_KEY: "",
       IU_OPENAI_BASE: "",
+      IU_ANTHROPIC_BASE: "",
       ...GIT_DENY_CREDENTIALS_ENV,
     });
   });

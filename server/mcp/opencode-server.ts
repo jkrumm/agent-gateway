@@ -29,7 +29,7 @@ import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { listModels, type ModelEntry } from "../lib/models.ts";
+import { listModels, type ModelEntry, type ModelWire } from "../lib/models.ts";
 
 // ── Constants ───────────────────────────────────────────────────────────────────
 
@@ -49,6 +49,8 @@ const STATUS_TIMEOUT_MS = 1_500;
 /** opencode provider ids the server config emits — one per IU OpenAI-route wire. */
 export const OPENCODE_PROVIDER_CHAT = "iu-chat";
 export const OPENCODE_PROVIDER_RESPONSES = "iu-responses";
+/** The IU native `/anthropic` leg through `@ai-sdk/anthropic`, so OpenCode injects `cache_control`. */
+export const OPENCODE_PROVIDER_ANTHROPIC = "iu-anthropic";
 
 /** The two permission profiles an episode can select with `--agent`. */
 export const OPENCODE_AGENT_READONLY = "agw-readonly";
@@ -88,6 +90,7 @@ function serverSelfAccessDenyRules(): OpencodePermissionRule[] {
     "*OPENCODE_SERVER_PASSWORD*",
     "*IU_KEY*",
     "*IU_OPENAI_BASE*",
+    "*IU_ANTHROPIC_BASE*",
     ...ports,
     "*/api/session*",
   ].map((resource) => shell(resource, "deny"));
@@ -249,19 +252,20 @@ export function ensureServerState(): { password: string } {
 
 // ── Config ──────────────────────────────────────────────────────────────────────
 
-type OpencodeWire = "chat" | "responses";
+type OpencodeWire = ModelWire;
 
 /** Registry models the server must list: `verified` and drivable by the opencode harness. */
 function opencodeServerModels(): Array<ModelEntry & { wire: OpencodeWire }> {
   return listModels().filter(
     (m): m is ModelEntry & { wire: OpencodeWire } =>
-      m.verified !== null && m.harnesses.includes("opencode") && m.wire !== "anthropic",
+      m.verified !== null && m.harnesses.includes("opencode"),
   );
 }
 
-/** `iu-chat` or `iu-responses` — the only place a registry `wire` is mapped to a provider id. */
+/** `iu-chat`, `iu-responses` or `iu-anthropic` — the only place a registry `wire` is mapped to a provider id. */
 export function opencodeProviderForWire(wire: OpencodeWire): string {
-  return wire === "responses" ? OPENCODE_PROVIDER_RESPONSES : OPENCODE_PROVIDER_CHAT;
+  if (wire === "responses") return OPENCODE_PROVIDER_RESPONSES;
+  return wire === "anthropic" ? OPENCODE_PROVIDER_ANTHROPIC : OPENCODE_PROVIDER_CHAT;
 }
 
 function modelConfigEntry(entry: ModelEntry) {
@@ -314,6 +318,12 @@ export function buildOpencodeServerConfig(): Record<string, unknown> {
         options: providerOptions,
         models: modelsFor("responses"),
       },
+      [OPENCODE_PROVIDER_ANTHROPIC]: {
+        npm: "@ai-sdk/anthropic",
+        name: "IU unified endpoint (native Anthropic route)",
+        options: { baseURL: "{env:IU_ANTHROPIC_BASE}", apiKey: "{env:IU_KEY}" },
+        models: modelsFor("anthropic"),
+      },
     },
     agents: {
       [OPENCODE_AGENT_READONLY]: {
@@ -342,6 +352,7 @@ export const OPENCODE_SESSION_BLANKED_ENV = [
   "OPENCODE_SERVER_PASSWORD",
   "IU_KEY",
   "IU_OPENAI_BASE",
+  "IU_ANTHROPIC_BASE",
 ] as const;
 
 /** The server process's complete env, beyond the `PATH`/`HOME`/`TMPDIR`/`LANG` the wrapper adds.
@@ -350,6 +361,8 @@ export const OPENCODE_SESSION_BLANKED_ENV = [
 export function opencodeServerEnv(input: {
   iuKey: string;
   iuOpenaiBase: string;
+  /** The IU Anthropic leg's API root (`…/anthropic/v1`) — `@ai-sdk/anthropic` appends `/messages`. */
+  iuAnthropicBase: string;
   password: string;
 }): Record<string, string> {
   const root = opencodeStateRoot();
@@ -357,6 +370,7 @@ export function opencodeServerEnv(input: {
     OPENCODE_CONFIG_CONTENT: JSON.stringify(buildOpencodeServerConfig()),
     IU_KEY: input.iuKey,
     IU_OPENAI_BASE: input.iuOpenaiBase,
+    IU_ANTHROPIC_BASE: input.iuAnthropicBase,
     XDG_CONFIG_HOME: join(root, "cfg"),
     XDG_DATA_HOME: join(root, "data"),
     XDG_STATE_HOME: join(root, "state"),

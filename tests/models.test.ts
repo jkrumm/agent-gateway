@@ -22,8 +22,9 @@ describe("registry shape", () => {
       expect(m.rate.source.length, m.id).toBeGreaterThan(0);
       expect(m.rate.date, m.id).toMatch(/^\d{4}-\d{2}-\d{2}$/);
       expect(m.verified === null || /^\d{4}-\d{2}-\d{2}$/.test(m.verified), m.id).toBe(true);
-      // The anthropic wire is `claude -p`'s; opencode only speaks chat/responses.
-      if (m.wire === "anthropic") expect(m.harnesses, m.id).toEqual(["claude"]);
+      // The anthropic wire is `claude -p`'s; opencode reaches it only through `iu-anthropic`
+      // (the IU-only Haiku 5.5 EU), and speaks chat/responses for everything else.
+      if (m.wire === "anthropic") expect(m.harnesses, m.id).toContain("claude");
       else expect(m.harnesses, m.id).toEqual(["opencode"]);
     }
   });
@@ -39,7 +40,10 @@ describe("registry shape", () => {
 
   test("only Claude ids are Max-servable", () => {
     for (const m of listModels()) {
-      expect(m.backends.includes("max"), m.id).toBe(m.id.startsWith("claude"));
+      // `claude-haiku-5-5-eu` is the one Claude id Max cannot serve (Bedrock EU, IU-only).
+      expect(m.backends.includes("max"), m.id).toBe(
+        m.id.startsWith("claude") && m.id !== "claude-haiku-5-5-eu",
+      );
     }
     expect(isClaudeModel("claude-sonnet-5[1m]")).toBe(true);
     expect(isClaudeModel("DeepSeek-V4-Flash")).toBe(false);
@@ -61,6 +65,7 @@ describe("verified", () => {
     expect(verified).toEqual(
       [
         "claude-haiku-4-5",
+        "claude-haiku-5-5-eu",
         "claude-sonnet-5",
         "claude-sonnet-5[1m]",
         "DeepSeek-V4-Flash",
