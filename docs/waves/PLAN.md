@@ -200,19 +200,26 @@ warden, agent-gateway and dotfiles. Before editing a repo, check `rd agents` and
 - **Review (job e71fbab6):** fixed the wait-false busy loop starving the watchdog, resumed-session double billing (baseline slice), unreadable-messages collapsing into `no_output`, 403 treated as poll-again, `opts.idleTimeoutMs` ignored, blank/extraEnv ordering. Not taken: a "leaked session" when `setEnvironment` fails (an unprompted idle session holds nothing), splitting the 360-line `runOpencodeAttempt`, the pre-existing session-runner↔opencode-runner import cycle, fallow duplicates in check.ts/dispatch-git.ts.
 - **Open:** `CLAUDE_LOG_DIR` in session-runner is fixed at module load, so attempt tests append fake `session_env` rows to the real `~/.claude/logs` (pre-existing); SSE not used (polling only); 2.0.29 not decided; `tests/review-opencode-config.test.ts` 5 s timeouts passed this run.
 
-## Wave 4 — durable and steerable episodes            <!-- status: active -->
-- [ ] On agw restart, `recover()` re-attaches running OpenCode sessions instead of
+## Wave 4 — durable and steerable episodes            <!-- status: done -->
+- [x] On agw restart, `recover()` re-attaches running OpenCode sessions instead of
       resuming or interrupting them. Prove it by restarting agw mid-dispatch.
-- [ ] Add `POST /api/jobs/:id/steer` (+ MCP tool + `agw steer`), which posts
+- [x] Add `POST /api/jobs/:id/steer` (+ MCP tool + `agw steer`), which posts
       `delivery: steer` into the episode's session.
-- [ ] Warden: where a running episode needs new facts (a CI failure, a review finding
+- [x] Warden: where a running episode needs new facts (a CI failure, a review finding
       during a revision, an owner answer), steer instead of kill-and-restart wherever
       the episode is still live. Measure the revision rounds and cost saved.
-- [ ] Gate, deploy (agw + warden) and verify: a live steer changes a running episode's
+- [x] Gate, deploy (agw + warden) and verify: a live steer changes a running episode's
       outcome, shown by evidence.
-**Left behind:**
+**Left behind:** agw shipped in 465b091 + review-fix commit, warden in d515860; both deployed and verified.
+- **Durability:** a drain DETACHES a worktree dispatch's OpenCode session (`SessionOptions.reattachable`, `SessionDetachedError`; dispatch skips salvage/teardown); cancel still interrupts; in-place and non-dispatch tools still interrupt. `recover()` re-queues for resume as before; `runOpencodeAttempt` re-attaches by state (live → wait only, finished idle → read result, cut off/failed → `prompt resume`). Boot interrupts a detached session whose job is not resumed. Resumed worktrees restore ALL settings paths from base (review catch: the strip is invisible to the second invocation). Details: `docs/opencode-v2.md`.
+- **Steer:** `POST /api/jobs/:id/steer` + MCP `job_steer` (needs `/mcp` reconnect) + `agw steer`; 409 when nothing live. Caller trusted like a dispatch submitter, text not fenced (`docs/dispatch-security.md`). Warden: `steer_live_episode` on attach of a duplicate to a `working` item with a live episode (the only live-episode new-facts event warden has — CI/review findings/owner answers all arrive after the episode ended and stay revisions).
+- **Live proof:** `FORCE=1 make reload` mid-`dispatch investigate` 4a74d02d (session `ses_ec5021858ffe…`): `session.opencode_detached` → `job.shutdown_abandoned` → boot `job.requeue` → `session.opencode_reattach mode=live` → `job.done`, same session. Steer: 9547631d (`job.steer`, session `ses_ec4ffcdc7ffe…`) turned "most lines" into "fewest lines" in the verdict.
+- **Decisions:** `FORCE=1` now detaches (not discards) a worktree dispatch's session — consistent with the no-discard rule; AGENTS.md `make reload` line updated. `agw steer` refusal exits 1 like `cancel`.
+- **Not measured:** revision rounds/cost saved — no real warden steer has happened yet; the data source is the `job.steer` log event vs. revision rows. Wave 8 should add it to LOOP.md.
+- **Review (990e908c) not taken:** extracting `runOpencodeAttempt`/`runDispatch` hotspots, the session-runner↔opencode-runner cycle, cost of a non-resumed detached turn is not attributed, steer `active()`→`prompt` race (narrow), shared steer-limit constant, discriminated `SteerCommand`.
+- **Open:** probe model resists synthetic "run sleep" briefs (treated as injection) — use a real task for live probes; the read-only shell allowlist denies `make`/`bun`.
 
-## Wave 5 — routes by measurement            <!-- status: pending -->
+## Wave 5 — routes by measurement            <!-- status: active -->
 - [ ] Add a Haiku 5.5 OpenCode provider on IU's native `/anthropic` leg using the
       anthropic package, so caching works. Confirm cache reads in the usage records.
 - [ ] Move `check` to Haiku 5.5 if it holds the measured `make check` timing.
