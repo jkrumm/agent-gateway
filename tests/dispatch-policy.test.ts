@@ -32,16 +32,21 @@ function fakeLogger() {
   };
 }
 
-const ROOT = WORKSPACE_ROOTS[0];
-const DEFAULT_POLICY: DispatchPolicy = buildDispatchPolicy({});
+// WORKSPACE_ROOTS comes from the gitignored `.env` (PERSONAL_REPOS_PATH). A fresh checkout — a
+// dispatch worktree running `make check` — has none, so the suite pins the host's real root
+// explicitly rather than depending on that file.
+const ROOT = WORKSPACE_ROOTS[0] ?? join(process.env.HOME ?? "/", "SourceRoot");
+const DEFAULT_POLICY: DispatchPolicy = buildDispatchPolicy(
+  WORKSPACE_ROOTS.length > 0 ? {} : { AGENT_GATEWAY_DISPATCH_ROOTS: ROOT },
+);
 
 describe("buildDispatchPolicy defaults", () => {
   test("no overrides from an empty env", () => {
-    expect(DEFAULT_POLICY.overrides).toEqual([]);
+    expect(buildDispatchPolicy({}).overrides).toEqual([]);
   });
 
   test("roots default to WORKSPACE_ROOTS", () => {
-    expect(DEFAULT_POLICY.roots).toEqual(WORKSPACE_ROOTS);
+    expect(buildDispatchPolicy({}).roots).toEqual(WORKSPACE_ROOTS);
   });
 
   test("an unruled repo gets the permissive default rule", () => {
