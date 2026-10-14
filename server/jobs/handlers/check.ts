@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "fs";
+import { existsSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
 import {
@@ -96,29 +96,65 @@ export type CheckOutput = z.infer<typeof CHECK_OUTPUT>;
 // no LLM, no ecosystem sniffing, so the verdict is the repo's own contract rather than the
 // model's guess at a step list.
 
-/** Whether a Makefile declares a real `check:` target. Anchored at a line start so a substring
- *  like `precheck:` or `check-all:` never counts, and a `# check:` comment never does either.
- *  The colon must not open an assignment operator: `check := 1`, `check ::= foo` and the
- *  rarely-seen `check :::= foo` all start with `:`, so a bare `check\s*:` matches them and then
- *  sends the deterministic path into `make check` on a Makefile with no such target — which
- *  fails with "No rule to make target 'check'", the exact false-red this path exists to avoid.
- *  `(?![=:]*=)` rejects every assignment operator (`:=`, `::=`, `:::=`) while still accepting a
- *  real target, including a double-colon rule (`check::`). Pure — unit-tested without touching
- *  the filesystem. */
-export function makefileDeclaresCheck(makefile: string): boolean {
-  return /^check\s*:(?![=:]*=)/m.test(makefile);
-}
+/** Wall-clock budget for the `make -q check` probe below. The probe only ever *reads* the
+ *  Makefile (question mode never runs a recipe), but a `$(shell ...)` or `include` in the
+ *  Makefile can still block, so the gate itself is bounded where the steps it gates are
+ *  idle-watchdogged. Overrunning the budget is a false negative — fall through to the skill
+ *  path, never a red. */
+const MAKE_CHECK_PROBE_TIMEOUT_MS = 5_000;
+/** Sentinel the probe's `Promise.race` uses to tell a budget overrun apart from a real exit
+ *  code (which is always 0–255, never a symbol). */
+const MAKE_CHECK_PROBE_TIMEOUT = Symbol("make-check-probe-timeout");
 
-/** Whether the repo root's Makefile declares `check:` — the gate for the deterministic
- *  `make check` path. A missing or unreadable Makefile is "no". */
-function hasMakeCheckTarget(cwd: string): boolean {
-  const makefilePath = join(cwd, "Makefile");
-  if (!existsSync(makefilePath)) return false;
-  try {
-    return makefileDeclaresCheck(readFileSync(makefilePath, "utf8"));
-  } catch {
+/** Whether the repo root Makefile declares a `check:` target Make itself would register — the
+ *  gate for the deterministic `make check` path. Asked of `make -q check`, not matched against
+ *  source lines: question mode exits 0 when `check` is up to date, 1 when it needs remaking,
+ *  and 2 on error (including "No rule to make target 'check'"), so 0/1 mean a real target and 2
+ *  means none. That is exactly the distinction the old column-0 regex got wrong — a `define
+ *  UNUSED\ncheck:\nendef` block or a disabled conditional contains the line but registers no
+ *  rule, so Make lands at 2 where the regex matched and produced the false red this path exists
+ *  to avoid. A missing Makefile, a missing `make`, or a probe that overruns its budget all fall
+ *  through to the skill path. */
+export async function hasMakeCheckTarget(cwd: string): Promise<boolean> {
+  if (!existsSync(join(cwd, "Makefile"))) return false;
+  if (!Bun.which("make")) return false;
+
+  // Same env hygiene as `runStep`: the probe spawns `make` in the server process, so a
+  // `$(shell ...)` in an untrusted dispatch Makefile must not be able to read the LaunchAgent's
+  // tokens, and `PWD` must point at the probe's cwd, not the server's stale value.
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
+  scrubSensitiveEnv(env);
+  env.PWD = cwd;
+
+  const proc = Bun.spawn(["make", "-q", "check"], {
+    cwd,
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+    env,
+    // A `$(shell ...)` child must not outlive the probe on a timeout; a group kill reaches it.
+    detached: true,
+  });
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    proc.exited,
+    new Promise<typeof MAKE_CHECK_PROBE_TIMEOUT>((resolve) => {
+      timer = setTimeout(() => resolve(MAKE_CHECK_PROBE_TIMEOUT), MAKE_CHECK_PROBE_TIMEOUT_MS);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+
+  if (outcome === MAKE_CHECK_PROBE_TIMEOUT) {
+    try {
+      process.kill(-proc.pid, "SIGKILL");
+    } catch {
+      /* the process group is already gone */
+    }
     return false;
   }
+  return outcome === 0 || outcome === 1;
 }
 
 const MAKE_CHECK_IDLE_CHECK_INTERVAL_MS = 5_000;
@@ -522,7 +558,7 @@ export async function runCheck(
   // The repo contract's `make check` wins over LLM discovery whenever the caller supplied no
   // explicit commands — deterministic, dependency-aware, no model in the loop (see the section
   // above). A caller-supplied `commands` always overrides it.
-  if ((!commands || commands.length === 0) && hasMakeCheckTarget(cwd)) {
+  if ((!commands || commands.length === 0) && (await hasMakeCheckTarget(cwd))) {
     // `make check` bundles the test step, so it gets the test step's (higher) idle window.
     return runRepoContractCheck(cwd, testSeconds, jobId, isCancelled, onProgress);
   }

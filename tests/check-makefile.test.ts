@@ -1,15 +1,15 @@
-// The deterministic `make check` path: when the repo root Makefile declares a real `check:`
-// target and the caller passed no `commands`, `runCheck` runs it verbatim as one step (no model
-// session) instead of loading the discovery skill. Detection is pure; the run is exercised
-// against throwaway Makefiles in a tmp dir with `runSession` spied on, so "no model call" is
-// asserted rather than assumed.
+// The deterministic `make check` path: when the repo root Makefile declares a `check:` target
+// that Make itself registers, and the caller passed no `commands`, `runCheck` runs it verbatim as
+// one step (no model session) instead of loading the discovery skill. Detection delegates to
+// `make -q check`; the run is exercised against throwaway Makefiles in a tmp dir with `runSession`
+// spied on, so "no model call" is asserted rather than assumed.
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { makefileDeclaresCheck, runCheck } from "../server/jobs/handlers/check.ts";
+import { hasMakeCheckTarget, runCheck } from "../server/jobs/handlers/check.ts";
 import * as sessionRunner from "../server/mcp/session-runner.ts";
 import { SessionCancelledError } from "../server/mcp/session-runner.ts";
 
@@ -22,69 +22,67 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-describe("makefileDeclaresCheck", () => {
-  test("a real check: target is detected", () => {
-    expect(makefileDeclaresCheck("check:\n\tbun test\n")).toBe(true);
+describe("hasMakeCheckTarget — probes `make -q check`", () => {
+  // Detection is delegated to `make -q check` rather than matched against source lines: question
+  // mode exits 0 (up to date) / 1 (needs remaking) for a target Make registers and 2 ("No rule
+  // to make target") when it does not, so a `check:`-shaped line inside a `define … endef` block
+  // or a disabled conditional — text, not a rule — is correctly rejected where the old regex
+  // matched it and produced a false red.
+  async function declares(makefile: string): Promise<boolean> {
+    await writeFile(join(cwd, "Makefile"), makefile);
+    return hasMakeCheckTarget(cwd);
+  }
+
+  test("a real check: target is detected", async () => {
+    expect(await declares("check:\n\t@echo hi\n")).toBe(true);
   });
 
-  test("spaces before the colon still count", () => {
-    expect(makefileDeclaresCheck("check :\n\tbun test\n")).toBe(true);
+  test("spaces before the colon still count", async () => {
+    expect(await declares("check :\n\t@echo hi\n")).toBe(true);
   });
 
-  test("a different target is not a match", () => {
-    expect(makefileDeclaresCheck("test:\n\tpytest -q\n")).toBe(false);
+  test("a different target is not a match", async () => {
+    expect(await declares("test:\n\tpytest -q\n")).toBe(false);
   });
 
-  test("a precheck: substring is not a match", () => {
-    expect(makefileDeclaresCheck("precheck:\n\t./pre.sh\n")).toBe(false);
+  test("a precheck: substring is not a match", async () => {
+    expect(await declares("precheck:\n\t./pre.sh\n")).toBe(false);
   });
 
-  test("check-all: is a different target, not a match", () => {
-    expect(makefileDeclaresCheck("check-all:\n\tbun test\n")).toBe(false);
+  test("check-all: is a different target, not a match", async () => {
+    expect(await declares("check-all:\n\tbun test\n")).toBe(false);
   });
 
-  test("a .PHONY declaration alone is not a target", () => {
-    expect(makefileDeclaresCheck(".PHONY: check\n")).toBe(false);
+  test("an empty Makefile is not a match", async () => {
+    expect(await declares("")).toBe(false);
   });
 
-  test("a commented-out check: is not a match", () => {
-    expect(makefileDeclaresCheck("# check:\n#\tbun test\n")).toBe(false);
+  test("a double-colon `check::` rule IS a real target", async () => {
+    expect(await declares("check::\n\t@echo hi\n")).toBe(true);
   });
 
-  test("an empty Makefile is not a match", () => {
-    expect(makefileDeclaresCheck("")).toBe(false);
+  test("a `check:` line inside a define…endef block registers no target", async () => {
+    // Regression for the reviewed false red: the value text matches a column-0 `check:`, but
+    // Make reads it as a variable value, not a rule, so `make check` fails with "No rule to
+    // make target 'check'".
+    expect(await declares("define UNUSED\ncheck:\n\t@echo hi\nendef\nall:\n\t@echo x\n")).toBe(
+      false,
+    );
   });
 
-  test("an immediate-assignment `check :=` is not a target", () => {
-    expect(makefileDeclaresCheck("check := 1\n")).toBe(false);
+  test("a `check:` line inside a disabled conditional registers no target", async () => {
+    // Same regression through the conditional path: `check:` is only a rule when $(FOO) is "1".
+    expect(await declares("ifeq ($(FOO),1)\ncheck:\n\t@echo hi\nendif\nall:\n\t@echo x\n")).toBe(
+      false,
+    );
   });
 
-  test("a POSIX-assignment `check ::=` is not a target", () => {
-    expect(makefileDeclaresCheck("check ::= foo\n")).toBe(false);
+  test("a `check:` line inside an enabled conditional IS a real target", async () => {
+    expect(await declares("ifeq (a,a)\ncheck:\n\t@echo hi\nendif\n")).toBe(true);
   });
 
-  test("`check::=` with no spaces is not a target", () => {
-    expect(makefileDeclaresCheck("check::=foo\n")).toBe(false);
-  });
-
-  test("the `check :::=` assignment operator is not a target", () => {
-    expect(makefileDeclaresCheck("check :::= foo\n")).toBe(false);
-  });
-
-  test("a `check :=` line inside a define…endef block is not a target", () => {
-    expect(makefileDeclaresCheck("define rules\ncheck := 1\nendef\n")).toBe(false);
-  });
-
-  test("a `define check:` block declares no target `check`", () => {
-    expect(makefileDeclaresCheck("define check:\n\t@echo hi\nendef\n")).toBe(false);
-  });
-
-  test("a double-colon `check::` rule IS a real target", () => {
-    expect(makefileDeclaresCheck("check::\n\t@echo hi\n")).toBe(true);
-  });
-
-  test("a target-specific variable after the colon is still a target", () => {
-    expect(makefileDeclaresCheck("check: CFLAGS += -g\n\t@echo hi\n")).toBe(true);
+  test("a .PHONY check target with a recipe is detected", async () => {
+    expect(await declares(".PHONY: check\ncheck:\n\t@echo hi\n")).toBe(true);
   });
 });
 
