@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The shared OpenCode v2 server agent-gateway's dispatch episodes attach to
+       (`opencode run --server`). A SEPARATE LaunchAgent from com.jkrumm.agent-gateway on
+       purpose: an agw `make reload` must not kill in-flight episodes, and a crash here restarts
+       without agw involvement (docs/opencode-v2.md § Design). Not the per-user service that
+       interactive `oc` uses — own port, own state root, own config.
+
+       Never rename or reuse a label casually: Background Task Management keeps a disposition
+       per identifier, and a denied one outlives the plist. See docs/deployment.md § The BTM
+       denial. -->
+  <key>Label</key>
+  <string>com.jkrumm.agent-gateway-opencode</string>
+
+  <!-- A wrapper script, NOT bun or opencode directly. Same Background Task Management reason as
+       the main agent: BTM resolves the effective disposition from the executable, and bun is
+       denied on this host (a direct-bun item is downgraded to [enabled, disallowed] and launchd
+       skips RunAtLoad). The script also builds the server's scrubbed environment and refuses to
+       start any opencode build but the pinned one. Full argument in
+       scripts/agent-gateway-opencode-start.sh. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/jkrumm/SourceRoot/agent-gateway/scripts/agent-gateway-opencode-start.sh</string>
+  </array>
+
+  <!-- The wrapper cds to the repo root itself (Bun auto-loads .env from there:
+       AGENT_GATEWAY_OPENCODE_PORT) and then into the server's state root. -->
+  <key>WorkingDirectory</key>
+  <string>/Users/jkrumm/SourceRoot/agent-gateway</string>
+
+  <!-- launchd's default PATH lacks Homebrew and user-local bins. The server's worker shells
+       inherit this PATH (the wrapper forwards it through `env -i`), so the tools a worker needs
+       (git, rg, jq, curl, gh) must resolve from it. Nothing else of this environment — and none
+       of agw's — is forwarded; see the wrapper. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/Users/jkrumm/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- launchd hard-caps this at 60s on this host regardless of the value (measured 2026-09-08,
+       see com.jkrumm.agent-gateway.plist). A SIGTERM here exits the server in ~50 ms without a
+       drain, and an interrupted tool is recorded as an error; the episode re-attaches with
+       `prompt {resume:true}` (docs/opencode-v2.md § Measured, Wave 4). 60 is the real maximum,
+       not a drain budget. -->
+  <key>ExitTimeOut</key>
+  <integer>60</integer>
+
+  <!-- ~/Library/Logs, not /tmp: a KeepAlive agent opens its stdio ONCE at spawn, and macOS's
+       periodic cleanup sweeps untouched /tmp files after 3+ days, leaving the process writing
+       into an unlinked inode. See com.jkrumm.agent-gateway.plist and .claude/rules/logs.md. -->
+  <key>StandardOutPath</key>
+  <string>/Users/jkrumm/Library/Logs/agent-gateway-opencode.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/jkrumm/Library/Logs/agent-gateway-opencode.err</string>
+</dict>
+</plist>

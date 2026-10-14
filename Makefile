@@ -190,4 +190,30 @@ uninstall-agent:
 	rm ~/Library/LaunchAgents/com.jkrumm.agent-gateway.plist
 	@echo "agent-gateway LaunchAgent removed"
 
-.PHONY: check deploy verify logs dev start reload install-agent install-cli uninstall-agent
+# The shared OpenCode v2 server (docs/opencode-v2.md, scripts/agent-gateway-opencode-start.sh) —
+# its own LaunchAgent so an agw reload never kills attached episodes. Mirrors install-agent:
+# boot the label out first (so `bootstrap` takes even when it is already loaded), poll the old PID
+# away before bootstrapping, no `|| true` on `bootstrap`, and fail loudly if the port never
+# answers. Restarting the server kills every episode attached to it, hence the same running-jobs
+# guard as install-agent (FORCE=1 skips it; a SIGTERM exits the server in ~50 ms, no drain).
+# `scripts/deploy.sh` calls this only when the agent is not loaded at all.
+install-opencode-agent:
+	@if [ -z "$(FORCE)" ]; then \
+	  n=$$(curl -sf --max-time 3 http://127.0.0.1:7705/api/jobs/health 2>/dev/null | jq -r '.running // 0' 2>/dev/null || echo 0); \
+	  if [ "$${n:-0}" != "0" ]; then echo "refusing to install-opencode-agent: $$n job(s) running — restarting the server kills their episodes; FORCE=1 make install-opencode-agent discards them"; exit 1; fi; \
+	fi
+	@old=$$(launchctl print gui/$$(id -u)/com.jkrumm.agent-gateway-opencode 2>/dev/null | awk '/^[[:space:]]*pid = /{print $$3; exit}'); \
+	launchctl bootout gui/$$(id -u)/com.jkrumm.agent-gateway-opencode 2>/dev/null || true; \
+	i=0; while [ -n "$$old" ] && kill -0 "$$old" 2>/dev/null; do sleep 0.5; i=$$((i+1)); done
+	cp com.jkrumm.agent-gateway-opencode.plist ~/Library/LaunchAgents/
+	launchctl bootstrap gui/$$(id -u) ~/Library/LaunchAgents/com.jkrumm.agent-gateway-opencode.plist
+	@port=$$(bun scripts/opencode-server-env.ts --port) || { echo "could not resolve the opencode port (bun scripts/opencode-server-env.ts --port)"; exit 1; }; \
+	i=0; until [ "$$(curl -s --max-time 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$$port/api/info")" != "000" ] || [ $$i -ge 40 ]; do sleep 0.5; i=$$((i+1)); done; \
+	[ "$$(curl -s --max-time 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$$port/api/info")" != "000" ] && echo "agent-gateway-opencode LaunchAgent installed and listening on :$$port" || { echo "agent-gateway-opencode did not come up on :$$port — tail ~/Library/Logs/agent-gateway-opencode.err"; exit 1; }
+
+uninstall-opencode-agent:
+	launchctl bootout gui/$$(id -u)/com.jkrumm.agent-gateway-opencode
+	rm ~/Library/LaunchAgents/com.jkrumm.agent-gateway-opencode.plist
+	@echo "agent-gateway-opencode LaunchAgent removed (state under ~/.local/share/agent-gateway/opencode/ kept)"
+
+.PHONY: check deploy verify logs dev start reload install-agent install-cli uninstall-agent install-opencode-agent uninstall-opencode-agent

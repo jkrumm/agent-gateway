@@ -15,6 +15,7 @@ import {
   planNextAttempt,
 } from "../server/mcp/session-runner.ts";
 import { routeFor } from "../server/lib/routing.ts";
+import type { OpencodeServerStatus } from "../server/mcp/opencode-server.ts";
 
 const savedEnv = { key: process.env.IU_API_KEY, base: process.env.IU_BASE_URL };
 
@@ -34,6 +35,13 @@ afterEach(() => {
   }
 });
 
+const serverOk = async (): Promise<OpencodeServerStatus> => ({
+  ok: true,
+  up: true,
+  version: "2.0.25",
+  pinned: "2.0.25",
+  versionOk: true,
+});
 const refusedPreflight: IuPreflight = async () => ({ ok: false, reason: "ECONNREFUSED" });
 const attemptOpts = () => ({ cwd: "/tmp", prompt: "p", route: routeFor("dispatch") });
 const attemptCtx = { model: "deepseek-v4.1-flash", backend: "iu" as const };
@@ -84,6 +92,8 @@ describe("runOpencodeAttempt — endpoint preflight", () => {
     const sentinel = new Error("spawn reached");
     await expect(
       runOpencodeAttempt(attemptOpts(), { current: 0 }, attemptCtx, {
+        serverStatus: serverOk,
+        password: () => "pw",
         preflight: async (base, timeoutMs) => {
           probedBase = base;
           probedTimeout = timeoutMs;
@@ -115,6 +125,75 @@ describe("runOpencodeAttempt — endpoint preflight", () => {
     } finally {
       delete process.env.AGENT_GATEWAY_OPENCODE_PREFLIGHT_MS;
     }
+  });
+});
+
+const down =
+  (error: string, over: Partial<OpencodeServerStatus> = {}) =>
+  async () => ({
+    ok: false,
+    up: false,
+    version: null,
+    pinned: "2.0.25",
+    versionOk: false,
+    error,
+    ...over,
+  });
+
+describe("runOpencodeAttempt — shared server check", () => {
+  async function attemptAgainst(serverStatus: () => Promise<OpencodeServerStatus>) {
+    let spawned = 0;
+    const result = await runOpencodeAttempt(attemptOpts(), { current: 0 }, attemptCtx, {
+      preflight: async () => ({ ok: true }),
+      serverStatus,
+      spawn: () => {
+        spawned++;
+        throw new Error("must not spawn");
+      },
+    });
+    return { result, spawned };
+  }
+
+  test("server down: no spawn, classified transport failure the breaker counts", async () => {
+    const { result, spawned } = await attemptAgainst(
+      down("opencode server unreachable: ECONNREFUSED"),
+    );
+    expect(spawned).toBe(0);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain("opencode server unavailable before spawn");
+    expect(result.error).toContain("ECONNREFUSED");
+    expect(result.classificationText).toBe(result.error);
+    expect(result.iuConfigError).toBeUndefined();
+    expect(isRetryableSessionError(result.error ?? "")).toBe(true);
+    expect(classifyBreakerOutcome(result)).toBe("transport");
+  });
+
+  test("version mismatch: no spawn, and still connection-class so the ladder falls back", async () => {
+    const { result, spawned } = await attemptAgainst(
+      down("opencode server version 2.0.30 != pinned 2.0.25", {
+        up: true,
+        version: "2.0.30",
+      }),
+    );
+    expect(spawned).toBe(0);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain("2.0.30");
+    expect(isRetryableSessionError(result.error ?? "")).toBe(true);
+  });
+
+  test("the IU preflight runs first: a dead IU endpoint never reaches the server check", async () => {
+    let statusCalls = 0;
+    const result = await runOpencodeAttempt(attemptOpts(), { current: 0 }, attemptCtx, {
+      preflight: refusedPreflight,
+      serverStatus: async () => {
+        statusCalls++;
+        return serverOk();
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(statusCalls).toBe(0);
   });
 });
 

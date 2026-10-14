@@ -80,8 +80,9 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
   // `routeStreaks`/`degradedRoutes`/`warnings` are reported, never enforced on `ok`, same as
   // `backendFallbacks` — `ok` stays computed from `evaluateJobHealth` alone. The additive
   // `pageable`/`pageReason` carry the "should this page" verdict the Kuma heartbeat uses
-  // (server/lib/health.ts, kuma-push.ts): a degraded route pages there, not via `ok`.
-  .get("/health", () => computeHealth())
+  // (server/lib/health.ts, kuma-push.ts): a degraded route pages there, not via `ok`. So does
+  // `opencodeServer` (the shared OpenCode server's status) when it is not ok.
+  .get("/health", async () => computeHealth())
 
   // Poll a single job's state. `job.status` terminal ⇒ `result` or `error` is set.
   .get("/:id", ({ params, set }) => {

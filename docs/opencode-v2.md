@@ -3,9 +3,14 @@
 Spec order for this migration: `docs/waves/PLAN.md` > this file > dotfiles
 `docs/agent-platform.md` > older docs. Everything under **Measured** was observed on
 **opencode 2.0.25** (Homebrew) with `scripts/opencode-v2-probe.ts` on 2026-10-14; the probe is
-the executable form of this page and the upgrade gate (below). Today's production path is
-still `opencode run --standalone` per attempt (`server/mcp/opencode-runner.ts`); Waves 2–4
-move it onto the server described here.
+the executable form of this page and the upgrade gate (below).
+
+**Status: Wave 2 shipped (2026-10-14).** Episodes no longer spawn `opencode run --standalone`;
+they run `opencode run --server <url> --agent agw-readonly|agw-implement` against one shared
+server under its own LaunchAgent (`server/mcp/opencode-server.ts`,
+`scripts/agent-gateway-opencode-start.sh`, `docs/deployment.md`). The NDJSON stream parser is
+unchanged. Waves 3–4 (typed client, per-session environment, usage from messages, interrupt,
+re-attach) are still ahead.
 
 ## Measured
 
@@ -15,7 +20,7 @@ The probe starts a **dedicated** `opencode serve` (own port, own `XDG_*` roots, 
 | Question | Result |
 |-|-|
 | Boot | ~160 ms to answer `GET /api/session/active` |
-| Auth | HTTP Basic, any username, `OPENCODE_SERVER_PASSWORD` as password. No header = 401 |
+| Auth | HTTP Basic, username must be `opencode` (any other gets 401), `OPENCODE_SERVER_PASSWORD` as password. No header = 401 |
 | Flow | `POST /api/session` → `POST /api/session/{id}/prompt` → `POST /api/experimental/session/{id}/wait` (204 when idle) → `GET /api/session/{id}/message` |
 | Session create | `{location:{directory}, model:{providerID,id,variant?}, permissions:[{action,resource,effect}], metadata, agent, title}`. Directory is honoured; the shell/read tools run there |
 | Messages | Newest first by default. Types `user`, `assistant`, `idle`. The `idle` message carries `outcome`: `succeeded` or `interrupted` |
@@ -34,6 +39,42 @@ The probe starts a **dedicated** `opencode serve` (own port, own `XDG_*` roots, 
 | SSE `GET /api/event` | `text/event-stream`, JSON `{id,created?,type,location?,data}`. Types seen for one tool turn: `server.connected`, `session.inbox.enqueued/delivered`, `session.execution.started/succeeded`, `session.step.started/streamed/ended`, `session.text.started/delta/ended`, `session.tool.input.started/ended`, `session.tool.called/progress/success`, `shell.created/exited`, `session.usage.updated`, `session.renamed`, plus ambient `*.updated`. Volatile by contract — liveness hint only |
 | Config via env | `OPENCODE_CONFIG_CONTENT` (the v1-shaped `buildOpencodeConfig` output) is normalized to v2 (`providers`, `permissions`, `package: aisdk:…`) and works unchanged. Config-defined providers do **not** appear in `GET /api/provider` or `/api/model`; sessions use them anyway (`model:{providerID:"iu-chat",id}`) |
 
+## Measured in Wave 2 (`run --server`, 2.0.25, 2026-10-14)
+
+| Question | Result |
+|-|-|
+| CLI surface | `opencode run --server URL` takes `--agent`, `-m provider/model#variant`, `--session`, `--format json`, `--file`, `--title`, `--auto`. **No permission, env or config flag** |
+| Working directory | Honoured from the **client** process's cwd/`PWD` (the shell ran in the client's cwd), so `buildOpencodeEnv` still pins `PWD` |
+| Environment | The shell tool's env is the **server process's env**. The client's env (formerly `extraEnv`) does **not** reach it. Per-run env is therefore impossible on a shared server; `runOpencodeAttempt` throws on any `extraEnv` key the server does not carry |
+| Permissions | A config `agents.<name>.permissions` (v2 rule array) plus `--agent <name>` enforces them: with `shell` denied, shell was unavailable. Agent rules are appended after the built-in base policy (allow all; ask on `external_directory` and `.env` reads), so each `agw-*` agent opens with a catch-all rule |
+| Server config | `OPENCODE_CONFIG_CONTENT` on the server process (overrides a repo `opencode.json`). Auth: HTTP Basic, `OPENCODE_SERVER_PASSWORD` read by both server and client. `GET /api/info` carries `{version, pid, urls, paths}` and needs no auth (the status probe sends it anyway) |
+
+v2 action names (https://opencode.ai/v2/docs/permissions): `shell` (v1 `bash`), `subagent` (v1
+`task`), `read`, `edit`, `glob`, `grep`, `skill`, `question`, `webfetch`, `websearch`,
+`external_directory`, `execute`. `list`, `lsp`, `todowrite` and `doom_loop` are not v2 actions
+(an unnamed action falls to the catch-all). A **subagent runs under its own permissions**, not
+its parent's, so `agw-readonly` denies `subagent` — v1's `task: allow` has no equivalent hole.
+`agw-implement` allows it (its own base policy would `ask` on `external_directory` — watch for a
+stalled episode).
+
+**Research validation is unavailable on OpenCode review angles until Wave 3.** The server's env
+is fixed at start and inherited by **every** worker shell on it, so a credential in it is readable
+by any episode. The research-gateway credentials (`RESEARCH_GATEWAY_URL`/`_TOKEN`) are therefore
+**not** put there: `runOpencodeAttempt` drops those two `extraEnv` keys with one `warn`
+(`session.opencode_extra_env_dropped`, keys only) and the angle runs without them — the curl
+recipe in the review prompt has nothing to authenticate with. Wave 3's
+`PUT /api/session/{id}/environment` delivers them per session and retires this limitation. Any
+OTHER `extraEnv` key the server does not carry still throws. Git credentials stay denied
+(`GIT_DENY_CREDENTIALS_ENV` is carried by the server for every episode, including read tiers).
+
+**Killing the client does not stop the session (measured 2.0.25).** SIGTERM to `opencode run
+--server` leaves the server-side session `running`, and its tools keep executing (a file was
+written 40 s after the kill). `runOpencodeProcessLifecycle` therefore calls
+`interruptOpencodeSession` (`POST /api/session/{id}/interrupt`, best-effort, `{interrupted:false}`
+on an idle session) once the client process is gone, on every exit path, and logs
+`session.opencode_interrupt`. `getOpencodeServerStatus` also requires an authenticated
+`GET /api/session/active` = 200, because `GET /api/info` is public and cannot prove the password.
+
 ## Security notes
 
 - **`GET /api/config` returns the resolved provider `apiKey` in plaintext.** The server is
@@ -46,6 +87,8 @@ The probe starts a **dedicated** `opencode serve` (own port, own `XDG_*` roots, 
 - Per-location project config (`opencode.json`, `.opencode/`) is still stripped from throwaway
   worktrees by the dispatch handler; `XDG_CONFIG_HOME` is pinned to an empty root on the
   server so the operator's global MCP servers never reach a worker.
+- The server runs under `env -i`: only `PATH`/`HOME`/`TMPDIR`/`LANG` plus the generated env
+  (`opencodeServerEnv`). agent-gateway's own tokens never reach a worker shell.
 
 ## Design (Waves 2–4)
 
@@ -70,12 +113,13 @@ script for the same Background Task Management reason as `agent-gateway-start.sh
 State lives under `~/.local/share/agent-gateway/opencode/` (`cfg/ data/ state/ cache/` and
 `opencode.db` via `OPENCODE_DB`) — never `/tmp` (same sweep reason as the logs). Credentials come
 from the Keychain items `getIuConfig()` already reads; the config is generated from the model
-registry (`buildOpencodeConfig`) once at server start, not per run.
+registry (`buildOpencodeServerConfig`) once at server start, not per run.
 
-**Per-run config moves onto the session.** Model → `model:{providerID,id,variant}`; the
+**Per-run config moves onto the session (Wave 3).** Model → `model:{providerID,id,variant}`; the
 permission profile → `permissions` rules (catch-all deny first, specific allows after, per the
-last-match rule); `PWD`/worktree → `location.directory`; per-job env (`GIT_DENY_CREDENTIALS_ENV`)
-→ `PUT /api/session/{id}/environment`.
+last-match rule — in Wave 2 this is the `agw-*` agent selected with `--agent`); `PWD`/worktree →
+`location.directory`; per-job env (`GIT_DENY_CREDENTIALS_ENV`, research credentials) → `PUT
+/api/session/{id}/environment`, which retires the research-validation limitation above.
 
 **Usage and liveness (Wave 3).** Usage is read from the assistant messages (paginated), the
 settled rollup is the spend total. The idle watchdog keys off the newest message/tool-state
@@ -102,12 +146,22 @@ The 2026-10-11 `brew upgrade` changed behaviour under a running agw and broke ev
   agw jobs --running                      # step 0: nothing running — an upgrade under a live episode is the 2026-10-11 incident
   brew unpin opencode && brew upgrade opencode
   bun scripts/opencode-v2-probe.ts        # all sections; a few cents of IU tokens
-  bun scripts/opencode-live-probe.ts      # the current spawn path, until Wave 3 retires it
+  # then bump OPENCODE_PINNED_VERSION (server/mcp/opencode-server.ts), make install-opencode-agent
   # green → keep, update the version noted in this file, brew pin opencode
   # red   → brew uninstall opencode && brew install opencode@<old> (or the cached bottle), pin
   ```
-- Wave 2 adds the running-server version to `/api/jobs/health` and `make verify`, and refuses
-  to start episodes against a server whose version differs from the pinned one.
+- Wave 2 (shipped): the running-server version is in `/api/jobs/health` (`opencodeServer`) and
+  `make verify`, the wrapper refuses to start a binary that is not the pinned one, and
+  episodes refuse to start against a server whose version differs from it.
+- `scripts/opencode-live-probe.ts` probes the SHARED-server path with the real binary (cents of
+  IU tokens; needs the LaunchAgent running): run it after the v2 probe on any upgrade and after a
+  change to `opencode-runner.ts` / `opencode-server.ts`:
+  `env -u CLAUDECODE bun scripts/opencode-live-probe.ts`. Each check has a control — `agw-readonly`
+  refuses `touch`/redirect/`curl -o`/file-write tools while `git status`/`cat`/`rg` run; an
+  `agw-implement` write lands and sees `GIT_CONFIG_GLOBAL=/dev/null`; the shell runs in the
+  client's cwd; a hostile client env does not loosen `agw-readonly`; a client kill leaves
+  `late.txt` coming (control) but `interruptOpencodeSession` stops it. (The retired
+  `--standalone` probe is in git history.)
 
 ## Credentials of the shared service (interactive `oc`, `rd wave --kind opencode`)
 
@@ -120,10 +174,15 @@ service started without the pane's environment, so the `{env:IU_*}` placeholders
 Verified with a real reply (`PONG`) through the shared service from an `_oc_env` pane. See
 dotfiles `docs/opencode.md`.
 
-## Open items carried into Wave 2
+## Open items
 
-- Express the real read-only bash allowlist (`READ_ONLY_BASH_RULES`) as session rules and run it
-  through the probe's `permission-order` shape against every entry, not just `git status*`.
+- Done in Wave 2 as agent rules (`READ_ONLY_SHELL_RULES`); still to run through the probe's
+  `permission-order` shape against every entry, not just `git status*`.
+- Not yet measured under `--server`: whether SIGTERM to the `opencode run` client stops the
+  server-side session (Wave 3's `interrupt` is the reliable cancel), and whether the final
+  turn's `step_finish` is still dropped (`usageIncomplete`).
+- `database is locked` retry removed (single spawn per attempt); re-measure with concurrent live
+  jobs and restore the retry (`git log -S isDbLockedFailure`) only if locks appear.
 - Decide whether to move to 2.0.29 (changelog exists from 2.0.26) behind the gate above.
 - Measure the title-generation call: whether a session-level setting turns it off (it is cost
   and a `session.renamed` event nobody needs).

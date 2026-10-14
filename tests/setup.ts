@@ -65,3 +65,12 @@ process.env.AGENT_GATEWAY_SESSIONS_LOG ??= join(
   mkdtempSync(join(tmpdir(), "agent-gateway-test-sessions-")),
   "agent-gateway-sessions.jsonl",
 );
+
+// The shared OpenCode server (server/mcp/opencode-server.ts): a test process must never read the
+// real password file or talk to the live server on its port. Port 1 refuses instantly, so any
+// test that reaches `getOpencodeServerStatus` unstubbed sees "server down" rather than the
+// operator's real server; tests that need a live fake override both per test.
+process.env.AGENT_GATEWAY_OPENCODE_STATE_DIR ??= mkdtempSync(
+  join(tmpdir(), "agent-gateway-test-opencode-"),
+);
+process.env.AGENT_GATEWAY_OPENCODE_PORT ??= "1";

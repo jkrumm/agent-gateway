@@ -2,8 +2,9 @@
 //
 // `dispatch`/`dispatch_implement` (AGENT_OC/AGENT_OC_IMPLEMENT, server/lib/routing.ts) run
 // `opencode run` instead of `claude -p` — see routing.ts's module-header Harness paragraph
-// for why. This module owns everything specific to that CLI: argv/config/env builders (pure,
-// unit-tested directly), its NDJSON event shape (measured against real `opencode run --format
+// for why. This module owns everything specific to driving that CLI: argv/env builders (pure,
+// unit-tested directly; the SERVER it attaches to — config, permission agents, state, status —
+// is `opencode-server.ts`), its NDJSON event shape (measured against real `opencode run --format
 // json` output — re-captured from opencode 2.0.25 on 2026-10-11, see
 // tests/fixtures/opencode-events*.jsonl), the per-process
 // lifecycle (`runOpencodeProcessLifecycle`) and one attempt runner (`runOpencodeAttempt`),
@@ -18,16 +19,17 @@
 // section).
 //
 // Supports any model in the registry (`server/lib/models.ts`) whose `harnesses` include
-// `opencode`: limits, rates and effort variants in the generated provider config and the cost
-// computation come from the registry entry of the model in use, and `runOpencodeAttempt`
-// refuses an unregistered or non-opencode id outright. Two providers are always emitted
-// (`iu-chat`, `iu-responses`) over the same IU OpenAI base; the registry's `wire` picks which
-// one carries the model and therefore the `-m` prefix — GPT ids ride Responses only.
+// `opencode`: the cost computation comes from the registry entry of the model in use, and
+// `runOpencodeAttempt` refuses an unregistered or non-opencode id outright. The registry's
+// `wire` picks the provider (`iu-chat`/`iu-responses`) and therefore the `-m` prefix — GPT ids
+// ride Responses only.
+//
+// Episodes attach to ONE long-lived server (`opencode run --server <url> --agent <agw agent>`,
+// docs/opencode-v2.md): per-run permissions are the agent, per-run env is impossible (the shell
+// inherits the server's env — `assertExtraEnvCarriedByServer`), and an unreachable or
+// wrong-version server fails the attempt before any spawn, as a transport-class failure.
 
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { Subprocess } from "bun";
 import { getIuConfig } from "../lib/iu-openai.ts";
 import { getModel, type ModelEntry } from "../lib/models.ts";
@@ -46,6 +48,18 @@ import {
   type SessionProgress,
   type SessionResult,
 } from "./session-runner.ts";
+import {
+  getOpencodeServerStatus,
+  interruptOpencodeSession,
+  OPENCODE_AGENT_IMPLEMENT,
+  OPENCODE_AGENT_READONLY,
+  OPENCODE_DROPPED_EXTRA_ENV,
+  opencodeProviderForWire,
+  opencodeServerCarriedEnv,
+  opencodeServerUrl,
+  readServerPassword,
+  type OpencodeServerStatus,
+} from "./opencode-server.ts";
 import { readTrimmedLines, workerBaseEnv } from "./worker-shared.ts";
 
 // ── Binary resolution ─────────────────────────────────────────────────────────
@@ -65,10 +79,6 @@ const OPENCODE_BIN = process.env.OPENCODE_BIN ?? Bun.which("opencode") ?? "openc
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const IDLE_CHECK_INTERVAL_MS = 5_000;
 const SIGKILL_GRACE_MS = 5_000;
-const DB_LOCK_MAX_ATTEMPTS = 3;
-/** Full jitter range for a db-lock retry's backoff — see `dbLockRetryDelayMs`. */
-const DB_LOCK_RETRY_MIN_MS = 1_000;
-const DB_LOCK_RETRY_JITTER_MS = 3_000;
 /** Reachability-probe budget before any `opencode run` spawn — see `preflightIuEndpoint`.
  *  Override: `AGENT_GATEWAY_OPENCODE_PREFLIGHT_MS` (read per call, so no reload for a test). */
 const DEFAULT_PREFLIGHT_MS = 5_000;
@@ -84,19 +94,19 @@ export type OpencodeSubprocess = Subprocess<"ignore", "pipe", "pipe">;
 
 export interface OpencodeArgsInput {
   bin: string;
+  /** The shared server's base URL (`opencodeServerUrl()`). */
+  url: string;
+  /** Selects the `agw-readonly` or `agw-implement` agent — the per-run permission profile. */
+  readOnly: boolean;
   model: string;
   variant?: string;
   resumeSessionId?: string;
   prompt: string;
 }
 
-/** opencode provider ids `buildOpencodeConfig` emits — one per IU OpenAI-route wire. */
-export const OPENCODE_PROVIDER_CHAT = "iu-chat";
-export const OPENCODE_PROVIDER_RESPONSES = "iu-responses";
-
 /** The registry entry for a model this harness can drive, or a thrown refusal: unregistered,
  *  or no `opencode` in its `harnesses` (e.g. the Anthropic-wire ids, which only `claude -p`
- *  reaches). Also the only place `wire` is mapped to a provider. */
+ *  reaches). */
 export function opencodeModel(model: string): ModelEntry & { wire: "chat" | "responses" } {
   const entry = getModel(model);
   if (!entry) {
@@ -108,32 +118,33 @@ export function opencodeModel(model: string): ModelEntry & { wire: "chat" | "res
   return entry as ModelEntry & { wire: "chat" | "responses" };
 }
 
-function providerFor(entry: { wire: "chat" | "responses" }): string {
-  return entry.wire === "responses" ? OPENCODE_PROVIDER_RESPONSES : OPENCODE_PROVIDER_CHAT;
-}
-
 /** The full `opencode` argument vector, INCLUDING the binary as element 0. Targets the 2.x CLI:
  *  opencode 2.0 dropped `run --dir` and `--variant`. The working directory is no longer a flag —
  *  opencode 2.x resolves it from the inherited `PWD` env var, NOT from `Bun.spawn`'s `cwd`
- *  (measured 2026-10-11 on 2.0.25), so `buildOpencodeEnv` pins `env.PWD` to the spawn `cwd`
- *  itself — and `--standalone` pins the run to its own private
- *  server rooted there instead of the shared per-user background server, preserving the
- *  per-episode worktree isolation. `-m <provider>/<model>` names the provider
- *  (`iu-chat`/`iu-responses`, `buildOpencodeConfig` below) and the model id together — opencode
- *  has no bare `--model <id>` against a custom provider — with the reasoning variant appended as
- *  `#<variant>` (2.x's `provider/model#variant` form). The `--` before `prompt` is load-bearing,
- *  not decorative: measured 2026-09-24, a message starting with `-` (e.g. a brief that happens to
- *  begin "-foo bar") is parsed by opencode's own yargs CLI as an unknown FLAG without it — the
- *  command prints --help and exits 0 with no session ever starting, which this module would
- *  otherwise only see as an opaque "no output" failure. */
+ *  (measured 2026-10-11 on 2.0.25; still true with `--server`, 2026-10-14), so
+ *  `buildOpencodeEnv` pins `env.PWD` to the spawn `cwd` itself. `--server <url>` attaches to the
+ *  shared server (opencode-server.ts) instead of a private `--standalone` one, and `--agent`
+ *  picks the permission profile defined in that server's config — `run --server` has no
+ *  permission, env or config flag, so the agent IS the per-run policy. `-m <provider>/<model>`
+ *  names the provider (`iu-chat`/`iu-responses`, from the server config) and the model id
+ *  together — opencode has no bare `--model <id>` against a custom provider — with the reasoning
+ *  variant appended as `#<variant>` (2.x's `provider/model#variant` form). The `--` before
+ *  `prompt` is load-bearing, not decorative: measured 2026-09-24, a message starting with `-`
+ *  (e.g. a brief that happens to begin "-foo bar") is parsed by opencode's own yargs CLI as an
+ *  unknown FLAG without it — the command prints --help and exits 0 with no session ever
+ *  starting, which this module would otherwise only see as an opaque "no output" failure. */
 export function buildOpencodeArgs(input: OpencodeArgsInput): string[] {
-  const { bin, model, variant, resumeSessionId, prompt } = input;
+  const { bin, url, readOnly, model, variant, resumeSessionId, prompt } = input;
+  const provider = opencodeProviderForWire(opencodeModel(model).wire);
   return [
     bin,
     "run",
-    "--standalone",
+    "--server",
+    url,
+    "--agent",
+    readOnly ? OPENCODE_AGENT_READONLY : OPENCODE_AGENT_IMPLEMENT,
     "-m",
-    `${providerFor(opencodeModel(model))}/${model}${variant ? `#${variant}` : ""}`,
+    `${provider}/${model}${variant ? `#${variant}` : ""}`,
     ...(resumeSessionId ? ["--session", resumeSessionId] : []),
     "--format",
     "json",
@@ -142,289 +153,75 @@ export function buildOpencodeArgs(input: OpencodeArgsInput): string[] {
   ];
 }
 
-export interface OpencodeConfigInput {
-  model: string;
-  readOnly: boolean;
-}
-
-/** A permission value: the simple action string, or — for `bash` in the read-only profile —
- *  opencode's granular object form (command pattern → action). Mirrors the schema's
- *  `PermissionRuleConfig` (`PermissionActionConfig | PermissionObjectConfig`). */
-type OpencodePermissionValue = "allow" | "deny" | Record<string, "allow" | "deny">;
-
-/** Every opencode permission key this config sets, verified against the live schema
- *  (`curl https://opencode.ai/config.json`, 2026-09-24 — `$defs.PermissionConfig`). Notably:
- *  there is no `write` key (file mutation is governed by `edit` alone — no tool is ever named
- *  `write` in a real event stream either, see tests/fixtures/opencode-events.jsonl) and no
- *  `todoread` key (only `todowrite`) — both appear in shorthand descriptions of this schema
- *  elsewhere, but the schema itself does not have them. Exported so the "no promptable key
- *  left unset" test iterates the same list `buildOpencodeConfig` populates from. */
-export const OPENCODE_PERMISSION_KEYS = [
-  "bash",
-  "read",
-  "edit",
-  "glob",
-  "grep",
-  "list",
-  "task",
-  "skill",
-  "lsp",
-  "todowrite",
-  "webfetch",
-  "websearch",
-  "question",
-  "doom_loop",
-  "external_directory",
-] as const;
-
-/** The read-only bash allowlist: opencode's OBJECT permission form, mapping a command pattern
- *  to `allow`/`deny`. The leading `"*"` catch-all denies everything; the read commands below
- *  are allowed by name. Patterns use opencode's own wildcard syntax (verified against v1.18.30,
- *  `packages/core/src/util/wildcard.ts`): anchored, `*` = any run of chars, and a trailing
- *  `" *"` is treated as optional — so `"git log *"` matches both `git log` and
- *  `git log --oneline`. `evaluate` in `packages/opencode/src/permission/index.ts` takes the
- *  LAST matching rule, and `shell.ts` builds the matched pattern from the full parsed command
- *  text with a redirect folded in — which is why every re-deny rule below sits AFTER the
- *  allows (a `cat *` allow would otherwise permit `cat x > file`).
- *
- *  Several allowed readers take write/exec flags that would otherwise bypass the profile, so
- *  their dangerous flag forms are re-denied after the allows: `curl`'s `-o`/`-O`/`--output`/
- *  `--remote-name`/`-T`/`--upload-file`/`-K`/`--config`, `rg`'s `--pre`/`--pre=`, and any
- *  `git ... --output`. The deny globs are deliberately flag-position forms (attached or
- *  space-delimited) rather than a bare `curl *-o*` — the latter would match an `-o` anywhere,
- *  including in a URL, header or JSON body. `find` is not allowed at all: workers have
- *  `rg`/`git ls-files`/the glob tool, and `find -exec`/`-delete` are another exec/write
- *  surface. Writes named in the gap — `rm`/`mv`/`cp`/`tee`/`sed -i`/`git commit`/`push`/
- *  `checkout`/`reset`/`apply` — need no explicit rule: none matches an allow pattern, so the
- *  leading `"*"` denies them.
- *
- *  Residual: `curl` POSTing a body is still allowed on purpose (the research-gateway recipe
- *  submits a job that way), so a read-only worker can still make outbound network writes with
- *  it — only the file-writing/uploading/config-reading flags are removed. */
-const READ_ONLY_BASH_RULES: Record<string, "allow" | "deny"> = {
-  "*": "deny",
-  "git log *": "allow",
-  "git diff *": "allow",
-  "git show *": "allow",
-  "git status *": "allow",
-  "git grep *": "allow",
-  "git ls-files *": "allow",
-  "git rev-parse *": "allow",
-  "rg *": "allow",
-  "cat *": "allow",
-  "ls *": "allow",
-  "head *": "allow",
-  "tail *": "allow",
-  "wc *": "allow",
-  "jq *": "allow",
-  "curl *": "allow",
-  // curl: output / upload / config flags — attached, space-delimited and trailing forms.
-  "curl -o*": "deny",
-  "curl * -o *": "deny",
-  "curl * -o": "deny",
-  "curl -O*": "deny",
-  "curl * -O *": "deny",
-  "curl * -O": "deny",
-  "curl --output*": "deny",
-  "curl * --output*": "deny",
-  "curl --remote-name*": "deny",
-  "curl * --remote-name*": "deny",
-  "curl -T*": "deny",
-  "curl * -T *": "deny",
-  "curl * -T": "deny",
-  "curl --upload-file*": "deny",
-  "curl * --upload-file*": "deny",
-  "curl -K*": "deny",
-  "curl * -K *": "deny",
-  "curl * -K": "deny",
-  "curl --config*": "deny",
-  "curl * --config*": "deny",
-  // rg --pre runs an arbitrary command per file.
-  "rg *--pre *": "deny",
-  "rg *--pre=*": "deny",
-  // git diff/log/show --output=<file> writes to a file.
-  "git * --output*": "deny",
-  "*>*": "deny",
-};
-
-/** Per-run opencode config, passed via `OPENCODE_CONFIG_CONTENT` (see `buildOpencodeEnv`) —
- *  NEVER a file. `permission` is the opencode analogue of claude's `--disallowedTools`:
- *  measured 2026-09-24, the default `ask` permission is auto-REJECTED in `run`
- *  (non-interactive) mode and silently ends the session, so EVERY key in
- *  `OPENCODE_PERMISSION_KEYS` must be explicitly `allow` or `deny` — there is no "ask and it
- *  just works" in this mode, and an omitted key is exactly as broken as one it defaults to
- *  ask on.
- *
- *  `readOnly` is a true read-only profile, not just `edit: deny`: `bash` becomes the
- *  `READ_ONLY_BASH_RULES` object (read commands allowed, everything else default-denied),
- *  `webfetch`/`websearch` are `deny` (workers shell out via `curl` — AGENTS.md's Worker
- *  routing rule), and `edit` is `deny`. A writable session (dispatch implement) keeps the
- *  permissive profile: `bash: "allow"`, `webfetch`/`websearch: "allow"`, `edit: "allow"`.
- *
- *  Verified against 2.0.25 live (2026-10-11): under `--standalone` this config IS honoured by
- *  the private server — a read-only run exposed no `edit`/`write` tool and denied a `shell`
- *  command outside the allowlist ("Permission denied: shell"; `ls` ran, `touch` was refused),
- *  while the same config with `readOnly: false` exposed `write` and created the file. The
- *  `bash` permission key still governs 2.x's renamed `shell` tool — the tool label changed, the
- *  key did not. Without `--standalone` the shared background server ignored the config entirely
- *  ("Model unavailable" for the custom provider), which is why `--standalone` is load-bearing. */
-export function buildOpencodeConfig(input: OpencodeConfigInput): Record<string, unknown> {
-  const { model, readOnly } = input;
-  const entry = opencodeModel(model);
-  const providerOptions = { baseURL: "{env:IU_OPENAI_BASE}", apiKey: "{env:IU_KEY}" };
-  const modelEntry = {
-    name: entry.name,
-    limit: { context: entry.limit.context, output: entry.limit.output },
-    cost: {
-      input: entry.rate.in,
-      output: entry.rate.out,
-      ...(entry.rate.cacheRead !== undefined ? { cache_read: entry.rate.cacheRead } : {}),
-    },
-    // A model that exposes effort levels runs at "high" by default; `#<variant>` on the model
-    // ref (buildOpencodeArgs) picks another.
-    ...(entry.effort.length > 0
-      ? {
-          options: { reasoningEffort: "high" },
-          variants: Object.fromEntries(entry.effort.map((e) => [e, { reasoningEffort: e }])),
-        }
-      : {}),
-  };
-  return {
-    $schema: "https://opencode.ai/config.json",
-    autoupdate: false,
-    share: "disabled",
-    provider: {
-      [OPENCODE_PROVIDER_CHAT]: {
-        npm: "@ai-sdk/openai-compatible",
-        name: "IU unified endpoint (OpenAI route, Chat Completions)",
-        options: providerOptions,
-        models: entry.wire === "chat" ? { [model]: modelEntry } : {},
-      },
-      [OPENCODE_PROVIDER_RESPONSES]: {
-        npm: "@ai-sdk/openai",
-        name: "IU unified endpoint (OpenAI route, Responses)",
-        options: providerOptions,
-        models: entry.wire === "responses" ? { [model]: modelEntry } : {},
-      },
-    },
-    permission: {
-      bash: readOnly ? { ...READ_ONLY_BASH_RULES } : "allow",
-      read: "allow",
-      edit: readOnly ? "deny" : "allow",
-      glob: "allow",
-      grep: "allow",
-      list: "allow",
-      task: "allow",
-      skill: "allow",
-      lsp: "allow",
-      todowrite: "allow",
-      webfetch: readOnly ? "deny" : "allow",
-      websearch: readOnly ? "deny" : "allow",
-      question: "deny",
-      doom_loop: "allow",
-      external_directory: "deny",
-    } satisfies Record<(typeof OPENCODE_PERMISSION_KEYS)[number], OpencodePermissionValue>,
-  };
-}
-
-/** Env vars that decide where opencode looks for its global data/state/cache; the inherited
- *  values are authoritative, never a caller's `extraEnv`. `XDG_CONFIG_HOME` is deliberately
- *  NOT here — it is the root opencode resolves the operator's global CONFIG from, and a worker
- *  run pins it to a private empty root instead (`buildOpencodeEnv`'s `configHome`). */
-const CONFIG_DISCOVERY_ENV = ["HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"];
+/** Env vars an inherited environment may carry that point opencode at another config source;
+ *  the client process must resolve none of them (the server's config is the only one that
+ *  matters, and it was fixed when the server started). */
+const INHERITED_CONFIG_ENV = [
+  "OPENCODE_CONFIG",
+  "OPENCODE_CONFIG_DIR",
+  "OPENCODE_CONFIG_CONTENT",
+  "OPENCODE_CLI_CONFIG_CONTENT",
+];
 
 export interface OpencodeEnvInput {
   tool?: string;
   /** The spawn working directory, pinned as `env.PWD` — opencode 2.x resolves its cwd from
    *  the inherited `PWD` env var, not `Bun.spawn`'s `cwd` option, and `workerBaseEnv` copies
    *  `process.env` verbatim (including the server's own stale `PWD`), so without this the
-   *  spawned session's shell/read tools run against the ambient `PWD`, not the worktree. */
+   *  session's shell/read tools run against the ambient `PWD`, not the worktree. With
+   *  `run --server` the client's cwd/PWD is still what the server honours (measured 2.0.25). */
   cwd: string;
-  extraEnv?: Record<string, string>;
-  iuKey: string;
-  iuOpenaiBase: string;
-  /** The full `OPENCODE_CONFIG_CONTENT` JSON string (`JSON.stringify(buildOpencodeConfig(...))`)
-   *  — see the module header's precedence note: a repo-local `opencode.json`/`opencode.jsonc`
-   *  OVERRIDES `OPENCODE_CONFIG` (a file path), but `OPENCODE_CONFIG_CONTENT` overrides the
-   *  repo file. Passing the config this way, rather than writing it to a temp file and
-   *  pointing `OPENCODE_CONFIG` at it, is a security requirement, not a style choice — see
-   *  `buildOpencodeEnv`'s own doc comment. */
-  opencodeConfigContent: string;
-  /** The `XDG_CONFIG_HOME` a worker run gets, pinning opencode's GLOBAL config root to a
-   *  private, empty directory created for the run (`runOpencodeAttempt`). Without it opencode
-   *  merges the operator's global config — including any `mcp` servers it registers there, a
-   *  capability the permission profile below cannot reach — into the per-run config. */
-  configHome: string;
+  /** The server's HTTP Basic password (`readServerPassword`), handed over env, never argv. */
+  password: string;
   /** Override for tests — defaults to `process.env`, same convention as `WorkerEnvInput`. */
   baseEnv?: Record<string, string | undefined>;
 }
 
-/** The worker's full spawn env — same credential scrub, `CLAUDE_*` session-var handling and
+/** The CLIENT process's env — the same credential scrub, `CLAUDE_*` session-var handling and
  *  `USAGE_LANE` tagging as `buildWorkerEnv` (session-runner.ts), via the shared
- *  `workerBaseEnv` (worker-shared.ts), so usage-tracker's claude-code collector still
- *  finds a coherent env shape from either harness. `IU_KEY`/`IU_OPENAI_BASE` are what
- *  `buildOpencodeConfig`'s `{env:...}` placeholders resolve against — the API key never
- *  touches argv or disk, only this process-local env the child inherits.
+ *  `workerBaseEnv` (worker-shared.ts), so usage-tracker's claude-code collector still finds a
+ *  coherent env shape from either harness; plus `PWD` and the server password (added AFTER the
+ *  scrub, which would delete a `*PASSWORD*` name). The IU key is not here: the shared server
+ *  holds it (opencode-server.ts), the client never talks to IU.
  *
- *  `OPENCODE_CONFIG_CONTENT`, never `OPENCODE_CONFIG` (a file path) — measured live,
- *  2026-09-24: a repo-local `opencode.json`/`opencode.jsonc` in the worktree OVERRIDES an
- *  `OPENCODE_CONFIG` file path (a malicious repo config wins over the handler-supplied one
- *  written to a temp file — a real, exploitable precedence bug the original implementation
- *  had), but `OPENCODE_CONFIG_CONTENT` wins over the repo file every time. Passing the config
- *  as an env value rather than a file also removes the temp-file lifecycle entirely (no
- *  create/chmod/unlink, no window where a `0600` file sits on disk with the IU key baked into
- *  its `{env:...}` — wait, it never was baked in, but the file itself was still a leak
- *  surface for the config SHAPE). `extraEnv` (e.g. dispatch's `GIT_DENY_CREDENTIALS_ENV`) is
- *  applied before the module-owned values, which therefore always win. */
+ *  This env does NOT reach the worker's shell — that is the server process's env (measured
+ *  2026-10-14 on 2.0.25), which is why `runOpencodeAttempt` refuses any `extraEnv` the server
+ *  does not already carry (`assertExtraEnvCarriedByServer`). */
 export function buildOpencodeEnv(input: OpencodeEnvInput): Record<string, string> {
-  const {
-    tool,
-    cwd,
-    extraEnv,
-    iuKey,
-    iuOpenaiBase,
-    opencodeConfigContent,
-    configHome,
-    baseEnv = process.env,
-  } = input;
-
+  const { tool, cwd, password, baseEnv = process.env } = input;
   const env = workerBaseEnv(baseEnv, tool);
-  // `extraEnv` first, so every module-owned value below wins over it: a caller (dispatch's
-  // `readOnly: true` plus its own `extraEnv`) must not be able to replace the permission
-  // config, point opencode at another config source, or redirect the IU key to another base.
-  // Global data/state/cache roots too: opencode reads its `opencode.db` and session store from
-  // `XDG_DATA_HOME`/`XDG_STATE_HOME`, so a caller must not be able to repoint them at a
-  // location it controls.
-  const discovery = Object.fromEntries(
-    CONFIG_DISCOVERY_ENV.filter((k) => env[k] !== undefined).map((k) => [k, env[k]]),
-  );
-  if (extraEnv) Object.assign(env, extraEnv);
-  for (const k of CONFIG_DISCOVERY_ENV) delete env[k];
-  Object.assign(env, discovery);
-  env.IU_KEY = iuKey;
-  env.IU_OPENAI_BASE = iuOpenaiBase;
-  // Every other config source that could merge in or shadow the permission profile is dropped
-  // (an inherited or caller-supplied one is not this worker's business): the file-path
-  // `OPENCODE_CONFIG`, the config dir, and the CLI-config content var.
-  delete env.OPENCODE_CONFIG;
-  delete env.OPENCODE_CONFIG_DIR;
-  delete env.OPENCODE_CLI_CONFIG_CONTENT;
-  env.OPENCODE_CONFIG_CONTENT = opencodeConfigContent;
-  // opencode resolves its GLOBAL config from `$XDG_CONFIG_HOME/opencode/` (`~/.config/opencode`
-  // by default), and MERGES it into every source above — so the operator's `mcp` servers land
-  // in a worker run that declares none. Measured 2026-10-13 on 2.0.25: a global `mcp` server
-  // starts for a worker whose `OPENCODE_CONFIG_CONTENT` has no `mcp` block, and a bare
-  // `mcp: {<name>: {enabled:false}}` there does NOT suppress it (only repeating the server's
-  // full definition does, which would mean copying operator config — including any credential
-  // in it — into the worker). Pinning `XDG_CONFIG_HOME` to a private empty root instead makes
-  // the global-config layer empty for the run; the module's own config is unaffected, it rides
-  // `OPENCODE_CONFIG_CONTENT` (a higher-precedence source).
-  env.XDG_CONFIG_HOME = configHome;
-  // opencode 2.x resolves its working directory from `PWD`, not `Bun.spawn`'s cwd — without
-  // this pin the session's shell/read tools run against the server's stale ambient `PWD`,
-  // silently breaking per-episode worktree isolation. The spawn cwd is authoritative.
+  for (const k of INHERITED_CONFIG_ENV) delete env[k];
   env.PWD = cwd;
+  env.OPENCODE_SERVER_PASSWORD = password;
   return env;
+}
+
+/** Throws unless every `extraEnv` entry is one the shared server already carries, with the same
+ *  value (`opencodeServerCarriedEnv`). A shared server takes no per-run env, so a caller adding
+ *  a new variable would otherwise lose it silently; a value that differs from the server's is
+ *  refused for the same reason. The one exception is `OPENCODE_DROPPED_EXTRA_ENV` (the
+ *  research-gateway credentials): those are credentials the server must NOT carry — any worker
+ *  shell on it could read them — so they are returned as `dropped` for the caller to log, and
+ *  research validation is unavailable on OpenCode review angles until per-session env (Wave 3). */
+export function assertExtraEnvCarriedByServer(
+  extraEnv: Record<string, string> | undefined,
+  carried: Record<string, string> = opencodeServerCarriedEnv(),
+): { dropped: string[] } {
+  if (!extraEnv) return { dropped: [] };
+  const droppable = new Set<string>(OPENCODE_DROPPED_EXTRA_ENV);
+  const dropped = Object.keys(extraEnv).filter((key) => droppable.has(key));
+  const rejected = Object.entries(extraEnv)
+    .filter(([key, value]) => !droppable.has(key) && carried[key] !== value)
+    .map(([key]) => key);
+  if (rejected.length > 0) {
+    throw new Error(
+      `runOpencodeAttempt: extraEnv ${rejected.join(", ")} cannot reach a worker on the shared ` +
+        "opencode server (its shell inherits the SERVER's env, fixed at server start) — add the " +
+        "variable to opencodeServerCarriedEnv() in opencode-server.ts and restart the server, or " +
+        "run the route on the claude harness",
+    );
+  }
+  return { dropped };
 }
 
 /** Appended to the prompt when `SessionOptions.jsonSchema` is set — opencode has no
@@ -733,26 +530,6 @@ function preflightBudgetMs(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_PREFLIGHT_MS;
 }
 
-// ── Concurrency: the shared opencode.db can report itself locked under concurrent starts ──
-
-const DB_LOCKED_RE = /database is locked/i;
-
-/** A spawn attempt that exited non-zero, produced ZERO events, and whose stderr names the
- *  shared `~/.local/share/opencode/opencode.db` as locked — measured under concurrent
- *  dispatch episodes, 2026-09-24. Narrow on purpose: a non-zero exit that DID produce events
- *  is a real session failure, not a lock race, and must not be blindly retried (it could
- *  duplicate partial work). */
-export function isDbLockedFailure(exitCode: number, eventCount: number, stderr: string): boolean {
-  return exitCode !== 0 && eventCount === 0 && DB_LOCKED_RE.test(stderr);
-}
-
-/** Full jitter across `[DB_LOCK_RETRY_MIN_MS, DB_LOCK_RETRY_MIN_MS + DB_LOCK_RETRY_JITTER_MS)`
- *  — enough spread that a bounded set of concurrent dispatch episodes racing the same lock
- *  don't retry in lockstep. */
-export function dbLockRetryDelayMs(): number {
-  return DB_LOCK_RETRY_MIN_MS + Math.random() * DB_LOCK_RETRY_JITTER_MS;
-}
-
 // ── Per-process lifecycle ─────────────────────────────────────────────────────
 //
 // Extracted out of `runOpencodeAttempt` so this exact lifecycle — registration into the
@@ -776,6 +553,8 @@ export interface OpencodeProcLifecycleCtx {
    *  `SIGKILL_GRACE_MS` (5s); a test asserting "a SIGTERM-ignoring child still gets
    *  SIGKILL" would otherwise have to burn 5 real seconds per run. */
   sigkillGraceMs?: number;
+  /** Test seam for the server-side stop; production uses `interruptOpencodeSession`. */
+  interrupt?: typeof interruptOpencodeSession;
 }
 
 export interface OpencodeProcLifecycleResult {
@@ -868,44 +647,76 @@ export async function runOpencodeProcessLifecycle(
     }
   };
 
+  // Killing the `opencode run --server` CLIENT does not stop the server-side session — it stays
+  // `running` and its tools keep executing (measured 2.0.25: a file written 40 s after the
+  // kill). So once the client is gone, on EVERY exit path (clean exit, idle kill, cancel,
+  // shutdown, a throwing reader), the session is interrupted on the server. `interrupted:false`
+  // on an already-idle session is a harmless no-op; failures are logged, never thrown.
+  const interruptServerSession = async (): Promise<void> => {
+    await proc.exited.catch(() => undefined);
+    const sessionId = accum.sessionId;
+    if (!sessionId) return;
+    const result = await (ctx.interrupt ?? interruptOpencodeSession)(sessionId);
+    runnerLogger()[result.ok ? "info" : "warn"](
+      {
+        event: "session.opencode_interrupt",
+        project: ctx.cwd,
+        ...errCtx,
+        sessionId,
+        interrupted: result.interrupted,
+        ok: result.ok,
+        error: result.error,
+      },
+      "opencode server session interrupt after client exit",
+    );
+  };
+
   try {
-    // A trailing partial line (no newline before EOF) is dropped, as before.
-    await readTrimmedLines(proc.stdout, {
-      onChunk: () => {
-        lastChunkAt = Date.now();
-      },
-      onLine: (line) => {
-        const ev = parseOpencodeLine(line);
-        if (!ev) return;
-        eventCount++;
-        const prevSessionId = accum.sessionId;
-        accum = reduceOpencodeEvent(accum, ev);
-        if (!prevSessionId && accum.sessionId) {
-          announceOpencodeSessionId(accum.sessionId, {
-            iuOpenaiBase: ctx.iuOpenaiBase,
-            model: ctx.model,
-            backend: ctx.backend,
-            tool: ctx.tool,
-            onSessionId: ctx.onSessionId,
-          });
-        }
-        ctx.turnsRef.current = accum.turns;
-        emitActivity();
-      },
-    });
-  } finally {
-    clearInterval(idleWatchdog);
-    if (heartbeatHandle !== null) clearInterval(heartbeatHandle);
-    // A reader.read() throw (or any other exception escaping the loop above) must not
-    // orphan the child — same guarantee the idle watchdog's own kill() gives a wedged
-    // worker, just triggered by a different failure shape. No-op if already exited.
-    forceKill();
+    try {
+      // A trailing partial line (no newline before EOF) is dropped, as before.
+      await readTrimmedLines(proc.stdout, {
+        onChunk: () => {
+          lastChunkAt = Date.now();
+        },
+        onLine: (line) => {
+          const ev = parseOpencodeLine(line);
+          if (!ev) return;
+          eventCount++;
+          const prevSessionId = accum.sessionId;
+          accum = reduceOpencodeEvent(accum, ev);
+          if (!prevSessionId && accum.sessionId) {
+            announceOpencodeSessionId(accum.sessionId, {
+              iuOpenaiBase: ctx.iuOpenaiBase,
+              model: ctx.model,
+              backend: ctx.backend,
+              tool: ctx.tool,
+              onSessionId: ctx.onSessionId,
+            });
+          }
+          ctx.turnsRef.current = accum.turns;
+          emitActivity();
+        },
+      });
+    } finally {
+      clearInterval(idleWatchdog);
+      if (heartbeatHandle !== null) clearInterval(heartbeatHandle);
+      // A reader.read() throw (or any other exception escaping the loop above) must not
+      // orphan the child — same guarantee the idle watchdog's own kill() gives a wedged
+      // worker, just triggered by a different failure shape. No-op if already exited.
+      forceKill();
+    }
+  } catch (err) {
+    // Not awaited: the reader failure is already propagating, and the interrupt waits for the
+    // (possibly SIGKILL-escalated) client exit first — it must not delay the rejection.
+    void interruptServerSession().catch(() => undefined);
+    throw err;
   }
 
   const stderrTrimmed = (await stderrPromise).trim();
   const exitCode = await proc.exited;
   // See this function's own doc comment for why this is cleared HERE, not earlier.
   if (sigkillTimer !== null) clearTimeout(sigkillTimer);
+  await interruptServerSession();
 
   return { accum, eventCount, exitCode, stderrTrimmed, killReason, idleMsAtKill };
 }
@@ -921,6 +732,9 @@ export interface OpencodeAttemptContext {
 /** Test seams — production passes nothing. */
 export interface OpencodeAttemptDeps {
   preflight?: IuPreflight;
+  serverStatus?: () => Promise<OpencodeServerStatus>;
+  password?: () => string;
+  interrupt?: typeof interruptOpencodeSession;
   spawn?: (argv: string[], options: Parameters<typeof Bun.spawn>[1]) => OpencodeSubprocess;
 }
 
@@ -956,8 +770,8 @@ export async function runOpencodeAttempt<T>(
   const { model, backend, variant } = ctx;
 
   // No caller passes this for a dispatch route — opencode's permission profile
-  // (buildOpencodeConfig) has no per-tool-name allow/deny surface to extend, unlike claude's
-  // `--disallowedTools`. A caller that starts doing so needs this module updated, not a
+  // (the `agw-*` agents, opencode-server.ts) has no per-tool-name allow/deny surface to extend,
+  // unlike claude's `--disallowedTools`. A caller that starts doing so needs this module updated, not a
   // silently-ignored option.
   if (extraDisallowedTools && extraDisallowedTools.length > 0) {
     throw new Error(
@@ -979,6 +793,17 @@ export async function runOpencodeAttempt<T>(
     runnerLogger().debug(
       { event: "session.opencode_ignored_option", option: "mcpServers" },
       "mcpServers has no effect on the opencode harness",
+    );
+  }
+
+  // A shared server takes no per-run env: the worker's shell inherits the SERVER's. Refuse
+  // loudly rather than let a caller's variable silently vanish — except the research
+  // credentials, dropped on purpose (keys only in the log, never values).
+  const { dropped: droppedExtraEnv } = assertExtraEnvCarriedByServer(extraEnv);
+  if (droppedExtraEnv.length > 0) {
+    runnerLogger().warn(
+      { event: "session.opencode_extra_env_dropped", tool, keys: droppedExtraEnv },
+      "extraEnv dropped on the opencode harness — research validation is unavailable until per-session env",
     );
   }
 
@@ -1033,15 +858,13 @@ export async function runOpencodeAttempt<T>(
     };
   }
 
-  // Never spawn against a dead endpoint: `opencode run` would retry it forever. Classified as
-  // a transport failure (connection-class text, no `iuConfigError` — the breaker must count it).
-  if (jobId !== undefined && isCancelled?.(jobId)) throw new SessionCancelledError(jobId);
-  const probe = await (deps.preflight ?? preflightIuEndpoint)(iuOpenaiBase, preflightBudgetMs());
-  if (!probe.ok) {
-    const error = `IU endpoint unreachable before opencode spawn: ${probe.reason}`;
+  // Never spawn against a dead endpoint or server: `opencode run` would retry them forever.
+  // Both are classified as transport failures (connection-class text, no `iuConfigError` — the
+  // breaker must count them), so the retry ladder and the Max fallback treat them as such.
+  const refuseSpawn = (reason: string, error: string, logMessage: string): SessionResult<T> => {
     runnerLogger().error(
-      { event: "session.opencode_preflight_failed", project: cwd, ...errCtx, reason: probe.reason },
-      "IU endpoint unreachable — opencode not spawned",
+      { event: `session.${reason}`, project: cwd, ...errCtx, error },
+      logMessage,
     );
     writeAttribution({
       sessionId: sessionUuid,
@@ -1053,7 +876,7 @@ export async function runOpencodeAttempt<T>(
       tsStart,
       tsEnd: new Date().toISOString(),
       outcome: "error",
-      reason: "opencode_preflight_failed",
+      reason,
     });
     return {
       ok: false,
@@ -1063,26 +886,38 @@ export async function runOpencodeAttempt<T>(
       backend,
       model,
     };
+  };
+
+  if (jobId !== undefined && isCancelled?.(jobId)) throw new SessionCancelledError(jobId);
+  const probe = await (deps.preflight ?? preflightIuEndpoint)(iuOpenaiBase, preflightBudgetMs());
+  if (!probe.ok) {
+    return refuseSpawn(
+      "opencode_preflight_failed",
+      `IU endpoint unreachable before opencode spawn: ${probe.reason}`,
+      "IU endpoint unreachable — opencode not spawned",
+    );
   }
 
-  const opencodeConfigContent = JSON.stringify(buildOpencodeConfig({ model, readOnly }));
-  // A private, empty GLOBAL-config root for this run — opencode merges the operator's
-  // `$XDG_CONFIG_HOME/opencode/` config (including its `mcp` servers) into every worker
-  // otherwise; see `buildOpencodeEnv`'s `configHome` note. Removed once the worker is gone.
-  const configHome = mkdtempSync(join(tmpdir(), "agw-opencode-config-"));
-  const env = buildOpencodeEnv({
-    tool,
-    cwd,
-    extraEnv,
-    iuKey,
-    iuOpenaiBase,
-    opencodeConfigContent,
-    configHome,
-  });
+  // The shared server must be up AND the pinned build; the text carries a connection-class
+  // token whatever the cause (down, wrong version, rejected password) so a wrong-version server
+  // falls through to the Max fallback instead of failing the episode outright.
+  const server = await (deps.serverStatus ?? getOpencodeServerStatus)();
+  if (!server.ok) {
+    return refuseSpawn(
+      "opencode_server_unavailable",
+      `opencode server unavailable before spawn (transport-class, fetch failed): ${server.error ?? "not ok"}`,
+      "opencode server unavailable — opencode not spawned",
+    );
+  }
+  const password = (deps.password ?? readServerPassword)();
+
+  const env = buildOpencodeEnv({ tool, cwd, password });
 
   const finalPrompt = jsonSchema ? appendJsonSchemaInstruction(prompt, jsonSchema) : prompt;
   const argv = buildOpencodeArgs({
     bin: OPENCODE_BIN,
+    url: opencodeServerUrl(),
+    readOnly,
     model,
     variant,
     resumeSessionId,
@@ -1103,58 +938,25 @@ export async function runOpencodeAttempt<T>(
   );
 
   const startMs = performance.now();
-  let accum: OpencodeAccum = INITIAL_OPENCODE_ACCUM;
-  let eventCount = 0;
-  let exitCode = 0;
-  let stderrTrimmed = "";
-  let killReason: "idle" | null = null;
-  let idleMsAtKill: number | null = null;
-
-  try {
-    for (let dbAttempt = 1; dbAttempt <= DB_LOCK_MAX_ATTEMPTS; dbAttempt++) {
-      if (jobId !== undefined && isCancelled?.(jobId)) {
-        throw new SessionCancelledError(jobId);
-      }
-      const proc = deps.spawn
-        ? deps.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe", env })
-        : Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe", env });
-      const streamResult = await runOpencodeProcessLifecycle(proc, {
-        jobId,
-        cwd,
-        model,
-        backend,
-        tool,
-        iuOpenaiBase,
-        onSessionId,
-        onActivity,
-        onProgress,
-        turnsRef,
-      });
-      ({ accum, eventCount, exitCode, stderrTrimmed, killReason, idleMsAtKill } = streamResult);
-
-      if (killReason) break; // idle timeout — never retried at the db-lock layer
-      if (
-        isDbLockedFailure(exitCode, eventCount, stderrTrimmed) &&
-        dbAttempt < DB_LOCK_MAX_ATTEMPTS
-      ) {
-        runnerLogger().warn(
-          { event: "session.opencode_db_locked", project: cwd, ...errCtx, dbAttempt },
-          "opencode db locked — retrying spawn",
-        );
-        await Bun.sleep(dbLockRetryDelayMs());
-        if (jobId !== undefined && isCancelled?.(jobId)) {
-          throw new SessionCancelledError(jobId);
-        }
-        continue;
-      }
-      break;
-    }
-  } finally {
-    // The run (including every db-lock retry) is over by the time this fires — child processes
-    // are force-killed by `runOpencodeProcessLifecycle`'s own `finally` — so the private config
-    // root can go, even on a `SessionCancelledError` thrown from inside the loop.
-    rmSync(configHome, { recursive: true, force: true });
-  }
+  if (jobId !== undefined && isCancelled?.(jobId)) throw new SessionCancelledError(jobId);
+  const proc = deps.spawn
+    ? deps.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe", env })
+    : Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe", env });
+  const streamResult = await runOpencodeProcessLifecycle(proc, {
+    jobId,
+    cwd,
+    model,
+    backend,
+    tool,
+    iuOpenaiBase,
+    onSessionId,
+    onActivity,
+    onProgress,
+    turnsRef,
+    interrupt: deps.interrupt,
+  });
+  let { accum, exitCode, stderrTrimmed } = streamResult;
+  const { killReason, idleMsAtKill } = streamResult;
 
   // The runtime IU key is a live env var inside a session with Bash access — redact it out
   // of everything that could echo it back BEFORE any of it is used to build an error message

@@ -21,3 +21,13 @@ The label `com.jkrumm.agent-gateway` and the `scripts/agent-gateway-start.sh`
 wrapper both dodge a macOS Background Task Management denial that otherwise
 skips `RunAtLoad` after a reboot — don't "simplify" either back. Full
 forensic story: `docs/deployment.md`.
+
+A second LaunchAgent, `com.jkrumm.agent-gateway-opencode` (tracked
+`com.jkrumm.agent-gateway-opencode.plist`, wrapper
+`scripts/agent-gateway-opencode-start.sh`), runs the shared OpenCode v2 server that
+dispatch episodes attach to. Same rules: edit the tracked plist, never start `opencode
+serve` by hand, `make install-opencode-agent` / `uninstall-opencode-agent`, logs
+`~/Library/Logs/agent-gateway-opencode.{log,err}`. `make deploy` installs it only when
+absent and never restarts a loaded one (a restart kills attached episodes); `make
+verify` fails when it is down or not the pinned opencode. `docs/deployment.md`
+§ The shared OpenCode server.

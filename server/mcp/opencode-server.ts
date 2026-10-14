@@ -1,0 +1,540 @@
+// ── The shared OpenCode v2 server — the one long-lived `opencode serve` agw's episodes attach to ──
+//
+// Episodes used to spawn a private `opencode run --standalone` each. Wave 2 (docs/opencode-v2.md)
+// replaces that with ONE server under its own LaunchAgent (`com.jkrumm.agent-gateway-opencode`,
+// scripts/agent-gateway-opencode-start.sh) that outlives an agw `make reload`; an episode is
+// `opencode run --server <url> --agent <agw agent>` (opencode-runner.ts). This module is the
+// single owner of everything about that server that is not the NDJSON stream: where it lives,
+// how a client authenticates, the config it boots with, the env it carries, and whether it is up.
+//
+// What a run can and cannot vary against a shared server (measured on 2.0.25, 2026-10-14):
+//   - the working directory IS honoured from the client process's cwd/PWD;
+//   - the shell tool's environment is the SERVER process's env — client env never reaches it, so
+//     per-run env is impossible and `opencodeServerCarriedEnv` below is the whole list;
+//   - per-run permissions therefore live in two AGENTS defined in the server config
+//     (`--agent agw-readonly|agw-implement` selects one); `run --server` has no permission flag.
+//
+// Permission model (v2, https://opencode.ai/v2/docs/permissions): an ORDERED array of
+// `{action, resource, effect}`, LAST matching rule wins, effects allow|deny|ask. An unmatched
+// action defaults to `ask`, which blocks an unattended session forever — so the read-only agent
+// opens with a catch-all deny and the writable one with a catch-all allow, and neither ever
+// emits `ask`. Agent rules are appended AFTER the built-in base policy (which allows everything
+// but asks for `external_directory` and `.env` reads), so that first catch-all also cancels
+// those asks. v2 action names differ from v1: `shell` (was `bash`), `subagent` (was `task`),
+// `permissions` (was `permission`); `list`, `lsp`, `todowrite` and `doom_loop` are not v2 actions.
+
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { z } from "zod";
+import { GIT_DENY_CREDENTIALS_ENV } from "../jobs/handlers/dispatch-git.ts";
+import { listModels, type ModelEntry } from "../lib/models.ts";
+
+// ── Constants ───────────────────────────────────────────────────────────────────
+
+/** The only opencode build agw drives. `brew pin opencode` holds it; the wrapper refuses to start
+ *  a different binary and `getOpencodeServerStatus` marks a different running version not-ok
+ *  (docs/opencode-v2.md § Version pin and upgrade gate). */
+export const OPENCODE_PINNED_VERSION = "2.0.25";
+
+/** Fixed loopback port. Override: `AGENT_GATEWAY_OPENCODE_PORT` (read per call). */
+export const DEFAULT_OPENCODE_PORT = 49375;
+
+/** Hang guard for the status probe — a plain local HTTP call, not an agent run. */
+const STATUS_TIMEOUT_MS = 2_000;
+
+/** opencode provider ids the server config emits — one per IU OpenAI-route wire. */
+export const OPENCODE_PROVIDER_CHAT = "iu-chat";
+export const OPENCODE_PROVIDER_RESPONSES = "iu-responses";
+
+/** The two permission profiles an episode can select with `--agent`. */
+export const OPENCODE_AGENT_READONLY = "agw-readonly";
+export const OPENCODE_AGENT_IMPLEMENT = "agw-implement";
+
+// ── Permission rules ────────────────────────────────────────────────────────────
+
+export interface OpencodePermissionRule {
+  action: string;
+  resource: string;
+  effect: "allow" | "deny";
+}
+
+const shell = (resource: string, effect: "allow" | "deny"): OpencodePermissionRule => ({
+  action: "shell",
+  resource,
+  effect,
+});
+
+/** The read-only shell allowlist, as ORDERED v2 `shell` rules (last match wins). The leading
+ *  `*` denies everything; the read commands below are allowed by name; every re-deny sits AFTER
+ *  the allows, because a `cat *` allow would otherwise permit `cat x > file` (the scanner folds
+ *  a redirect into the matched command text). A pattern ending in ` *` also matches the bare
+ *  command, so `"git log *"` covers both `git log` and `git log --oneline`; `*` is any run of
+ *  characters and `?` exactly one (none is used here).
+ *
+ *  Several allowed readers take write/exec flags that would otherwise bypass the profile, so
+ *  their dangerous flag forms are re-denied after the allows: `curl`'s `-o`/`-O`/`--output`/
+ *  `--remote-name`/`-T`/`--upload-file`/`-K`/`--config`, `rg`'s `--pre`/`--pre=`, and any
+ *  `git ... --output`. The deny globs are deliberately flag-position forms (attached or
+ *  space-delimited) rather than a bare `curl *-o*` — the latter would match an `-o` anywhere,
+ *  including in a URL, header or JSON body. `find` is not allowed at all: workers have
+ *  `rg`/`git ls-files`/the glob tool, and `find -exec`/`-delete` are another exec/write
+ *  surface. Writes named in the gap — `rm`/`mv`/`cp`/`tee`/`sed -i`/`git commit`/`push`/
+ *  `checkout`/`reset`/`apply` — need no explicit rule: none matches an allow pattern, so the
+ *  leading `*` denies them. (`edit: deny` alone does NOT stop a shell redirect — measured on
+ *  2.0.25 — which is why shell is allow-listed rather than left open.)
+ *
+ *  Residual: `curl` POSTing a body is still allowed on purpose (the research-gateway recipe
+ *  submits a job that way), so a read-only worker can still make outbound network writes with
+ *  it — only the file-writing/uploading/config-reading flags are removed. */
+export const READ_ONLY_SHELL_RULES: readonly OpencodePermissionRule[] = [
+  shell("*", "deny"),
+  shell("git log *", "allow"),
+  shell("git diff *", "allow"),
+  shell("git show *", "allow"),
+  shell("git status *", "allow"),
+  shell("git grep *", "allow"),
+  shell("git ls-files *", "allow"),
+  shell("git rev-parse *", "allow"),
+  shell("rg *", "allow"),
+  shell("cat *", "allow"),
+  shell("ls *", "allow"),
+  shell("head *", "allow"),
+  shell("tail *", "allow"),
+  shell("wc *", "allow"),
+  shell("jq *", "allow"),
+  shell("curl *", "allow"),
+  // curl: output / upload / config flags — attached, space-delimited and trailing forms.
+  shell("curl -o*", "deny"),
+  shell("curl * -o *", "deny"),
+  shell("curl * -o", "deny"),
+  shell("curl -O*", "deny"),
+  shell("curl * -O *", "deny"),
+  shell("curl * -O", "deny"),
+  shell("curl --output*", "deny"),
+  shell("curl * --output*", "deny"),
+  shell("curl --remote-name*", "deny"),
+  shell("curl * --remote-name*", "deny"),
+  shell("curl -T*", "deny"),
+  shell("curl * -T *", "deny"),
+  shell("curl * -T", "deny"),
+  shell("curl --upload-file*", "deny"),
+  shell("curl * --upload-file*", "deny"),
+  shell("curl -K*", "deny"),
+  shell("curl * -K *", "deny"),
+  shell("curl * -K", "deny"),
+  shell("curl --config*", "deny"),
+  shell("curl * --config*", "deny"),
+  // rg --pre runs an arbitrary command per file.
+  shell("rg *--pre *", "deny"),
+  shell("rg *--pre=*", "deny"),
+  // git diff/log/show --output=<file> writes to a file.
+  shell("git * --output*", "deny"),
+  shell("*>*", "deny"),
+];
+
+/** `agw-readonly`: investigate / author / check / review workers. Catch-all deny first, so
+ *  anything not named below (including Code Mode's `execute`, MCP tools and every future
+ *  action) is refused rather than defaulting to `ask`. `webfetch`/`websearch` stay denied —
+ *  workers shell out via `curl` (AGENTS.md Worker routing). `subagent` is denied because a
+ *  subagent runs under ITS OWN permissions (the built-in `general` allows shell and edit), so
+ *  allowing it would be a read-only escape hatch — v1's `task: allow` had no such hole. */
+export const OPENCODE_READONLY_PERMISSIONS: readonly OpencodePermissionRule[] = [
+  { action: "*", resource: "*", effect: "deny" },
+  ...READ_ONLY_SHELL_RULES,
+  { action: "edit", resource: "*", effect: "deny" },
+  { action: "webfetch", resource: "*", effect: "deny" },
+  { action: "websearch", resource: "*", effect: "deny" },
+  { action: "question", resource: "*", effect: "deny" },
+  { action: "external_directory", resource: "*", effect: "deny" },
+  { action: "subagent", resource: "*", effect: "deny" },
+  { action: "read", resource: "*", effect: "allow" },
+  { action: "glob", resource: "*", effect: "allow" },
+  { action: "grep", resource: "*", effect: "allow" },
+  { action: "skill", resource: "*", effect: "allow" },
+];
+
+/** `agw-implement`: dispatch implement. Everything allowed (the leading catch-all also cancels
+ *  the base policy's `.env` read ask), `question` and `external_directory` denied — both would
+ *  otherwise `ask` and block an unattended session. */
+export const OPENCODE_IMPLEMENT_PERMISSIONS: readonly OpencodePermissionRule[] = [
+  { action: "*", resource: "*", effect: "allow" },
+  { action: "question", resource: "*", effect: "deny" },
+  { action: "external_directory", resource: "*", effect: "deny" },
+];
+
+// ── Paths, port, password ───────────────────────────────────────────────────────
+
+/** `~/.local/share/agent-gateway/opencode/` — never `/tmp` (same sweep reason as the logs).
+ *  Override: `AGENT_GATEWAY_OPENCODE_STATE_DIR` (read per call; tests). */
+export function opencodeStateRoot(): string {
+  return (
+    process.env.AGENT_GATEWAY_OPENCODE_STATE_DIR ??
+    join(homedir(), ".local", "share", "agent-gateway", "opencode")
+  );
+}
+
+export function opencodeServerPort(): number {
+  const raw = Number(process.env.AGENT_GATEWAY_OPENCODE_PORT);
+  return Number.isInteger(raw) && raw > 0 && raw < 65_536 ? raw : DEFAULT_OPENCODE_PORT;
+}
+
+export function opencodeServerUrl(): string {
+  return `http://127.0.0.1:${opencodeServerPort()}`;
+}
+
+function passwordFile(): string {
+  return join(opencodeStateRoot(), "password");
+}
+
+/** The server's HTTP Basic password. Throws when the file is missing or empty — the server was
+ *  never installed (`make install-opencode-agent` creates it via the env script). */
+export function readServerPassword(): string {
+  const file = passwordFile();
+  if (!existsSync(file)) throw new Error(`opencode server password file missing (${file})`);
+  const value = readFileSync(file, "utf8").trim();
+  if (!value) throw new Error(`opencode server password file is empty (${file})`);
+  return value;
+}
+
+/** Create the state tree and a random `0600` password file if absent; returns the password.
+ *  `cfg/` is deliberately left EMPTY — it is the server's `XDG_CONFIG_HOME`, and an empty global
+ *  config root is what keeps the operator's global MCP servers out of every worker. */
+export function ensureServerState(): { password: string } {
+  const root = opencodeStateRoot();
+  for (const dir of ["cfg", "data", "state", "cache"]) {
+    mkdirSync(join(root, dir), { recursive: true });
+  }
+  const file = passwordFile();
+  if (!existsSync(file)) {
+    try {
+      writeFileSync(file, `${randomBytes(24).toString("hex")}\n`, { mode: 0o600, flag: "wx" });
+    } catch (err) {
+      // A concurrent first start created it between the check and the write.
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+  }
+  chmodSync(file, 0o600);
+  return { password: readServerPassword() };
+}
+
+// ── Config ──────────────────────────────────────────────────────────────────────
+
+type OpencodeWire = "chat" | "responses";
+
+/** Registry models the server must list: `verified` and drivable by the opencode harness. */
+function opencodeServerModels(): Array<ModelEntry & { wire: OpencodeWire }> {
+  return listModels().filter(
+    (m): m is ModelEntry & { wire: OpencodeWire } =>
+      m.verified !== null && m.harnesses.includes("opencode") && m.wire !== "anthropic",
+  );
+}
+
+/** `iu-chat` or `iu-responses` — the only place a registry `wire` is mapped to a provider id. */
+export function opencodeProviderForWire(wire: OpencodeWire): string {
+  return wire === "responses" ? OPENCODE_PROVIDER_RESPONSES : OPENCODE_PROVIDER_CHAT;
+}
+
+function modelConfigEntry(entry: ModelEntry) {
+  return {
+    name: entry.name,
+    limit: { context: entry.limit.context, output: entry.limit.output },
+    cost: {
+      input: entry.rate.in,
+      output: entry.rate.out,
+      ...(entry.rate.cacheRead !== undefined ? { cache_read: entry.rate.cacheRead } : {}),
+    },
+    // A model that exposes effort levels runs at "high" by default; `#<variant>` on the model
+    // ref (buildOpencodeArgs) picks another.
+    ...(entry.effort.length > 0
+      ? {
+          options: { reasoningEffort: "high" },
+          variants: Object.fromEntries(entry.effort.map((e) => [e, { reasoningEffort: e }])),
+        }
+      : {}),
+  };
+}
+
+/** The config the server boots with (`OPENCODE_CONFIG_CONTENT` — it overrides a repo-local
+ *  `opencode.json`, which a file-path config does not). Generated from the model registry, so a
+ *  new verified model needs only a server restart. Provider/model entries keep the v1-shaped
+ *  form opencode normalizes (measured working on 2.0.25, docs/opencode-v2.md § Config via env);
+ *  `agents` and their `permissions` are v2-native. The key/base are `{env:…}` placeholders
+ *  resolved from the server's own env (`opencodeServerEnv`) — never a literal here. */
+export function buildOpencodeServerConfig(): Record<string, unknown> {
+  const providerOptions = { baseURL: "{env:IU_OPENAI_BASE}", apiKey: "{env:IU_KEY}" };
+  const models = opencodeServerModels();
+  const modelsFor = (wire: OpencodeWire) =>
+    Object.fromEntries(
+      models.filter((m) => m.wire === wire).map((m) => [m.id, modelConfigEntry(m)]),
+    );
+  return {
+    $schema: "https://opencode.ai/config.json",
+    autoupdate: false,
+    share: "disabled",
+    provider: {
+      [OPENCODE_PROVIDER_CHAT]: {
+        npm: "@ai-sdk/openai-compatible",
+        name: "IU unified endpoint (OpenAI route, Chat Completions)",
+        options: providerOptions,
+        models: modelsFor("chat"),
+      },
+      [OPENCODE_PROVIDER_RESPONSES]: {
+        npm: "@ai-sdk/openai",
+        name: "IU unified endpoint (OpenAI route, Responses)",
+        options: providerOptions,
+        models: modelsFor("responses"),
+      },
+    },
+    agents: {
+      [OPENCODE_AGENT_READONLY]: {
+        description: "agent-gateway read-only worker (allow-listed shell, no edits)",
+        mode: "primary",
+        permissions: OPENCODE_READONLY_PERMISSIONS,
+      },
+      [OPENCODE_AGENT_IMPLEMENT]: {
+        description: "agent-gateway implement worker (full tools, no questions)",
+        mode: "primary",
+        permissions: OPENCODE_IMPLEMENT_PERMISSIONS,
+      },
+    },
+  };
+}
+
+// ── The env the server carries ──────────────────────────────────────────────────
+
+/** Keys the runner DROPS (with one warning) instead of throwing on: review passes the
+ *  research-gateway credentials as `extraEnv`, and putting them in this server's env would let
+ *  ANY worker shell on it read them. Research validation is therefore unavailable on OpenCode
+ *  review angles until Wave 3 delivers per-session env (`PUT /api/session/{id}/environment`). */
+export const OPENCODE_DROPPED_EXTRA_ENV = [
+  "RESEARCH_GATEWAY_URL",
+  "RESEARCH_GATEWAY_TOKEN",
+] as const;
+
+/** The per-episode env a worker shell may need, fixed at server start: the git credential-deny
+ *  env (`GIT_DENY_CREDENTIALS_ENV`, dispatch's `extraEnv`). THE authoritative list — the runner
+ *  refuses any `extraEnv` outside it (bar `OPENCODE_DROPPED_EXTRA_ENV`), because a shared server
+ *  cannot receive per-run env. No credential belongs here: every worker shell inherits it. */
+export function opencodeServerCarriedEnv(): Record<string, string> {
+  return { ...GIT_DENY_CREDENTIALS_ENV };
+}
+
+/** The server process's complete env, beyond the `PATH`/`HOME`/`TMPDIR`/`LANG` the wrapper adds.
+ *  Nothing else from agw's environment (CLAUDE_*, GITHUB_TOKEN, …) reaches a worker shell.
+ *  Everything under the state root, so a re-pointed `XDG_*` can never find another data dir. */
+export function opencodeServerEnv(input: {
+  iuKey: string;
+  iuOpenaiBase: string;
+  password: string;
+}): Record<string, string> {
+  const root = opencodeStateRoot();
+  return {
+    OPENCODE_CONFIG_CONTENT: JSON.stringify(buildOpencodeServerConfig()),
+    IU_KEY: input.iuKey,
+    IU_OPENAI_BASE: input.iuOpenaiBase,
+    XDG_CONFIG_HOME: join(root, "cfg"),
+    XDG_DATA_HOME: join(root, "data"),
+    XDG_STATE_HOME: join(root, "state"),
+    XDG_CACHE_HOME: join(root, "cache"),
+    OPENCODE_DB: join(root, "opencode.db"),
+    OPENCODE_SERVER_PASSWORD: input.password,
+    ...opencodeServerCarriedEnv(),
+  };
+}
+
+// ── Status ──────────────────────────────────────────────────────────────────────
+
+export interface OpencodeServerStatus {
+  /** `up && versionOk` — the server may take episodes. */
+  ok: boolean;
+  /** The server answered HTTP at all. */
+  up: boolean;
+  version: string | null;
+  pinned: string;
+  versionOk: boolean;
+  error?: string;
+}
+
+const InfoSchema = z.object({ version: z.string().min(1) });
+
+/** `"opencode v2.0.25"` / `"v2.0.25"` / `"2.0.25"` → `"2.0.25"`. */
+export function normalizeOpencodeVersion(raw: string): string {
+  return (raw.trim().split(/\s+/).at(-1) ?? "").replace(/^v/, "");
+}
+
+/** The installed binary's version — the fallback when `/api/info` carries none. */
+async function binaryVersion(): Promise<string | null> {
+  const bin = process.env.OPENCODE_BIN ?? Bun.which("opencode") ?? "opencode";
+  try {
+    const proc = Bun.spawn([bin, "--version"], { stdout: "pipe", stderr: "ignore" });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    return normalizeOpencodeVersion(out) || null;
+  } catch {
+    return null;
+  }
+}
+
+function unreachable(err: unknown): { reason: string } {
+  if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+    return { reason: `ETIMEDOUT after ${STATUS_TIMEOUT_MS}ms` };
+  }
+  // fetch rejects with `TypeError: fetch failed`; the errno lives on `cause`.
+  const code = (err as { cause?: { code?: string } }).cause?.code;
+  return { reason: code === "ECONNREFUSED" ? code : "fetch failed (connect error)" };
+}
+
+/** HTTP Basic header for the shared server: the username must be `opencode` (any other gets 401,
+ *  measured 2.0.25), the password is the `0600` file's content. */
+function basicAuth(password: string): string {
+  return `Basic ${btoa(`opencode:${password}`)}`;
+}
+
+/** Fresh requests every call (a cached "up" is exactly what a crash would outlive). Never throws
+ *  and never logs a response body. The `error` of a connect-level problem carries
+ *  `ECONNREFUSED`/`ETIMEDOUT`/`fetch failed` so the runner's retry ladder and circuit breaker
+ *  classify it as transport.
+ *
+ *  Two requests: `GET /api/info` (unauthenticated — it only proves the server answers and carries
+ *  the version) and `GET /api/session/active` with Basic auth, which must be 200: it is the cheap
+ *  authenticated route, and the only thing here that proves the password file still matches the
+ *  running server (401 without or with a wrong password, measured 2.0.25). */
+export async function getOpencodeServerStatus(): Promise<OpencodeServerStatus> {
+  const base = { pinned: OPENCODE_PINNED_VERSION, version: null, versionOk: false };
+  let password: string;
+  try {
+    password = readServerPassword();
+  } catch (err) {
+    return {
+      ...base,
+      ok: false,
+      up: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  const get = (path: string) =>
+    fetch(`${opencodeServerUrl()}${path}`, {
+      headers: { authorization: basicAuth(password) },
+      signal: AbortSignal.timeout(STATUS_TIMEOUT_MS),
+    });
+
+  let info: Response;
+  try {
+    info = await get("/api/info");
+  } catch (err) {
+    return {
+      ...base,
+      ok: false,
+      up: false,
+      error: `opencode server unreachable: ${unreachable(err).reason}`,
+    };
+  }
+
+  if (!info.ok) {
+    await info.body?.cancel();
+    return {
+      ...base,
+      ok: false,
+      up: true,
+      error: `opencode server answered HTTP ${info.status} on /api/info`,
+    };
+  }
+
+  let infoVersion: string | null = null;
+  try {
+    const parsed = InfoSchema.safeParse(await info.json());
+    if (parsed.success) infoVersion = normalizeOpencodeVersion(parsed.data.version);
+  } catch {
+    // unparseable body — fall through to the binary's version
+  }
+  const version = infoVersion ?? (await binaryVersion());
+  const versionOk = version === OPENCODE_PINNED_VERSION;
+  const found = { ...base, up: true, version, versionOk };
+
+  let active: Response;
+  try {
+    active = await get("/api/session/active");
+  } catch (err) {
+    return {
+      ...found,
+      ok: false,
+      up: false,
+      error: `opencode server unreachable: ${unreachable(err).reason}`,
+    };
+  }
+  await active.body?.cancel();
+  if (active.status === 401) {
+    return { ...found, ok: false, error: "opencode server password rejected (HTTP 401)" };
+  }
+  if (active.status !== 200) {
+    return {
+      ...found,
+      ok: false,
+      error: `opencode server answered HTTP ${active.status} on /api/session/active`,
+    };
+  }
+  if (!versionOk) {
+    return {
+      ...found,
+      ok: false,
+      error: `opencode server version ${version ?? "unknown"} != pinned ${OPENCODE_PINNED_VERSION}`,
+    };
+  }
+  return { ...found, ok: true };
+}
+
+// ── Interrupt ───────────────────────────────────────────────────────────────────
+
+const INTERRUPT_TIMEOUT_MS = 5_000;
+const InterruptSchema = z.object({ interrupted: z.boolean() });
+
+export interface OpencodeInterruptResult {
+  /** The request got a well-formed answer. */
+  ok: boolean;
+  /** The server stopped a running turn (false on an idle session — a harmless no-op). */
+  interrupted: boolean;
+  error?: string;
+}
+
+/** `POST /api/session/{id}/interrupt` — the only reliable stop for a server-side session:
+ *  killing the `opencode run --server` client leaves the session `running` and its tools keep
+ *  executing (measured 2.0.25, a file was written 40 s after the kill). Best-effort: it never
+ *  throws, never logs a body, and answers `{interrupted:false}` on an idle session, so calling
+ *  it after every client exit is safe. `fetchImpl` is a test seam. */
+export async function interruptOpencodeSession(
+  sessionId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<OpencodeInterruptResult> {
+  let password: string;
+  try {
+    password = readServerPassword();
+  } catch (err) {
+    return {
+      ok: false,
+      interrupted: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+  try {
+    const res = await fetchImpl(
+      `${opencodeServerUrl()}/api/session/${encodeURIComponent(sessionId)}/interrupt`,
+      {
+        method: "POST",
+        headers: { authorization: basicAuth(password) },
+        signal: AbortSignal.timeout(INTERRUPT_TIMEOUT_MS),
+      },
+    );
+    if (!res.ok) {
+      await res.body?.cancel();
+      return { ok: false, interrupted: false, error: `HTTP ${res.status}` };
+    }
+    const parsed = InterruptSchema.safeParse(await res.json());
+    if (!parsed.success) return { ok: false, interrupted: false, error: "unexpected response" };
+    return { ok: true, interrupted: parsed.data.interrupted };
+  } catch (err) {
+    return { ok: false, interrupted: false, error: unreachable(err).reason };
+  }
+}

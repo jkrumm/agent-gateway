@@ -152,8 +152,8 @@ export interface ToolRoute {
    *  below except AGENT_OC/AGENT_OC_IMPLEMENT. */
   harness: Harness;
   /** opencode's reasoning-effort variant (`provider/model#variant`; `"high"`, `"max"`, `"none"`, …)
-   *  specific to the model's `opencode.json` entry (see `buildOpencodeConfig` in
-   *  opencode-runner.ts). Only read when `harness === "opencode"`; absent (undefined) on
+   *  specific to the model's `opencode.json` entry (see `buildOpencodeServerConfig` in
+   *  opencode-server.ts). Only read when `harness === "opencode"`; absent (undefined) on
    *  every `claude`-harness route, where thinking is controlled by `thinkingTokens`
    *  (gateway ids) or not at all (Claude ids). */
   variant?: string;
@@ -166,7 +166,7 @@ export const HAIKU = "claude-haiku-4-5";
 export const GLM_FLASH = "glm-5.3-flash";
 export const DEEPSEEK_FLASH = "DeepSeek-V4-Flash";
 /** OpenCode-harness-only id — reached over the IU OpenAI-compatible route as
- *  `iu-chat/deepseek-v4.1-flash` (opencode-runner.ts's `buildOpencodeConfig`/`buildOpencodeArgs`),
+ *  `iu-chat/deepseek-v4.1-flash` (opencode-server.ts's `buildOpencodeServerConfig`, opencode-runner.ts's `buildOpencodeArgs`),
  *  NOT the IU native Anthropic transport `DEEPSEEK_FLASH` above runs over — `claude -p`
  *  cannot reach this id at all. See AGENT_OC below. */
 export const DEEPSEEK_V41_FLASH = "deepseek-v4.1-flash";

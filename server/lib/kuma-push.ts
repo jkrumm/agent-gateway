@@ -26,10 +26,17 @@ const URL_FILE = join(homedir(), ".config", "uptime-kuma", "agent-gateway-push-u
 export type KumaStatus = "up" | "down";
 export type KumaPushResult = "pushed" | "no-url" | "failed";
 
+type MaybePromise<T> = T | Promise<T>;
+
 export type KumaPushDeps = {
   fetch: (url: string, init: { signal: AbortSignal }) => Promise<{ ok: boolean; status: number }>;
   now: () => number;
-  health: () => { pageable: boolean; pageReason: string | null; running: number; pending: number };
+  health: () => MaybePromise<{
+    pageable: boolean;
+    pageReason: string | null;
+    running: number;
+    pending: number;
+  }>;
   /** The full push URL, or null when none is configured. */
   resolveUrl: () => string | null;
 };
@@ -107,7 +114,7 @@ export async function pushKumaHeartbeat(
   let status: KumaStatus;
   let msg: string;
   try {
-    const health = deps.health();
+    const health = await deps.health();
     status = health.pageable ? "down" : "up";
     msg = health.pageable
       ? (health.pageReason ?? "unhealthy")

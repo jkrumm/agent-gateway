@@ -53,6 +53,7 @@ target="\${@: -1}"
 echo "make $target" >> "$CALLS_LOG"
 case "$target" in
   reload) exit "\${MAKE_RELOAD_RC:-0}" ;;
+  install-opencode-agent) exit "\${MAKE_INSTALL_OC_RC:-0}" ;;
   verify)
     n=$(cat "$STUB_STATE/verify-count" 2>/dev/null || echo 0)
     echo $((n + 1)) > "$STUB_STATE/verify-count"
@@ -63,6 +64,21 @@ exit 0
 `,
   );
   writeExecutable(join(binDir, "sleep"), "#!/usr/bin/env bash\nexit 0\n");
+  // launchctl stub: `print` (is the opencode agent loaded?) exits LAUNCHCTL_PRINT_RC, default 0 (loaded).
+  writeExecutable(
+    join(binDir, "launchctl"),
+    `#!/usr/bin/env bash\nexit "\${LAUNCHCTL_PRINT_RC:-0}"\n`,
+  );
+  // bun stub: `scripts/opencode-server-env.ts --status` prints STUB_OC_STATUS (default ok).
+  writeExecutable(
+    join(binDir, "bun"),
+    `#!/usr/bin/env bash\ndefault='{"ok":true}'\nprintf '%s\\n' "\${STUB_OC_STATUS:-$default}"\n`,
+  );
+  // curl stub: the new build's /api/jobs/health, STUB_HEALTH (default: everything ok).
+  writeExecutable(
+    join(binDir, "curl"),
+    `#!/usr/bin/env bash\ndefault='{"ok":true,"degradedRoutes":[],"opencodeServer":{"ok":true}}'\nprintf '%s\\n' "\${STUB_HEALTH:-$default}"\n`,
+  );
   mkdirSync(join(root, ".stubstate"));
   writeFileSync(join(root, ".gitignore"), ".stubbin\n.stubstate\n.calls.log\n");
   sh(
@@ -103,6 +119,59 @@ describe("scripts/deploy.sh", () => {
     expect(r.code).toBe(0);
     expect(r.calls).toEqual(["preflight", "make reload", "make verify"]);
     expect(isDetached()).toBe(false);
+  });
+
+  test("opencode agent not loaded: installed once before the reload", () => {
+    const r = deploy({ LAUNCHCTL_PRINT_RC: "113" });
+    expect(r.code).toBe(0);
+    expect(r.calls).toEqual([
+      "preflight",
+      "make install-opencode-agent",
+      "make reload",
+      "make verify",
+    ]);
+  });
+
+  test("opencode agent install fails: exit 1 before any reload, no rollback", () => {
+    const r = deploy({ LAUNCHCTL_PRINT_RC: "113", MAKE_INSTALL_OC_RC: "1" });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("opencode LaunchAgent could not be installed");
+    expect(r.calls).toEqual(["preflight", "make install-opencode-agent"]);
+    expect(isDetached()).toBe(false);
+  });
+
+  test("opencode server not ok after the agent check: abort before any reload, no rollback", () => {
+    const r = deploy({
+      STUB_OC_STATUS: '{"ok":false,"error":"opencode server password rejected"}',
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("opencode server is not ok");
+    expect(r.out).toContain("make install-opencode-agent");
+    expect(r.out).toContain("password rejected");
+    expect(r.calls).toEqual(["preflight"]);
+    expect(isDetached()).toBe(false);
+  });
+
+  test("verify fails ONLY on the opencode server: reported as such, master is not rolled back", () => {
+    const r = deploy({
+      MAKE_VERIFY_FAILS: "999",
+      STUB_HEALTH: '{"ok":true,"degradedRoutes":[],"opencodeServer":{"ok":false}}',
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("ONLY on the opencode server");
+    expect(r.out).not.toContain("rolling back to");
+    expect(r.calls.filter((c) => c === "make reload")).toHaveLength(1);
+    expect(isDetached()).toBe(false);
+    expect(sh("git log -1 --format=%s").trim()).toBe("two");
+  });
+
+  test("verify fails for another reason while the opencode server is also not ok: still rolls back", () => {
+    const r = deploy({
+      MAKE_VERIFY_FAILS: "999",
+      STUB_HEALTH: '{"ok":false,"degradedRoutes":[],"opencodeServer":{"ok":false}}',
+    });
+    expect(r.out).toContain("rolling back");
+    expect(isDetached()).toBe(true);
   });
 
   test("preflight refusal (exit 3): exit 1, never reloads, never switches", () => {

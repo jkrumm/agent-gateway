@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getIuConfig } from "../server/lib/iu-openai.ts";
 import { DEEPSEEK_V41_FLASH } from "../server/lib/routing.ts";
-import { buildOpencodeConfig, OPENCODE_PROVIDER_CHAT } from "../server/mcp/opencode-runner.ts";
+import { buildOpencodeServerConfig, OPENCODE_PROVIDER_CHAT } from "../server/mcp/opencode-server.ts";
 
 // Wire JSON of an API labelled experimental (0.0.1): deliberately untyped here. Wave 3's typed client
 // (zod over the routes in docs/opencode-v2.md) is where these shapes get real types.
@@ -99,7 +99,7 @@ async function freePort(): Promise<number> {
  *  restart against the same durable state (the durability section). */
 async function startServer(root: string): Promise<Server> {
   const port = await freePort();
-  const config = buildOpencodeConfig({ model: MODEL, readOnly: false });
+  const config = buildOpencodeServerConfig();
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     XDG_CONFIG_HOME: join(root, "cfg"),
@@ -602,7 +602,7 @@ section("permissions", async () => {
   );
 
   // `edit: deny` alone does not gate a shell redirection — the read-only profile must deny shell
-  // writes itself (buildOpencodeConfig's bash allowlist), exactly as on the CLI path.
+  // writes itself (opencode-server.ts's READ_ONLY_SHELL_RULES), exactly as on the CLI path.
   const editOnly = worktree("perm-edit-only");
   const idE = await createSession(main, editOnly, {
     permissions: [{ action: "edit", resource: "*", effect: "deny" } satisfies Rule],

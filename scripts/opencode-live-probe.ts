@@ -1,273 +1,299 @@
-// Live probe of the opencode harness against the REAL installed opencode binary (needs the IU
-// key: IU_API_KEY/IU_BASE_URL or the Keychain entries). Re-run after any opencode upgrade or
-// change to opencode-runner.ts:   bun scripts/opencode-live-probe.ts
+// Live probe of the SHARED OpenCode server path (needs the LaunchAgent running, the IU key and the
+// server password file). Re-run after any opencode upgrade or change to opencode-runner.ts /
+// opencode-server.ts:   bun scripts/opencode-live-probe.ts
 //
-// Proves, on the binary `OPENCODE_BIN`/PATH resolves to:
-//   1. a short read-only job completes through `runOpencodeAttempt` with a parsed verdict
-//   2. in the read-only profile an edit and non-allowlisted shell commands are refused — even
-//      when the caller passes a hostile `extraEnv` that tries to replace the permission config
-//   3. the job runs in the intended directory (not the probe's own cwd)
-//   4. a GLOBAL opencode config (the operator's `$XDG_CONFIG_HOME/opencode/opencode.json`,
-//      where MCP servers live) does NOT reach the worker — `buildOpencodeEnv` pins
-//      `XDG_CONFIG_HOME` to a private empty root. Asserted under the read-only AND writable
-//      profiles, with a positive control proving the canary DOES start when the pin is absent
-// Exits non-zero on any failed check. Costs a few cents of IU tokens; never run from CI.
+// Drives the real `opencode run --server <url> --agent <agw agent>` exactly as the runner does
+// (same argv/env builders) against the running server, in a scratch git repo under os.tmpdir().
+// Costs a few cents of IU tokens; never run from CI. Each check has a discriminating control, so a
+// model that simply skipped a step cannot make a refusal check pass vacuously:
+//   1. agw-readonly runs the allowlisted reads (`git status`, `cat`, `rg`) — liveness control —
+//      and refuses `touch`, `echo > f`, `curl -o` and any file-write tool (files absent after).
+//   2. agw-implement writes a file (control: the probe CAN observe a write) and sees
+//      GIT_CONFIG_GLOBAL=/dev/null (the env the server carries).
+//   3. The shell runs in the CLIENT's cwd, not the probe's own cwd.
+//   4. A hostile client env (`OPENCODE_CONFIG_CONTENT` allow-all, `OPENCODE_CONFIG` file) does not
+//      loosen agw-readonly.
+//   5. Killing the client leaves the server session running (control: `late.txt` DOES appear),
+//      and `interruptOpencodeSession` stops it (the session goes idle, `late.txt` never appears).
+// Every printed line passes through a redactor for the IU key and the server password.
+// Exits non-zero on any failed check.
 
-import {
-  mkdtempSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, existsSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getIuConfig } from "../server/lib/iu-openai.ts";
 import { DEEPSEEK_V41_FLASH } from "../server/lib/routing.ts";
+import { buildOpencodeArgs, buildOpencodeEnv } from "../server/mcp/opencode-runner.ts";
 import {
-  buildOpencodeArgs,
-  buildOpencodeConfig,
-  buildOpencodeEnv,
-  runOpencodeAttempt,
-} from "../server/mcp/opencode-runner.ts";
+  getOpencodeServerStatus,
+  interruptOpencodeSession,
+  opencodeServerUrl,
+  readServerPassword,
+} from "../server/mcp/opencode-server.ts";
 
 const MODEL = DEEPSEEK_V41_FLASH;
 const BIN = process.env.OPENCODE_BIN ?? Bun.which("opencode") ?? "opencode";
+/** Hang guard for one probe run — a probe harness, not an agent budget. */
+const RUN_GUARD_MS = 240_000;
+const LATE_SLEEP_S = 25;
+
 let failures = 0;
+const secrets: string[] = [];
+const redact = (text: string): string =>
+  secrets.reduce((out, secret) => (secret ? out.split(secret).join("[REDACTED]") : out), text);
+const say = (line: string): void => console.log(redact(line));
 function check(name: string, ok: boolean, detail = ""): void {
-  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? `  (${detail})` : ""}`);
+  say(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? `  (${detail})` : ""}`);
   if (!ok) failures++;
 }
 
-const version = (await Bun.$`${BIN} --version`.text()).trim();
-console.log(`binary: ${BIN}  version: ${version}`);
-check("binary is opencode 2.x", /\bv?2\.\d+\.\d+/.test(version), version);
-
-// A throwaway "repo" in a directory unrelated to this process's cwd.
-const dir = realpathSync(mkdtempSync(join(tmpdir(), "oc-probe-")));
-writeFileSync(join(dir, "secret.txt"), "ORIGINAL\n");
-Bun.spawnSync(["git", "init", "-q"], { cwd: dir });
-console.log(`probe dir: ${dir}  (process cwd: ${process.cwd()})`);
-
-// ── Part 1: raw run, read-only profile + hostile extraEnv ──────────────────────────────────
+// ── Preconditions ───────────────────────────────────────────────────────────────────────────
 const iu = await getIuConfig();
-// The private empty GLOBAL-config root every worker run gets — the value `buildOpencodeEnv`
-// pins `XDG_CONFIG_HOME` to. Part 0 proves a global config pointed at by that var is empty.
-const configHome = realpathSync(mkdtempSync(join(tmpdir(), "oc-probe-cfghome-")));
+const password = readServerPassword();
+secrets.push(iu.key, password);
 
-// ── Part 0: the operator's GLOBAL opencode config (where MCP servers live) must NOT reach a worker ──
-//
-// A "the canary did not start" assertion only means something if the canary WOULD start when the
-// pin is absent. So each check registers a canary local MCP server in a throwaway
-// `$XDG_CONFIG_HOME/opencode/opencode.json` and spawns the real binary against it:
-//   0a. control — pin bypassed (`configHome: globalHome`, the value opencode would inherit),
-//       read-only profile: the canary MUST start. If it does not, opencode is not resolving its
-//       global config from `$XDG_CONFIG_HOME` (or starts MCP lazily), so 0b/0c prove nothing —
-//       the check fails loudly rather than passing vacuously.
-//   0b. pinned, read-only profile: the canary MUST NOT start.
-//   0c. pinned, writable profile: the canary MUST NOT start (the profile that can push a branch/PR).
-async function globalMcpCanary(input: {
-  readOnly: boolean;
-  /** true = exercise the pin; false = control with the inherited XDG_CONFIG_HOME (pin bypassed). */
-  pinned: boolean;
-}): Promise<{ started: boolean; globalHome: string }> {
-  const globalHome = realpathSync(mkdtempSync(join(tmpdir(), "oc-probe-global-")));
-  mkdirSync(join(globalHome, "opencode"), { recursive: true });
-  const canary = join(globalHome, "canary.log");
-  writeFileSync(
-    join(globalHome, "opencode", "opencode.json"),
-    JSON.stringify({
-      $schema: "https://opencode.ai/config.json",
-      mcp: { canary: { type: "local", command: ["sh", "-c", `date >> ${canary}; sleep 300`] } },
-    }),
-  );
-  const env = buildOpencodeEnv({
-    tool: "dispatch",
-    cwd: dir,
-    iuKey: iu.key,
-    iuOpenaiBase: iu.openaiBase,
-    opencodeConfigContent: JSON.stringify(
-      buildOpencodeConfig({ model: MODEL, readOnly: input.readOnly }),
-    ),
-    // The pin IS `env.XDG_CONFIG_HOME = configHome`; the control points that value at the global
-    // root instead, which is exactly the un-pinned state opencode would inherit.
-    configHome: input.pinned ? configHome : globalHome,
-    baseEnv: { ...process.env, XDG_CONFIG_HOME: globalHome },
-  });
-  const proc = Bun.spawn(
-    buildOpencodeArgs({ bin: BIN, model: MODEL, prompt: "reply with exactly: OK" }),
-    { cwd: dir, env, stdout: "pipe", stderr: "pipe", stdin: "ignore" },
-  );
-  await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-  await proc.exited;
-  await Bun.sleep(1200);
-  return { started: existsSync(canary), globalHome };
+const status = await getOpencodeServerStatus();
+say(`server ${opencodeServerUrl()}  ${JSON.stringify(status)}`);
+check("the shared server is up, authenticated and the pinned build", status.ok, status.error ?? "");
+if (!status.ok) process.exit(1);
+
+// ── Scratch repo ────────────────────────────────────────────────────────────────────────────
+// realpath: macOS resolves os.tmpdir() through /var -> /private/var, and `pwd` reports the latter.
+const scratchRoot = realpathSync(mkdtempSync(join(tmpdir(), "agw-oc-probe-")));
+process.on("exit", () => rmSync(scratchRoot, { recursive: true, force: true }));
+function scratchRepo(name: string): string {
+  const dir = join(scratchRoot, name);
+  Bun.spawnSync(["mkdir", "-p", dir]);
+  writeFileSync(join(dir, "seed.txt"), "SEED_MARKER\n");
+  Bun.spawnSync(["git", "init", "-q"], { cwd: dir });
+  return dir;
+}
+say(`scratch: ${scratchRoot}  (probe cwd: ${process.cwd()})`);
+
+// ── Running one client ──────────────────────────────────────────────────────────────────────
+
+interface ToolCall {
+  tool: string;
+  status: string;
+  command?: string;
+  output: string;
+}
+interface Run {
+  proc: ReturnType<typeof Bun.spawn>;
+  sessionId: () => string | undefined;
+  tools: ToolCall[];
+  text: string[];
+  done: Promise<number>;
 }
 
-const control = await globalMcpCanary({ readOnly: true, pinned: false });
-check(
-  "0a. control: a global MCP server DOES start when the config root is unpinned (canary is falsifiable)",
-  control.started,
-);
-rmSync(control.globalHome, { recursive: true, force: true });
-
-const pinnedReadOnly = await globalMcpCanary({ readOnly: true, pinned: true });
-check(
-  "0b. read-only: a global MCP server (XDG_CONFIG_HOME) is NOT started in a worker run",
-  !pinnedReadOnly.started,
-);
-rmSync(pinnedReadOnly.globalHome, { recursive: true, force: true });
-
-const pinnedWritable = await globalMcpCanary({ readOnly: false, pinned: true });
-check("0c. writable: a global MCP server is NOT started in a worker run", !pinnedWritable.started);
-rmSync(pinnedWritable.globalHome, { recursive: true, force: true });
-
-const hostile = JSON.stringify({
-  permission: { bash: "allow", edit: "allow", external_directory: "allow" },
-});
-const env = buildOpencodeEnv({
-  tool: "dispatch",
-  cwd: dir,
-  iuKey: iu.key,
-  iuOpenaiBase: iu.openaiBase,
-  opencodeConfigContent: JSON.stringify(buildOpencodeConfig({ model: MODEL, readOnly: true })),
-  configHome,
-  extraEnv: { OPENCODE_CONFIG_CONTENT: hostile, OPENCODE_CLI_CONFIG_CONTENT: hostile },
-});
-const prompt = [
-  "Run these five steps in order, one tool call each, and continue after any refusal:",
-  "1. shell: git rev-parse --show-toplevel",
-  "2. use your file edit/write tool (NOT shell) to make secret.txt contain CHANGED; if no such tool exists, say so",
-  "3. shell: touch created.txt",
-  "4. shell: rm secret.txt",
-  "5. shell: cat secret.txt",
-  "Then reply with one line per step stating whether it succeeded or was refused.",
-].join("\n");
-const proc = Bun.spawn(buildOpencodeArgs({ bin: BIN, model: MODEL, prompt }), {
-  cwd: dir,
-  env,
-  stdout: "pipe",
-  stderr: "pipe",
-  stdin: "ignore",
-});
-const [out, err] = await Promise.all([
-  new Response(proc.stdout).text(),
-  new Response(proc.stderr).text(),
-]);
-await proc.exited;
-type Call = { tool: string; status: string; command?: string; output: string };
-const calls: Call[] = [];
-for (const line of out.split("\n")) {
-  if (!line.trim()) continue;
-  let ev: any;
-  try {
-    ev = JSON.parse(line);
-  } catch {
-    continue;
-  }
-  if (ev.type !== "tool_use") continue;
-  const st = ev.part?.state ?? {};
-  calls.push({
-    tool: ev.part?.tool,
-    status: st.status,
-    command: st.input?.command,
-    output: String(st.output ?? st.error ?? "").slice(0, 160),
-  });
-}
-console.log("tool calls:");
-for (const c of calls)
-  console.log(
-    `  ${c.tool} ${c.status} ${JSON.stringify(c.command ?? "")} -> ${JSON.stringify(c.output)}`,
-  );
-if (calls.length === 0)
-  console.log(`no tool calls; stderr: ${err.slice(0, 400)}\nstdout: ${out.slice(0, 400)}`);
-
-const pwdCall = calls.find((c) => c.command?.trim() === "git rev-parse --show-toplevel");
-check(
-  "3. job ran in the intended directory",
-  pwdCall?.output.trim() === dir,
-  pwdCall?.output.trim(),
-);
-check(
-  "2a. secret.txt unchanged on disk",
-  readFileSync(join(dir, "secret.txt"), "utf8") === "ORIGINAL\n",
-);
-check("2b. touch created nothing", !existsSync(join(dir, "created.txt")));
-check(
-  "2c. no write-capable tool call succeeded (edit/touch/rm)",
-  !calls.some(
-    (c) =>
-      c.status === "completed" &&
-      (/touch|rm /.test(c.command ?? "") || c.tool === "edit" || c.tool === "write"),
-  ),
-);
-check(
-  "2d. at least one step was refused, not skipped",
-  calls.some((c) => c.status !== "completed"),
-);
-check(
-  "2e. an allowlisted read (cat) still works",
-  calls.some((c) => /^cat /.test(c.command ?? "") && c.status === "completed"),
-);
-
-// ── Control: the same prompt under readOnly:false MUST write, or the refusals above prove nothing ──
-const ctlDir = realpathSync(mkdtempSync(join(tmpdir(), "oc-probe-ctl-")));
-const ctlEnv = buildOpencodeEnv({
-  tool: "dispatch",
-  cwd: ctlDir,
-  iuKey: iu.key,
-  iuOpenaiBase: iu.openaiBase,
-  opencodeConfigContent: JSON.stringify(buildOpencodeConfig({ model: MODEL, readOnly: false })),
-  configHome,
-});
-const ctl = Bun.spawn(
-  buildOpencodeArgs({
+/** Same stream the runner parses: `tool_use` parts carry `.part.tool`, `.part.state.status`,
+ *  `.part.state.input.command` and `.part.state.output|error`; `text` parts the assistant text. */
+function startClient(input: {
+  agent: "readonly" | "implement";
+  cwd: string;
+  prompt: string;
+  envOverride?: Record<string, string>;
+}): Run {
+  const argv = buildOpencodeArgs({
     bin: BIN,
+    url: opencodeServerUrl(),
+    readOnly: input.agent === "readonly",
     model: MODEL,
-    prompt: "Run the shell command `touch created.txt`, then reply done.",
-  }),
-  { cwd: ctlDir, env: ctlEnv, stdout: "pipe", stderr: "pipe", stdin: "ignore" },
-);
-await Promise.all([new Response(ctl.stdout).text(), new Response(ctl.stderr).text()]);
-await ctl.exited;
-check(
-  "control: readOnly:false CAN write (probe is discriminating)",
-  existsSync(join(ctlDir, "created.txt")),
-);
+    prompt: input.prompt,
+  });
+  // After buildOpencodeEnv on purpose: whatever a hostile caller adds is present in the client.
+  const env = { ...buildOpencodeEnv({ tool: "probe", cwd: input.cwd, password }), ...input.envOverride };
+  const proc = Bun.spawn(argv, { cwd: input.cwd, env, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+  const tools: ToolCall[] = [];
+  const text: string[] = [];
+  let sessionId: string | undefined;
 
-// ── Part 2: the production entry point returns a parsed verdict ─────────────────────────────
-const result = await runOpencodeAttempt<{ files: string[]; pwd: string }>(
-  {
+  const guard = setTimeout(() => proc.kill("SIGKILL"), RUN_GUARD_MS);
+  const reading = (async () => {
+    let buf = "";
+    for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
+      buf += new TextDecoder().decode(chunk);
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        try {
+          const ev = JSON.parse(line) as {
+            type?: string;
+            sessionID?: string;
+            part?: {
+              tool?: string;
+              text?: string;
+              state?: { status?: string; input?: { command?: string }; output?: string; error?: string };
+            };
+          };
+          sessionId ??= ev.sessionID;
+          if (ev.type === "tool_use" && ev.part) {
+            tools.push({
+              tool: ev.part.tool ?? "?",
+              status: ev.part.state?.status ?? "?",
+              command: ev.part.state?.input?.command,
+              output: String(ev.part.state?.output ?? ev.part.state?.error ?? ""),
+            });
+          } else if (ev.type === "text" && ev.part?.text) {
+            text.push(ev.part.text);
+          }
+        } catch {
+          // not JSON — ignore, same as the runner
+        }
+      }
+    }
+  })();
+  const done = Promise.all([reading, new Response(proc.stderr as ReadableStream).text(), proc.exited])
+    .then(([, , code]) => code)
+    .finally(() => clearTimeout(guard));
+  return { proc, sessionId: () => sessionId, tools, text, done };
+}
+
+const ran = (run: Run, needle: string): ToolCall | undefined =>
+  run.tools.find((t) => t.tool === "shell" && t.command?.includes(needle));
+const describeTools = (run: Run): string =>
+  run.tools.map((t) => `${t.tool}:${t.status}:${(t.command ?? "").slice(0, 40)}`).join(" | ");
+
+// ── 1. agw-readonly ─────────────────────────────────────────────────────────────────────────
+{
+  const dir = scratchRepo("readonly");
+  const run = startClient({
+    agent: "readonly",
+    cwd: dir,
+    prompt: [
+      "Run these steps in order, ONE tool call each, and continue after any refusal or error:",
+      "1. shell: git rev-parse --show-toplevel",
+      "2. shell: git status",
+      "3. shell: cat seed.txt",
+      "4. shell: rg SEED_MARKER .",
+      "5. shell: touch touched.txt",
+      "6. shell: echo X > redirect.txt",
+      "7. shell: curl -o curled.txt http://127.0.0.1:1/",
+      "8. Use your file-writing tool (write or edit) to create written.txt containing X.",
+      "Then reply with exactly: DONE",
+    ].join("\n"),
+  });
+  const code = await run.done;
+  say(`readonly run exit=${code} tools: ${redact(describeTools(run))}`);
+  const completed = (needle: string) => ran(run, needle)?.status === "completed";
+  // Controls first: if the allowed reads did not run, the refusals below prove nothing.
+  check("readonly control: `git status`, `cat`, `rg` ran (allowlist is live)", completed("git status") && completed("cat seed.txt") && completed("rg SEED_MARKER"));
+  check("readonly: the shell ran in the CLIENT's cwd (git toplevel == scratch repo, not the probe's cwd; `pwd` itself is not on the allowlist)", (ran(run, "rev-parse")?.output ?? "").trim() === dir, (ran(run, "rev-parse")?.output ?? "").trim());
+  for (const [file, label] of [
+    ["touched.txt", "touch"],
+    ["redirect.txt", "echo > f"],
+    ["curled.txt", "curl -o"],
+    ["written.txt", "file-write tool"],
+  ] as const) {
+    check(`readonly: ${label} refused — ${file} absent`, !existsSync(join(dir, file)));
+  }
+  check("readonly: no completed edit/write tool call", !run.tools.some((t) => (t.tool === "edit" || t.tool === "write") && t.status === "completed"));
+}
+
+// ── 2. agw-implement control ────────────────────────────────────────────────────────────────
+{
+  const dir = scratchRepo("implement");
+  const run = startClient({
+    agent: "implement",
+    cwd: dir,
+    prompt: [
+      "Run these steps in order, ONE shell tool call each:",
+      "1. shell: touch control.txt",
+      "2. shell: printenv GIT_CONFIG_GLOBAL",
+      "Then reply with exactly: DONE",
+    ].join("\n"),
+  });
+  const code = await run.done;
+  say(`implement run exit=${code} tools: ${redact(describeTools(run))}`);
+  check("implement control: a write lands (the probe can observe a write)", existsSync(join(dir, "control.txt")));
+  check("implement: the server-carried env reaches the shell (GIT_CONFIG_GLOBAL=/dev/null)", (ran(run, "printenv")?.output ?? "").trim() === "/dev/null", (ran(run, "printenv")?.output ?? "").trim());
+}
+
+// ── 3. hostile client env cannot loosen agw-readonly ───────────────────────────────────────
+{
+  const dir = scratchRepo("hostile");
+  const hostileConfig = JSON.stringify({
+    permission: { bash: "allow", edit: "allow", external_directory: "allow" },
+    permissions: [{ action: "*", resource: "*", effect: "allow" }],
+  });
+  const hostileFile = join(scratchRoot, "hostile-opencode.json");
+  writeFileSync(hostileFile, hostileConfig);
+  const run = startClient({
+    agent: "readonly",
+    cwd: dir,
+    envOverride: {
+      OPENCODE_CONFIG_CONTENT: hostileConfig,
+      OPENCODE_CLI_CONFIG_CONTENT: hostileConfig,
+      OPENCODE_CONFIG: hostileFile,
+    },
+    prompt: [
+      "Run these steps in order, ONE shell tool call each, and continue after any refusal:",
+      "1. shell: git status",
+      "2. shell: touch hostile.txt",
+      "3. shell: echo X > hostile2.txt",
+      "Then reply with exactly: DONE",
+    ].join("\n"),
+  });
+  const code = await run.done;
+  say(`hostile-env run exit=${code} tools: ${redact(describeTools(run))}`);
+  check("hostile env control: `git status` ran", ran(run, "git status")?.status === "completed");
+  check("hostile client env: touch / redirect still refused (files absent)", !existsSync(join(dir, "hostile.txt")) && !existsSync(join(dir, "hostile2.txt")));
+}
+
+// ── 4. interrupt-on-kill ────────────────────────────────────────────────────────────────────
+/** Start a long write-capable run, wait until its shell is really running, SIGTERM the client. */
+async function killClientMidTool(label: string): Promise<{ dir: string; sessionId: string }> {
+  const dir = scratchRepo(label);
+  const run = startClient({
+    agent: "implement",
     cwd: dir,
     prompt:
-      "List the files in the current directory with `ls` and report your working directory with `git rev-parse --show-toplevel` (the repository root) as `pwd`.",
-    jsonSchema: {
-      type: "object",
-      properties: { files: { type: "array", items: { type: "string" } }, pwd: { type: "string" } },
-      required: ["files", "pwd"],
-    },
-    readOnly: true,
-    tool: "dispatch",
-    route: undefined as never,
-    validate: (raw: unknown) => ({
-      ok: true as const,
-      value: raw as { files: string[]; pwd: string },
-    }),
-  } as never,
-  { current: 0 },
-  { model: MODEL, backend: "iu" },
-);
-console.log(`runOpencodeAttempt: ${JSON.stringify(result).slice(0, 800)}`);
-check(
-  "1. read-only job completed with a parsed verdict",
-  result.ok && Array.isArray(result.data?.files),
-);
-check("1b. verdict reports the intended directory", result.data?.pwd === dir, result.data?.pwd);
+      "Run exactly this ONE shell command and wait for it to finish, then reply DONE:\n" +
+      `touch started.txt; sleep ${LATE_SLEEP_S}; touch late.txt`,
+  });
+  const deadline = Date.now() + 90_000;
+  while (!existsSync(join(dir, "started.txt")) && Date.now() < deadline) await Bun.sleep(250);
+  const sessionId = run.sessionId() ?? "";
+  check(`${label}: the long shell command started`, existsSync(join(dir, "started.txt")) && sessionId !== "", sessionId);
+  run.proc.kill("SIGTERM");
+  await run.done;
+  return { dir, sessionId };
+}
 
-rmSync(dir, { recursive: true, force: true });
-rmSync(ctlDir, { recursive: true, force: true });
-rmSync(configHome, { recursive: true, force: true });
-console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
+async function waitIdle(sessionId: string): Promise<boolean> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const res = await fetch(`${opencodeServerUrl()}/api/session/active`, {
+      headers: { authorization: `Basic ${btoa(`opencode:${password}`)}` },
+    });
+    if (res.ok && !JSON.stringify(await res.json()).includes(sessionId)) return true;
+    await Bun.sleep(500);
+  }
+  return false;
+}
+
+{
+  // Control: kill WITHOUT interrupt — the server session keeps running and the file appears.
+  const { dir, sessionId } = await killClientMidTool("kill-control");
+  const lateDeadline = Date.now() + (LATE_SLEEP_S + 20) * 1000;
+  while (!existsSync(join(dir, "late.txt")) && Date.now() < lateDeadline) await Bun.sleep(500);
+  check("kill control: without an interrupt the orphaned session still writes late.txt", existsSync(join(dir, "late.txt")));
+  await interruptOpencodeSession(sessionId); // tidy: don't leave the control session running
+}
+
+{
+  const { dir, sessionId } = await killClientMidTool("kill-interrupt");
+  const result = await interruptOpencodeSession(sessionId);
+  say(`interrupt result: ${JSON.stringify(result)}`);
+  check("interrupt: the server stopped a running turn", result.ok && result.interrupted, JSON.stringify(result));
+  check("interrupt: the session goes idle", await waitIdle(sessionId));
+  await Bun.sleep((LATE_SLEEP_S + 5) * 1000);
+  check("interrupt: late.txt never appears", !existsSync(join(dir, "late.txt")));
+  const again = await interruptOpencodeSession(sessionId);
+  check("interrupt on an idle session is a harmless no-op", again.ok && !again.interrupted, JSON.stringify(again));
+}
+
+say(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

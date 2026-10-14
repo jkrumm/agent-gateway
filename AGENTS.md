@@ -38,6 +38,19 @@ drift) stay intact — `scripts/deploy.sh`. Those refusals come from
 runs it directly): a refusal exits 1 with no rollback since the old server was never
 touched; any later reload failure rolls back like a failed verify. Detail below.
 
+**A second LaunchAgent, `com.jkrumm.agent-gateway-opencode`**, runs the shared OpenCode v2
+server dispatch episodes attach to (§Worker routing). `make deploy` installs it only when it is
+not loaded at all, before the reload (a failed install aborts the deploy untouched) — it never
+restarts a loaded one, since that kills attached episodes. If the server is still not ok afterwards
+(`bun scripts/opencode-server-env.ts --status`) the deploy aborts BEFORE the reload with the fix
+commands and no rollback; a post-reload verify that fails ONLY on `opencodeServer` is reported as an
+opencode-server problem and does not roll master back. `make install-opencode-agent` (same
+bootout/cp/bootstrap shape as `install-agent`, refuses while jobs run, `FORCE=1` skips) applies a
+changed `com.jkrumm.agent-gateway-opencode.plist` or wrapper environment;
+`make uninstall-opencode-agent` removes it (state kept). Logs
+`~/Library/Logs/agent-gateway-opencode.{log,err}`. An opencode upgrade is a deliberate act gated
+on `bun scripts/opencode-v2-probe.ts` (`docs/opencode-v2.md`).
+
 **agent-gateway runs exclusively via LaunchAgent. Never start it standalone.**
 
 - `make dev` and `make start` are intentionally broken — they exit with an error.
@@ -79,7 +92,9 @@ Full forensic story (why BTM denies this specific label/executable):
 ## Verify & Monitor
 
 - `make verify` — `scripts/verify.sh`: `GET /health` → `ok`, `GET /api/jobs/health`
-  → `ok == true` and `degradedRoutes` empty. Exit 0 = live and healthy.
+  → `ok == true` and `degradedRoutes` empty, and `.opencodeServer.ok == true` (the shared
+  OpenCode server is up and the pinned build; the object is printed on failure).
+  Exit 0 = live and healthy.
 - Health URL: `http://127.0.0.1:7705/health` (queue health:
   `http://127.0.0.1:7705/api/jobs/health`; loopback only, no tailnet door).
 - Kuma monitor: none for agent-gateway itself — the mini heartbeat (dotfiles
@@ -393,41 +408,57 @@ Overrides: `AGENT_GATEWAY_HARNESS_<TOOL>=claude|opencode`, `AGENT_GATEWAY_VARIAN
 with a `AGENT_GATEWAY_MODEL_DISPATCH` override naming a Claude id). A fallback
 attempt (the `iu`→`max` reverse lane) always runs `claude -p` regardless of
 the primary's harness — Max only ever serves a Claude id. Implementation:
-`server/mcp/opencode-runner.ts` (argv/config/env builders + the NDJSON event
-mapper), invoked from `session-runner.ts`'s `runSessionAttempt` via
-`resolveHarness()`. Its per-run config is passed as `OPENCODE_CONFIG_CONTENT`
-(a JSON string env var), **never** `OPENCODE_CONFIG` (a file path) — measured
-2026-09-24, a repo-local `opencode.json`/`opencode.jsonc` OVERRIDES
-`OPENCODE_CONFIG`, but `OPENCODE_CONFIG_CONTENT` overrides the repo file, so
-only the CONTENT form is a safe way to hand the worker its permission
-profile. That profile sets every opencode `permission` key to `allow`/`deny`
-explicitly — the default `ask` is auto-REJECTED in non-interactive `run`
-mode and silently ends the session, so there is no "ask and it just works"
-here, unlike an interactive opencode session. **Never `--pure`** — measured
-2026-09-24 to hang.
-`buildOpencodeEnv` applies the caller's `extraEnv` FIRST; the module's own values
-(`OPENCODE_CONFIG_CONTENT`, `IU_KEY`/`IU_OPENAI_BASE`, `PWD`) are set after and always win, and
-`OPENCODE_CONFIG`/`OPENCODE_CONFIG_DIR`/`OPENCODE_CLI_CONFIG_CONTENT` are deleted — the
-read-only profile must not be replaceable by a caller. After an opencode upgrade or any change to
-`opencode-runner.ts`, re-run the live proof: `env -u CLAUDECODE bun scripts/opencode-live-probe.ts`
-(real binary, a few cents of IU tokens: read-only verdict parses, edit/non-allowlisted shell are
-refused even under a hostile `extraEnv`, the job runs in the intended directory, a
-`readOnly:false` control proves the probe discriminates, and a canary global MCP server is not
-started). `buildOpencodeEnv` pins `XDG_CONFIG_HOME` to a private empty root per run (a `mkdtemp`
-in `runOpencodeAttempt`) so opencode's GLOBAL config — where the operator registers MCP servers,
-a capability the permission profile cannot reach — is never merged into a worker. A bare
-`mcp: {<name>: {enabled: false}}` in `OPENCODE_CONFIG_CONTENT` does NOT suppress an inherited
-server (measured 2026-10-13 on 2.0.25); only pinning the config root does.
-Cost accounting: 2.x drops the final turn's `step_finish`, so that turn's tokens/cost are missing
-from a successful row; the attribution record carries `usageIncomplete: true` (a lower bound,
-not a completion gate). Killing the `opencode run --standalone` parent reaps its private server and
-tool children (measured 2026-10-13 on 2.0.25) — no process-group kill needed.
+`server/mcp/opencode-runner.ts` (argv/env builders + the NDJSON event mapper), invoked from
+`session-runner.ts`'s `runSessionAttempt` via `resolveHarness()`.
 
-**OpenCode v2 server mode is being adopted (waves in `docs/waves/PLAN.md`).** The spawn path
-above is still what runs; the measured server API (sessions, usage per message, interrupt,
-steer, restart re-attach, permission semantics), the chosen design, the Homebrew version pin
-and the upgrade gate (`bun scripts/opencode-v2-probe.ts`) are in `docs/opencode-v2.md`. Never
-`brew upgrade opencode` without that gate.
+**One shared server, two permission agents (Wave 2, 2026-10-14; `docs/opencode-v2.md`).** An
+episode is `opencode run --server http://127.0.0.1:49375 --agent agw-readonly|agw-implement
+-m provider/model#variant --format json` against ONE long-lived `opencode serve` under its own
+LaunchAgent (`com.jkrumm.agent-gateway-opencode`, port `AGENT_GATEWAY_OPENCODE_PORT`, state in
+`~/.local/share/agent-gateway/opencode/`, HTTP Basic password in its `0600` `password` file —
+never in argv). `server/mcp/opencode-server.ts` owns it: the pinned version
+(`OPENCODE_PINNED_VERSION`), the generated config, the permission rule arrays, the env the server
+carries, `getOpencodeServerStatus()`. Measured on 2.0.25: `run --server` has no
+permission/env/config flag, so (1) **permissions live in two v2 agents** in the server config
+(`OPENCODE_CONFIG_CONTENT`, set on the server process — it overrides a repo-local
+`opencode.json`; never the `OPENCODE_CONFIG` file path, which a repo file overrides): ordered
+`{action,resource,effect}` rules, LAST match wins, only `allow`/`deny` (an unmatched action
+defaults to `ask`, which blocks an unattended session forever — `agw-readonly` opens with a
+catch-all deny, `agw-implement` with a catch-all allow, plus `question` and `external_directory`
+denied). `agw-readonly` allow-lists `shell` commands (`READ_ONLY_SHELL_RULES`, re-denies after
+the allows; `edit: deny` alone does not stop a shell redirect) and denies `subagent` (a subagent
+runs under its own, broader permissions). (2) **Client env does not reach the worker's shell** —
+the shell inherits the SERVER's env, so the server carries the fixed set in
+`opencodeServerCarriedEnv()` (`GIT_DENY_CREDENTIALS_ENV` only — no credential, since every worker
+shell on the server inherits it), and `runOpencodeAttempt` **throws** on any `extraEnv` key
+outside that list or with a different value, except `RESEARCH_GATEWAY_URL`/`_TOKEN`, which are
+dropped with one `warn` (`session.opencode_extra_env_dropped`, keys only): **research validation
+is unavailable on OpenCode review angles until Wave 3** (per-session env). (3) The working directory still comes from the client's `PWD`
+(`buildOpencodeEnv` pins it). The wrapper `scripts/agent-gateway-opencode-start.sh` (a shell
+script, same BTM reason as `agent-gateway-start.sh`) refuses to start any opencode build but the
+pinned one and launches `opencode serve` under `env -i` with only `PATH`/`HOME`/`TMPDIR`/`LANG`
+plus `scripts/opencode-server-env.ts`'s output, so agw's own tokens (CLAUDE_*, GITHUB_TOKEN)
+never reach a worker. `XDG_CONFIG_HOME` points at an EMPTY dir under the state root, so the
+operator's global MCP servers never merge into a worker (a bare `mcp: {<name>: {enabled:
+false}}` does NOT suppress one — measured 2026-10-13). **Never `--pure`** — measured
+2026-09-24 to hang. **Before every spawn** `runOpencodeAttempt` checks the IU endpoint AND
+`getOpencodeServerStatus()` (`GET /api/info` for the version, plus an authenticated
+`GET /api/session/active` that must be 200 — `/api/info` is public and cannot prove the
+password; no cache); a server that is down, rejects the password or is not the pinned version fails the attempt as a transport-class failure without
+spawning (retry ladder, Max fallback and breaker apply). It is also in `GET /api/jobs/health` as
+`opencodeServer: {ok, up, version, pinned, versionOk, error?}` — not-ok makes the payload
+`pageable` (reason + warning) but leaves the queue's `ok` alone — and `make verify` fails on it.
+`GET /api/config` on the server returns the IU key in plaintext: loopback only, never log its
+body. Killing the `opencode run --server` client does NOT stop its server-side session (measured:
+tools kept running 40 s after the kill), so the lifecycle calls `interruptOpencodeSession`
+(`POST /api/session/{id}/interrupt`) after every client exit and logs
+`session.opencode_interrupt`; `bun scripts/opencode-live-probe.ts` proves the whole path against
+the real server. Never `brew upgrade opencode` without the gate in `docs/opencode-v2.md`; a server restart
+(`make install-opencode-agent`, refuses while jobs run) kills the episodes attached to it.
+Cost accounting: 2.x under `--standalone` dropped the final turn's `step_finish`, so that turn's
+tokens/cost were missing from a successful row and the attribution record carries
+`usageIncomplete: true` (a lower bound, not a completion gate); not re-measured under `--server`.
+The single spawn per attempt has no `database is locked` retry — the server owns the db.
 
 **A dead IU endpoint must never hang an opencode run.** `opencode run` retries connect errors
 and 5xx forever. `runOpencodeAttempt` therefore probes the IU OpenAI base (`fetch`, abort after

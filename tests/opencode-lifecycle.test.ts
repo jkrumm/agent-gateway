@@ -140,3 +140,109 @@ describe("runOpencodeProcessLifecycle — teardown guarantees (B2)", () => {
     expect(activeSessionCount()).toBe(0);
   });
 });
+
+// Killing the `opencode run --server` client leaves the server-side session running (measured
+// 2.0.25), so the lifecycle interrupts it on the server after the client is gone — every path.
+const ctx = {
+  jobId: "job-i",
+  cwd: "/tmp",
+  model: "deepseek-v4.1-flash",
+  backend: "iu" as const,
+  tool: "dispatch",
+  iuOpenaiBase: "https://iu.example.com/openai/v1",
+  turnsRef: { current: 0 },
+};
+const okInterrupt = async () => ({ ok: true, interrupted: false });
+
+function procWithStdout(stdout: ReadableStream<Uint8Array>, events: string[], exitCode = 0) {
+  let exited = false;
+  const proc = {
+    get exitCode() {
+      return exited ? exitCode : null;
+    },
+    stdout,
+    stderr: emptyStderr(),
+    exited: Promise.resolve(exitCode).then((c) => {
+      exited = true;
+      events.push("exited");
+      return c;
+    }),
+    kill() {},
+  };
+  return proc as unknown as OpencodeSubprocess;
+}
+
+const line = (sessionID: string) =>
+  new TextEncoder().encode(
+    `${JSON.stringify({ type: "text", sessionID, part: { text: "hi" } })}\n`,
+  );
+
+function streamOf(chunks: Uint8Array[], thenThrow = false): ReadableStream<Uint8Array> {
+  const queue = [...chunks];
+  return new ReadableStream({
+    pull(c) {
+      const next = queue.shift();
+      if (next) c.enqueue(next);
+      else if (thenThrow) c.error(new Error("boom: reader crashed"));
+      else c.close();
+    },
+  });
+}
+
+describe("runOpencodeProcessLifecycle — server-side interrupt after client exit", () => {
+  test("a clean exit interrupts the session id seen in the stream, after the client exited", async () => {
+    const events: string[] = [];
+    const calls: string[] = [];
+    const result = await runOpencodeProcessLifecycle(
+      procWithStdout(streamOf([line("ses_abc")]), events),
+      {
+        ...ctx,
+        interrupt: async (id) => {
+          events.push("interrupt");
+          calls.push(id);
+          return { ok: true, interrupted: true };
+        },
+      },
+    );
+    expect(result.accum.sessionId).toBe("ses_abc");
+    expect(calls).toEqual(["ses_abc"]);
+    expect(events).toEqual(["exited", "interrupt"]);
+  });
+
+  test("no session id was ever seen: nothing to interrupt", async () => {
+    const calls: string[] = [];
+    await runOpencodeProcessLifecycle(procWithStdout(streamOf([]), []), {
+      ...ctx,
+      interrupt: async (id) => {
+        calls.push(id);
+        return { ok: true, interrupted: false };
+      },
+    });
+    expect(calls).toEqual([]);
+  });
+
+  test("a failed interrupt is logged, never thrown", async () => {
+    const result = await runOpencodeProcessLifecycle(
+      procWithStdout(streamOf([line("ses_abc")]), []),
+      { ...ctx, interrupt: async () => ({ ok: false, interrupted: false, error: "ECONNREFUSED" }) },
+    );
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("a reader throw after the session id was seen still interrupts, and still rejects", async () => {
+    const calls: string[] = [];
+    const call = runOpencodeProcessLifecycle(
+      procWithStdout(streamOf([line("ses_abc")], true), []),
+      {
+        ...ctx,
+        interrupt: async (id) => {
+          calls.push(id);
+          return okInterrupt();
+        },
+      },
+    );
+    await expect(call).rejects.toThrow("boom: reader crashed");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls).toEqual(["ses_abc"]);
+  });
+});

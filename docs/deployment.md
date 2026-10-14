@@ -275,3 +275,37 @@ Verify after any change to the plist:
 log show --last 2m --info | grep -A3 agent-gateway.plist | grep effectiveItemDisposition
 # want: result=[enabled, allowed, ...]
 ```
+
+## The shared OpenCode server — a second LaunchAgent
+
+`com.jkrumm.agent-gateway-opencode` (`com.jkrumm.agent-gateway-opencode.plist`,
+`scripts/agent-gateway-opencode-start.sh`) runs the one `opencode serve` that dispatch episodes
+attach to (`opencode run --server`; design and measurements in `docs/opencode-v2.md`). It is a
+separate agent so `make reload` of agent-gateway never kills in-flight episodes, and a crash
+restarts it without agent-gateway involvement.
+
+- **Same BTM story, own label.** The program is a shell wrapper for the same reason as
+  `agent-gateway-start.sh` (bun builds the server's env and is denied as an executable). The
+  label is new, so confirm it after the first install with the `effectiveItemDisposition` check
+  above, against `agent-gateway-opencode.plist`.
+- **The wrapper guards three things.** It refuses to start unless `opencode --version` is the
+  pinned build (`OPENCODE_PINNED_VERSION`, `brew pin opencode`); it launches under `env -i` with
+  only `PATH`/`HOME`/`TMPDIR`/`LANG` plus `scripts/opencode-server-env.ts`'s output (the config,
+  the IU key, the state-root `XDG_*`/`OPENCODE_DB`, the Basic-auth password, the git credential
+  deny env — no research-gateway credential, deliberately) — every worker shell inherits
+  exactly this env, so agent-gateway's own tokens and any credential must not be in it; and `XDG_CONFIG_HOME` is an empty dir.
+- **State** lives in `~/.local/share/agent-gateway/opencode/` (`cfg/ data/ state/ cache/`,
+  `opencode.db`, a `0600` `password` file created on first start) — never `/tmp`, same sweep
+  reason as the logs. Port `49375`, `AGENT_GATEWAY_OPENCODE_PORT` overrides (read by both the
+  wrapper and agent-gateway from `.env`).
+- **Install / change.** `make install-opencode-agent` (bootout, wait for the old PID, copy,
+  bootstrap, wait for the port, fail loudly otherwise) after a plist, wrapper-environment or
+  model-registry change — the config is generated at server start, so a new verified model needs
+  a restart. It refuses while jobs run (`FORCE=1` skips): a restart kills attached episodes (the
+  server exits in ~50 ms on SIGTERM, no drain; Wave 4 re-attaches them). `make deploy` installs
+  the agent only when it is not loaded and never restarts a loaded one. It then requires
+  `bun scripts/opencode-server-env.ts --status` to be ok and otherwise aborts before the reload (no
+  rollback); a post-reload verify failing ONLY on `opencodeServer` is reported as an opencode
+  problem and does not roll back — the build is not at fault.
+- **Health.** `GET /api/jobs/health` carries `opencodeServer`; not-ok pages (`pageable`) and fails
+  `make verify`. Episodes refuse to spawn against a down or wrong-version server.
