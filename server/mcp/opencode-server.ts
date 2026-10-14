@@ -486,15 +486,17 @@ export async function getOpencodeServerStatus(
       signal: AbortSignal.timeout(STATUS_TIMEOUT_MS),
     });
 
-  // In parallel: one hung server must cost one timeout, not two.
-  const [infoResult, activeResult] = await Promise.allSettled([
+  // In parallel: one hung server must cost one timeout, not three. The model list rides along
+  // (its failure proves nothing and is judged only after the version/password checks pass).
+  const [infoResult, activeResult, modelsResult] = await Promise.allSettled([
     get("/api/info"),
     get("/api/session/active"),
+    get("/api/model"),
   ]);
   for (const result of [infoResult, activeResult]) {
     if (result.status === "fulfilled") continue;
-    // The other response (if any) is not read — release it.
-    for (const other of [infoResult, activeResult]) {
+    // The other responses (if any) are not read — release them.
+    for (const other of [infoResult, activeResult, modelsResult]) {
       if (other.status === "fulfilled") await other.value.body?.cancel();
     }
     return {
@@ -546,7 +548,7 @@ export async function getOpencodeServerStatus(
       error: `opencode server version ${version ?? "unknown"} != pinned ${OPENCODE_PINNED_VERSION}`,
     };
   }
-  const missing = await missingServerModels(get);
+  const missing = await missingServerModels(modelsResult);
   if (missing.length > 0) {
     return {
       ...found,
@@ -566,23 +568,20 @@ const ModelListSchema = z.object({
 /** Registry models the running server does not list as `<provider>/<id>`. A server started
  *  before a registry change keeps its old `OPENCODE_CONFIG_CONTENT` (`make reload` never restarts
  *  it), so a new route model would fail every session while the version check stays green. A
- *  response that is not a model list (or a failed request) proves nothing and reports no drift. */
-async function missingServerModels(get: (path: string) => Promise<Response>): Promise<string[]> {
-  try {
-    const res = await get("/api/model");
-    if (res.status !== 200) {
-      await res.body?.cancel();
-      return [];
-    }
-    const parsed = ModelListSchema.safeParse(await res.json());
-    if (!parsed.success) return [];
-    const listed = new Set(parsed.data.data.map((m) => `${m.providerID}/${m.id}`));
-    return opencodeServerModels()
-      .map((m) => `${opencodeProviderForWire(m.wire)}/${m.id}`)
-      .filter((ref) => !listed.has(ref));
-  } catch {
+ *  failed request or a body that is not a model list proves nothing and reports no drift. */
+async function missingServerModels(result: PromiseSettledResult<Response>): Promise<string[]> {
+  if (result.status !== "fulfilled") return [];
+  const res = result.value;
+  if (res.status !== 200) {
+    await res.body?.cancel();
     return [];
   }
+  const parsed = ModelListSchema.safeParse(await res.json().catch(() => null));
+  if (!parsed.success) return [];
+  const listed = new Set(parsed.data.data.map((m) => `${m.providerID}/${m.id}`));
+  return opencodeServerModels()
+    .map((m) => `${opencodeProviderForWire(m.wire)}/${m.id}`)
+    .filter((ref) => !listed.has(ref));
 }
 
 // ── Interrupt ───────────────────────────────────────────────────────────────────

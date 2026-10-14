@@ -711,7 +711,7 @@ describe("getOpencodeServerStatus", () => {
     expect(status.ok).toBe(false);
   });
 
-  test("the two requests are issued concurrently", async () => {
+  test("the three requests (info, active, model list) are issued concurrently", async () => {
     let inFlight = 0;
     let maxInFlight = 0;
     const slow = (async (url: string) => {
@@ -724,7 +724,7 @@ describe("getOpencodeServerStatus", () => {
         : Response.json([]);
     }) as unknown as typeof fetch;
     expect((await getOpencodeServerStatus(slow)).ok).toBe(true);
-    expect(maxInFlight).toBe(2);
+    expect(maxInFlight).toBe(3);
   });
 
   test("a closed port is not up, and the error is connection-class so the retry ladder sees it", async () => {

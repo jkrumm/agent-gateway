@@ -405,7 +405,7 @@ model/harness combination is validated against the model registry
 (`server/lib/models.ts` — id, wire, harnesses, limits, rates, `verified`; also
 served as `models` by `GET /api/routing`) AFTER every override
 (`buildRoutingTable`'s cross-field pass, routing.ts): an unregistered or
-unverified id is refused, a claude-only id (every Claude id except Haiku 5.5 EU, which also lists `opencode`) normalizes
+unverified id is refused, an id that lists `claude` but not the route's harness (every Claude id except Haiku 5.5 EU, which also lists `opencode`) normalizes
 harness back to `claude`, and an opencode-only id (the OpenAI-route models) with harness `claude` is refused rather than applied. The opencode config
 carries three providers generated from the registry: `iu-chat`
 (`@ai-sdk/openai-compatible`) and `iu-responses` (`@ai-sdk/openai`, GPT ids
