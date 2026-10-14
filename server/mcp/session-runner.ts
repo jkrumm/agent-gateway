@@ -1499,36 +1499,69 @@ export function retryBackoffMs(attempt: number): number {
  *  server's SIGTERM handler (`server/index.ts`) reads the count to decide how long to wait,
  *  then terminates what is left so a `make reload` never orphans a `claude -p` that keeps
  *  editing a worktree the boot sweep is about to delete. */
-const activeProcs = new Map<ReturnType<typeof Bun.spawn>, string | undefined>();
+interface ActiveProcEntry {
+  jobId: string | undefined;
+  /** Whether the child leads its own process group (`Bun.spawn` `detached: true` → `setsid`),
+   *  so a negative-PID signal reaches the whole group instead of only the leader. Only the
+   *  deterministic `make check`/`fallow audit` steps (`server/jobs/handlers/check.ts`) spawn
+   *  detached; `claude -p`, opencode and ocr all share the server's group and are signalled
+   *  directly. */
+  detached: boolean;
+}
+const activeProcs = new Map<ReturnType<typeof Bun.spawn>, ActiveProcEntry>();
 
 export function activeSessionCount(): number {
   return activeProcs.size;
 }
 
+/** Signal one registered subprocess the way its spawn shape requires. A detached child leads
+ *  its own process group (`setsid`), so `proc.kill` would reach only the leader and orphan a
+ *  recipe's backgrounded children (e.g. `check:\n\t@sleep 300 &`) — `process.kill(-pid, …)`
+ *  reaches the whole group. A non-detached child must NOT be group-killed: `-proc.pid` is not a
+ *  process group there, and could coincidentally match some other group id. */
+function killRegisteredProc(
+  proc: ReturnType<typeof Bun.spawn>,
+  entry: ActiveProcEntry,
+  signal: "SIGTERM" | "SIGKILL",
+): void {
+  if (entry.detached) {
+    try {
+      process.kill(-proc.pid, signal);
+    } catch {
+      /* the process group is already gone */
+    }
+  } else {
+    proc.kill(signal);
+  }
+}
+
 /** Register a non-`runSession` child process (e.g. `server/lib/ocr.ts`'s `ocr review` spawn)
  *  into the same `activeProcs` map worker sessions use, so `POST /api/jobs/:id/cancel`
  *  (`terminateSessionsForJob`) and a drain (`terminateActiveSessions`) can kill it too — the
- *  same reason `runSessionAttempt` registers its own `Bun.spawn` result below. Returns an
- *  untrack fn; the caller runs it in a `finally` once the process has exited (mirroring
- *  `void proc.exited.finally(() => activeProcs.delete(proc))` below, which `runSession`'s own
- *  spawn gets for free but an external caller must do itself). */
+ *  same reason `runSessionAttempt` registers its own `Bun.spawn` result below. Pass `detached:
+ *  true` when the child was spawned with `Bun.spawn(..., { detached: true })` so the two kill
+ *  paths group-kill it. Returns an untrack fn; the caller runs it in a `finally` once the
+ *  process has exited (mirroring `void proc.exited.finally(() => activeProcs.delete(proc))`
+ *  below, which `runSession`'s own spawn gets for free but an external caller must do itself). */
 export function trackExternalProc(
   proc: ReturnType<typeof Bun.spawn>,
   jobId: string | undefined,
+  detached = false,
 ): () => void {
-  activeProcs.set(proc, jobId);
+  activeProcs.set(proc, { jobId, detached });
   return () => activeProcs.delete(proc);
 }
 
 /** Test-only: register an already-constructed fake "proc" into `activeProcs` under a given
  *  jobId, so `terminateSessionsForJob`/`terminateActiveSessions` can be exercised without
  *  spawning a real `claude -p` subprocess. The caller only needs to satisfy the `exitCode`/
- *  `kill` shape those two functions actually read — cast at the call site. */
+ *  `kill`/`pid` shape those two functions actually read — cast at the call site. */
 export function __registerProcForTests(
   proc: ReturnType<typeof Bun.spawn>,
   jobId: string | undefined,
+  detached = false,
 ): void {
-  activeProcs.set(proc, jobId);
+  activeProcs.set(proc, { jobId, detached });
 }
 
 export function __resetActiveProcsForTests(): void {
@@ -1543,10 +1576,10 @@ export function __resetActiveProcsForTests(): void {
  *  see the comment on `execute()`'s catch block. */
 export function terminateActiveSessions(): string[] {
   const jobIds: string[] = [];
-  for (const [proc, jobId] of activeProcs) {
+  for (const [proc, entry] of activeProcs) {
     if (proc.exitCode === null) {
-      proc.kill("SIGTERM");
-      if (jobId !== undefined) jobIds.push(jobId);
+      killRegisteredProc(proc, entry, "SIGTERM");
+      if (entry.jobId !== undefined) jobIds.push(entry.jobId);
     }
   }
   return jobIds;
@@ -1561,12 +1594,12 @@ export function terminateActiveSessions(): string[] {
  *  registered proc, e.g. it was still queued). */
 export function terminateSessionsForJob(jobId: string): boolean {
   let signalled = false;
-  for (const [proc, id] of activeProcs) {
-    if (id !== jobId || proc.exitCode !== null) continue;
+  for (const [proc, entry] of activeProcs) {
+    if (entry.jobId !== jobId || proc.exitCode !== null) continue;
     signalled = true;
-    proc.kill("SIGTERM");
+    killRegisteredProc(proc, entry, "SIGTERM");
     setTimeout(() => {
-      if (proc.exitCode === null) proc.kill("SIGKILL");
+      if (proc.exitCode === null) killRegisteredProc(proc, entry, "SIGKILL");
     }, 5000);
   }
   if (!signalled) {
@@ -1780,7 +1813,7 @@ async function runSessionAttempt<T = unknown>(
     stderr: "pipe",
     env,
   });
-  activeProcs.set(proc, jobId);
+  activeProcs.set(proc, { jobId, detached: false });
   void proc.exited.finally(() => activeProcs.delete(proc));
 
   // Progress heartbeat: keeps MCP client timeout alive during long-running sessions

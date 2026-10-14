@@ -5,13 +5,17 @@
 // spied on, so "no model call" is asserted rather than assumed.
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hasMakeCheckTarget, runCheck } from "../server/jobs/handlers/check.ts";
 import * as sessionRunner from "../server/mcp/session-runner.ts";
-import { SessionCancelledError } from "../server/mcp/session-runner.ts";
+import {
+  SessionCancelledError,
+  terminateSessionsForJob,
+  trackExternalProc,
+} from "../server/mcp/session-runner.ts";
 
 function pidAlive(pid: number): boolean {
   try {
@@ -22,12 +26,16 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-describe("hasMakeCheckTarget — probes `make -q check`", () => {
-  // Detection is delegated to `make -q check` rather than matched against source lines: question
-  // mode exits 0 (up to date) / 1 (needs remaking) for a target Make registers and 2 ("No rule
-  // to make target") when it does not, so a `check:`-shaped line inside a `define … endef` block
-  // or a disabled conditional — text, not a rule — is correctly rejected where the old regex
-  // matched it and produced a false red.
+describe("hasMakeCheckTarget — parses `make -p` for an explicit check rule", () => {
+  // Detection delegates to `make -p`'s database dump rather than `make -q check`'s exit code:
+  // exit 0 also fires for a file/dir named `check` (or a recipe-less `check:` target), exit 1
+  // for a catch-all `%:` pattern rule, and exit 2 both for "No rule to make target 'check'" and
+  // for a genuine `check:` target whose prerequisite has no rule — so no exit code cleanly means
+  // "real target with a recipe". The dump prints a `check:` header only for a registered rule,
+  // and a `#  commands/recipe to execute (from …)` marker only for one that actually has a
+  // recipe, so a `check:`-shaped line inside a `define … endef` block or a disabled conditional
+  // — text, not a rule — is correctly rejected where the old regex matched it and produced a
+  // false red.
   async function declares(makefile: string): Promise<boolean> {
     await writeFile(join(cwd, "Makefile"), makefile);
     return hasMakeCheckTarget(cwd);
@@ -83,6 +91,34 @@ describe("hasMakeCheckTarget — probes `make -q check`", () => {
 
   test("a .PHONY check target with a recipe is detected", async () => {
     expect(await declares(".PHONY: check\ncheck:\n\t@echo hi\n")).toBe(true);
+  });
+
+  test("a file literally named `check` (no rule) is not a match", async () => {
+    // `make -q check` exits 0 here ("'check' is up to date") even though nothing is registered —
+    // the exact false positive the exit-code sniffing had. A `check` file with no rule registers
+    // no `check:` header in the database.
+    await writeFile(join(cwd, "Makefile"), "all:\n\t@echo x\n");
+    await writeFile(join(cwd, "check"), "not a rule\n");
+    expect(await hasMakeCheckTarget(cwd)).toBe(false);
+  });
+
+  test("a catch-all `%:` pattern rule is not a match", async () => {
+    // `make -q check` exits 1 here (the `%:` rule "needs remaking"), matching a real target —
+    // the other false positive. The pattern rule registers no explicit `check:` header.
+    expect(await declares("%:\n\t@echo catchall\n")).toBe(false);
+  });
+
+  test("a recipe-less `check:` target is not a match", async () => {
+    // `make check` prints "Nothing to be done" and exits 0 — zero real validation. A `check:`
+    // header with no recipe has no `commands/recipe to execute` marker in the database.
+    expect(await declares("check:\n")).toBe(false);
+  });
+
+  test("a `check:` target with an unavailable prerequisite is still detected", async () => {
+    // `make -q check` exits 2 here (no rule to make `generated/config`), which must NOT mean
+    // "no check target" — the recipe is real and `make check` should run (and fail) rather than
+    // fall through to the skill path.
+    expect(await declares("check: generated/config\n\t@echo real-check\n")).toBe(true);
   });
 });
 
@@ -254,4 +290,49 @@ describe("runStep — process-group cleanup and cancellation", () => {
       SessionCancelledError,
     );
   }, 20_000);
+});
+
+describe("terminateSessionsForJob — external kill of a detached make check", () => {
+  // runStep's OWN watchdog/`finally` already group-kills its detached `make check`; this is the
+  // OTHER kill path — `job_cancel`'s `terminateSessionsForJob` (and, through the same
+  // `killRegisteredProc` helper, a drain's `terminateActiveSessions`). It must reach the whole
+  // process group, not just `make`, or a recipe that backgrounds a child (`sleep 300 &`) leaks
+  // that child as an untracked orphan.
+  test("group-kills a backgrounded recipe child, not only the make leader", async () => {
+    const pidFile = join(cwd, "child.pid");
+    // `wait` keeps `make` (and its recipe shell) alive long enough for the external kill to land
+    // while `proc.exitCode === null` — the precondition `terminateSessionsForJob` acts on.
+    await writeFile(join(cwd, "Makefile"), `check:\n\t@sleep 300 & echo $$! > ${pidFile}; wait\n`);
+
+    const proc = Bun.spawn(["make", "check"], {
+      cwd,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      detached: true,
+    });
+    const untrack = trackExternalProc(proc, "job-ext-kill", true);
+    const drained = new Response(proc.stdout).text();
+    try {
+      const deadline = Date.now() + 10_000;
+      while (!existsSync(pidFile) && Date.now() < deadline) await Bun.sleep(25);
+      expect(existsSync(pidFile)).toBe(true);
+      const pid = Number(readFileSync(pidFile, "utf8").trim());
+      expect(pidAlive(pid)).toBe(true);
+
+      expect(terminateSessionsForJob("job-ext-kill")).toBe(true);
+
+      const killDeadline = Date.now() + 5_000;
+      while (pidAlive(pid) && Date.now() < killDeadline) await Bun.sleep(25);
+      expect(pidAlive(pid)).toBe(false);
+    } finally {
+      try {
+        process.kill(-proc.pid, "SIGKILL");
+      } catch {
+        /* the process group is already gone */
+      }
+      untrack();
+      await drained;
+    }
+  }, 30_000);
 });
