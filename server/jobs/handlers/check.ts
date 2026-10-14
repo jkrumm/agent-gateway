@@ -1,7 +1,13 @@
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
-import { runSession, zodValidator } from "../../mcp/session-runner.ts";
+import {
+  runSession,
+  scrubSensitiveEnv,
+  SessionCancelledError,
+  trackExternalProc,
+  zodValidator,
+} from "../../mcp/session-runner.ts";
 import { routeFor } from "../../lib/routing.ts";
 import { IDLE_TIMEOUT_MS } from "../../lib/idle-timeout.ts";
 import { appLogger as logger } from "../../logger.ts";
@@ -53,7 +59,12 @@ export const CHECK_OUTPUT = z.object({
   steps: z
     .array(
       z.object({
-        name: z.string().describe("Step name: format | lint | typecheck | test | fallow"),
+        name: z
+          .string()
+          .describe(
+            "Step name: format | lint | typecheck | test | fallow, or check for the " +
+              "deterministic repo contract's `make check` path.",
+          ),
         passed: z.boolean(),
         errors: z
           .array(z.string())
@@ -70,6 +81,175 @@ export const CHECK_OUTPUT = z.object({
 const CHECK_JSON_SCHEMA = z.toJSONSchema(CHECK_OUTPUT);
 
 export type CheckOutput = z.infer<typeof CHECK_OUTPUT>;
+
+// ── Deterministic `make check` path ────────────────────────────────────────────
+//
+// The repo contract (dotfiles/docs/agent-platform.md) is that `make check` is a repo's single
+// validation entrypoint — it encodes the right flags/env and, for a repo whose `check` installs
+// dependencies first, is the ONLY thing that works in a dependency-less dispatch worktree
+// (`node_modules` is excluded from the worktree copy — dispatch-git.ts's
+// EXCLUDED_COPY_SEGMENTS). The skill-driven discovery path below only *prefers* `make <target>`
+// among the per-tool targets, so a worker hand-picks raw `bun run typecheck`/`lint` and fails on
+// the missing deps rather than on the diff — a correct PR goes red. When the caller passed no
+// explicit `commands` and the repo root Makefile declares a real `check:` target, run it
+// verbatim instead: one deterministic step, no LLM, no ecosystem sniffing, so the verdict is the
+// repo's own contract rather than the model's guess at a step list.
+
+/** Whether a Makefile declares a real `check:` target. Anchored at a line start so a substring
+ *  like `precheck:` or `check-all:` never counts, and a `# check:` comment never does either.
+ *  Pure — unit-tested without touching the filesystem. */
+export function makefileDeclaresCheck(makefile: string): boolean {
+  return /^check\s*:/m.test(makefile);
+}
+
+/** Whether the repo root's Makefile declares `check:` — the gate for the deterministic
+ *  `make check` path. A missing or unreadable Makefile is "no". */
+function hasMakeCheckTarget(cwd: string): boolean {
+  const makefilePath = join(cwd, "Makefile");
+  if (!existsSync(makefilePath)) return false;
+  try {
+    return makefileDeclaresCheck(readFileSync(makefilePath, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+const MAKE_CHECK_IDLE_CHECK_INTERVAL_MS = 5_000;
+const MAKE_CHECK_SIGKILL_GRACE_MS = 5_000;
+const MAKE_CHECK_MAX_ERROR_LINES = 50;
+const MAKE_CHECK_LINE_MAX_CHARS = 500;
+const MAKE_CHECK_OUTPUT_TAIL_CHARS = 20_000;
+
+/** The last few non-empty output lines, bounded per line — the check output contract wants
+ *  error lines, not a second log. */
+function makeCheckErrorLines(output: string): string[] {
+  return output
+    .split("\n")
+    .map((l) => l.replace(/\s+$/, ""))
+    .filter((l) => l !== "")
+    .slice(-MAKE_CHECK_MAX_ERROR_LINES)
+    .map((l) =>
+      l.length > MAKE_CHECK_LINE_MAX_CHARS ? `${l.slice(0, MAKE_CHECK_LINE_MAX_CHARS)}…` : l,
+    );
+}
+
+/** Run the repo's own `make check` as one deterministic step. No worker session and no model
+ *  call — the exit code is the verdict and the output tail is the error detail, exactly the
+ *  shape the skill path produces, minus the model's judgement. Idle-watchdogged (never a
+ *  wall-clock ceiling) and registered for `POST /api/jobs/:id/cancel`, like every other child. */
+async function runMakeCheck(
+  cwd: string,
+  idleSeconds: number,
+  jobId: string | undefined,
+  isCancelled: ((jobId: string) => boolean) | undefined,
+  onProgress: ProgressSink | undefined,
+): Promise<CheckOutput> {
+  const idleMs = idleSeconds * 1000;
+  // A worker session scrubs credential-shaped env before its `claude -p` spawn; this path
+  // spawns `make` directly in the server process, so it needs the same scrub — a `check`
+  // target in an untrusted dispatch worktree must not be able to read the LaunchAgent's tokens.
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
+  scrubSensitiveEnv(env);
+
+  const proc = Bun.spawn(["make", "check"], {
+    cwd,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    env,
+  });
+  const untrack = trackExternalProc(proc, jobId);
+
+  let lastActivityAt = Date.now();
+  let idleKilled = false;
+  let cancelled = false;
+  let tail = "";
+  let sigkillTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const terminate = (): void => {
+    if (proc.exitCode !== null) return;
+    proc.kill("SIGTERM");
+    sigkillTimer = setTimeout(() => {
+      if (proc.exitCode === null) proc.kill("SIGKILL");
+    }, MAKE_CHECK_SIGKILL_GRACE_MS);
+  };
+
+  const watchdog = setInterval(() => {
+    if (jobId && isCancelled?.(jobId)) {
+      cancelled = true;
+      terminate();
+      return;
+    }
+    if (!idleKilled && Date.now() - lastActivityAt >= idleMs) {
+      idleKilled = true;
+      terminate();
+    }
+  }, MAKE_CHECK_IDLE_CHECK_INTERVAL_MS);
+
+  // Each stream is drained after every chunk, so an output-heavy step keeps resetting the idle
+  // clock and is never killed on elapsed time. Both pipes must be drained or the child blocks.
+  const drain = async (stream: ReadableStream<Uint8Array> | undefined): Promise<void> => {
+    if (!stream) return;
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        lastActivityAt = Date.now();
+        tail += decoder.decode(value, { stream: true });
+        if (tail.length > MAKE_CHECK_OUTPUT_TAIL_CHARS) {
+          tail = tail.slice(-MAKE_CHECK_OUTPUT_TAIL_CHARS);
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  };
+
+  try {
+    onProgress?.({ turns: 0, lastAction: "make check", lastActivityAt: Date.now() });
+    await Promise.all([drain(proc.stdout), drain(proc.stderr)]);
+    const exitCode = await proc.exited;
+    if (cancelled) throw new SessionCancelledError(jobId ?? "check");
+
+    if (!idleKilled && exitCode === 0) {
+      return {
+        passed: true,
+        steps: [{ name: "check", passed: true }],
+        summary: "make check passed",
+      };
+    }
+    const errors = idleKilled
+      ? [
+          `no output for ${idleSeconds}s — likely a watch-mode runner or a hung process`,
+          ...makeCheckErrorLines(tail),
+        ]
+      : makeCheckErrorLines(tail);
+    return {
+      passed: false,
+      steps: [
+        {
+          name: "check",
+          passed: false,
+          errors:
+            errors.length > 0 ? errors : [`make check failed (exit ${exitCode}) with no output`],
+        },
+      ],
+      summary: idleKilled
+        ? `make check failed: no output for ${idleSeconds}s`
+        : `make check failed (exit ${exitCode})`,
+    };
+  } finally {
+    clearInterval(watchdog);
+    terminate();
+    if (proc.exitCode === null) await proc.exited;
+    // Cleared only once the child has exited — `terminate()` above may have just re-armed it.
+    if (sigkillTimer) clearTimeout(sigkillTimer);
+    untrack();
+  }
+}
 
 // ── Skill prompt loader ────────────────────────────────────────────────────────
 
@@ -223,6 +403,15 @@ export async function runCheck(
   // not a per-step distinction the caller is expected to make.
   const stepSeconds = stepTimeoutSeconds ?? DEFAULT_STEP_IDLE_SECONDS;
   const testSeconds = stepTimeoutSeconds ?? DEFAULT_TEST_IDLE_SECONDS;
+
+  // The repo contract's `make check` wins over LLM discovery whenever the caller supplied no
+  // explicit commands — deterministic, dependency-aware, no model in the loop (see the section
+  // above). A caller-supplied `commands` always overrides it.
+  if ((!commands || commands.length === 0) && hasMakeCheckTarget(cwd)) {
+    // `make check` bundles the test step, so it gets the test step's (higher) idle window.
+    return runMakeCheck(cwd, testSeconds, jobId, isCancelled, onProgress);
+  }
+
   const prompt = await loadSkillPrompt(commands, stepSeconds, testSeconds);
   const runWorker = (p: string) =>
     runSession<CheckOutput>({
