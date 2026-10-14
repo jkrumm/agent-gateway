@@ -261,7 +261,7 @@ async function runStep(
   // LaunchAgent's stale `PWD` — pinned to the main checkout, not this command's `cwd`. A `make
   // check` recipe that reads `$(PWD)`/`$PWD` would then validate the WRONG tree (a false green
   // against the dispatch worktree). Same pin, for the same measured reason, as
-  // `opencode-runner.ts`'s `buildOpencodeEnv`.
+  // what the pre-Wave-3 opencode runner did for its client process.
   env.PWD = cwd;
 
   const proc = Bun.spawn(argv, {

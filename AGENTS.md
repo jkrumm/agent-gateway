@@ -382,7 +382,7 @@ different way. JUDGE/PROSE (review, otel, narrative, excalidraw) carry no
 
 **`dispatch`/`dispatch_implement` run on a second harness, OpenCode, not
 `claude -p`** (2026-09-24, `harness: "opencode"` on `ToolRoute` — AGENT_OC/
-AGENT_OC_IMPLEMENT — every other tool stays `"claude"`). `opencode run` talks
+AGENT_OC_IMPLEMENT — every other tool stays `"claude"`). An OpenCode session talks
 to the cheap IU model over the IU endpoint's **OpenAI-compatible** route
 (the `iu-chat` provider — a different id and transport from the IU-native-
 Anthropic models every other gateway route
@@ -408,69 +408,76 @@ Overrides: `AGENT_GATEWAY_HARNESS_<TOOL>=claude|opencode`, `AGENT_GATEWAY_VARIAN
 with a `AGENT_GATEWAY_MODEL_DISPATCH` override naming a Claude id). A fallback
 attempt (the `iu`→`max` reverse lane) always runs `claude -p` regardless of
 the primary's harness — Max only ever serves a Claude id. Implementation:
-`server/mcp/opencode-runner.ts` (argv/env builders + the NDJSON event mapper), invoked from
+`server/mcp/opencode-runner.ts` (the drive loop + message summarizer) over `server/mcp/opencode-client.ts`
+(the typed HTTP port), invoked from
 `session-runner.ts`'s `runSessionAttempt` via `resolveHarness()`.
 
-**One shared server, two permission agents (Wave 2, 2026-10-14; `docs/opencode-v2.md`).** An
-episode is `opencode run --server http://127.0.0.1:49375 --agent agw-readonly|agw-implement
--m provider/model#variant --format json` against ONE long-lived `opencode serve` under its own
-LaunchAgent (`com.jkrumm.agent-gateway-opencode`, port `AGENT_GATEWAY_OPENCODE_PORT`, state in
-`~/.local/share/agent-gateway/opencode/`, HTTP Basic password in its `0600` `password` file —
-never in argv). `server/mcp/opencode-server.ts` owns it: the pinned version
-(`OPENCODE_PINNED_VERSION`), the generated config, the permission rule arrays, the env the server
-carries, `getOpencodeServerStatus()`. Measured on 2.0.25: `run --server` has no
-permission/env/config flag, so (1) **permissions live in two v2 agents** in the server config
-(`OPENCODE_CONFIG_CONTENT`, set on the server process — it overrides a repo-local
-`opencode.json`; never the `OPENCODE_CONFIG` file path, which a repo file overrides): ordered
+**One shared server, driven over HTTP (Waves 2–3, 2026-10-14; `docs/opencode-v2.md`).** An episode
+is a SESSION on ONE long-lived `opencode serve` under its own LaunchAgent
+(`com.jkrumm.agent-gateway-opencode`, port `AGENT_GATEWAY_OPENCODE_PORT`, state in
+`~/.local/share/agent-gateway/opencode/`, HTTP Basic password in its `0600` `password` file).
+There is no `opencode run` child process and no CLI fallback path: `runOpencodeAttempt` drives
+`POST /api/session` → `PUT …/environment` → `POST …/prompt` → `POST /api/experimental/session/{id}/wait`
+→ `GET …/message` through the `OpencodeClient` port (`server/mcp/opencode-client.ts`, a thin
+zod-typed `fetch` adapter; tests inject an in-memory fake of the same interface).
+`server/mcp/opencode-server.ts` owns the server itself: the pinned version
+(`OPENCODE_PINNED_VERSION`), the generated config, the permission rule arrays,
+`getOpencodeServerStatus()`, `interruptOpencodeSession`. What a session sets (measured on 2.0.25):
+(1) **permissions live in two v2 agents** in the server config (`OPENCODE_CONFIG_CONTENT`, set on
+the server process — it overrides a repo-local `opencode.json`; never the `OPENCODE_CONFIG` file
+path, which a repo file overrides), selected with `agent` on session create: ordered
 `{action,resource,effect}` rules, LAST match wins, only `allow`/`deny` (an unmatched action
 defaults to `ask`, which blocks an unattended session forever — `agw-readonly` opens with a
 catch-all deny, `agw-implement` with a catch-all allow, plus `question` and `external_directory`
 denied). `agw-readonly` allow-lists `shell` commands (`READ_ONLY_SHELL_RULES`, re-denies after
-the allows;`agw-readonly` allow-lists `shell` commands (`READ_ONLY_SHELL_RULES`, re-denies after
 the allows, then trailing denies for command text naming `OPENCODE_SERVER_PASSWORD`, `IU_KEY`,
 `IU_OPENAI_BASE`, the server port or `/api/session` — a cost-raising deny list, not a boundary,
-see `docs/opencode-v2.md`; `edit: deny` alone does not stop a shell redirect) and denies `subagent` (a subagent
-runs under its own, broader permissions). (2) **Client env does not reach the worker's shell** —
-the shell inherits the SERVER's env, so the server carries the fixed set in
-`opencodeServerCarriedEnv()` (`GIT_DENY_CREDENTIALS_ENV` only — no credential, since every worker
-shell on the server inherits it), and `runOpencodeAttempt` **throws** on any `extraEnv` key
-outside that list or with a different value, except `RESEARCH_GATEWAY_URL`/`_TOKEN`, which are
-dropped with one `warn` (`session.opencode_extra_env_dropped`, keys only): **research validation
-is unavailable on OpenCode review angles until Wave 3** (per-session env). (3) The working directory still comes from the client's `PWD`
-(`buildOpencodeEnv` pins it). The wrapper `scripts/agent-gateway-opencode-start.sh` (a shell
-script, same BTM reason as `agent-gateway-start.sh`) refuses to start any opencode build but the
-pinned one and launches `opencode serve` under `env -i` with only `PATH`/`HOME`/`TMPDIR`/`LANG`
-plus `scripts/opencode-server-env.ts`'s output, so agw's own tokens (CLAUDE_*, GITHUB_TOKEN)
-never reach a worker. `XDG_CONFIG_HOME` points at an EMPTY dir under the state root, so the
-operator's global MCP servers never merge into a worker (a bare `mcp: {<name>: {enabled:
-false}}` does NOT suppress one — measured 2026-10-13). **Never `--pure`** — measured
-2026-09-24 to hang. **Before every spawn** `runOpencodeAttempt` checks the IU endpoint AND
-`getOpencodeServerStatus()` (`GET /api/info` for the version, plus an authenticated
-`GET /api/session/active` that must be 200 — `/api/info` is public and cannot prove the
-password; no cache); a server that is down, rejects the password or is not the pinned version fails the attempt as a transport-class failure without
-spawning (retry ladder, Max fallback and breaker apply). It is also in `GET /api/jobs/health` as
-`opencodeServer: {ok, up, version, pinned, versionOk, error?}` — not-ok makes the payload
-`pageable` (reason + warning) but leaves the queue's `ok` alone — and `make verify` fails on it.
-`GET /api/config` on the server returns the IU key in plaintext: loopback only, never log its
-body. Killing the `opencode run --server` client does NOT stop its server-side session (measured:
-tools kept running 40 s after the kill), so the lifecycle calls `interruptOpencodeSession`
-(`POST /api/session/{id}/interrupt`) after every client exit and logs
-`session.opencode_interrupt`; `bun scripts/opencode-live-probe.ts` proves the whole path against
-the real server. Never `brew upgrade opencode` without the gate in `docs/opencode-v2.md`; a server restart
-(`make install-opencode-agent`, refuses while jobs run) kills the episodes attached to it.
-Cost accounting: 2.x under `--standalone` dropped the final turn's `step_finish`, so that turn's
-tokens/cost were missing from a successful row and the attribution record carries
-`usageIncomplete: true` (a lower bound, not a completion gate); not re-measured under `--server`.
-The single spawn per attempt has no `database is locked` retry — the server owns the db.
+see `docs/opencode-v2.md`; `edit: deny` alone does not stop a shell redirect) and denies
+`subagent` (a subagent runs under its own, broader permissions). (2) **The shell env is the
+session's** — the shell tool starts from a sanitized base (the server's env does not reach it) plus
+`PUT /api/session/{id}/environment`: the runner sends `extraEnv` (research-gateway credentials
+included, so research validation works on OpenCode review angles), then `GIT_DENY_CREDENTIALS_ENV`
+last, and blanks the server's credentials (`OPENCODE_SESSION_BLANKED_ENV`) as defense in depth.
+(3) The working directory is `location.directory`. The wrapper
+`scripts/agent-gateway-opencode-start.sh` (a shell script, same BTM reason as
+`agent-gateway-start.sh`) refuses to start any opencode build but the pinned one and launches
+`opencode serve` under `env -i` with only `PATH`/`HOME`/`TMPDIR`/`LANG` plus
+`scripts/opencode-server-env.ts`'s output, so agw's own tokens (CLAUDE_*, GITHUB_TOKEN) never reach
+a worker. `XDG_CONFIG_HOME` points at an EMPTY dir under the state root, so the operator's global
+MCP servers never merge into a worker (a bare `mcp: {<name>: {enabled: false}}` does NOT suppress
+one — measured 2026-10-13). **Never `--pure`** — measured 2026-09-24 to hang. **Before every
+session** `runOpencodeAttempt` checks the IU endpoint AND `getOpencodeServerStatus()` (`GET
+/api/info` for the version, plus an authenticated `GET /api/session/active` that must be 200 —
+`/api/info` is public and cannot prove the password; no cache); a server that is down, rejects
+the password or is not the pinned version fails the attempt as a transport-class failure without
+a session (retry ladder, Max fallback and breaker apply), and so does a connection error mid-run.
+It is also in `GET /api/jobs/health` as `opencodeServer: {ok, up, version, pinned, versionOk,
+error?}` — not-ok makes the payload `pageable` (reason + warning) but leaves the queue's `ok`
+alone — and `make verify` fails on it. `GET /api/config` on the server returns the IU key in
+plaintext: loopback only, never log a response body.
 
-**A dead IU endpoint must never hang an opencode run.** `opencode run` retries connect errors
+**Usage, liveness, cancel (Wave 3).** Tokens and cost come from the `assistant` messages
+(`summarizeOpencodeMessages`, paginated `order=asc` + `cursor.next` until an empty page — a single
+page silently loses a long episode); every turn has its own message, so there is no lost final turn
+and `usageIncomplete` is gone (the runner sets a `title` on create, which removes the background
+title call that otherwise bills the session ~0.00009 USD without a message). The idle watchdog (`IDLE_TIMEOUT_MS`, 5 min) keys off
+a fingerprint of the newest messages (`opencodeActivityFingerprint`; a provider retry is NOT
+progress) polled every 3 s while a `wait` long-poll is open; the SSE stream is not used. Cancel and
+drain reach a session through `trackExternalSession` (`terminateSessionsForJob` /
+`terminateActiveSessions` call its `stop`, which `POST …/interrupt`s it); any exit that did not
+end idle on its own is interrupted too (a session keeps running tools otherwise — measured), and
+`session.opencode_interrupt` is logged. `bun scripts/opencode-live-probe.ts` proves the whole path
+against the real server. Never `brew upgrade opencode` without the gate in `docs/opencode-v2.md`;
+a server restart (`make install-opencode-agent`, refuses while jobs run) kills the episodes
+running on it. There is no `database is locked` retry — the server owns the db.
+
+**A dead IU endpoint must never hang an OpenCode session.** The server retries connect errors
 and 5xx forever. `runOpencodeAttempt` therefore probes the IU OpenAI base (`fetch`, abort after
 `AGENT_GATEWAY_OPENCODE_PREFLIGHT_MS`, default 5000; any HTTP response counts as reachable)
-before every spawn and, on failure, returns a connection-class error without spawning — the
+before every session and, on failure, returns a connection-class error without creating one — the
 existing retry ladder, Max fallback and circuit breaker read it as a transport failure
-(`opencode-runner.ts`, `preflightIuEndpoint`). Mid-run there is no extra budget: the measured
-NDJSON streams carry no retry event (only terminal `error` events), retry chatter goes to
-stderr, which never resets the idle clock, so the 5 min idle watchdog is the backstop. Any
+(`opencode-runner.ts`, `preflightIuEndpoint`). Mid-run there is no extra budget: provider retries
+are excluded from the activity fingerprint, so the 5 min idle watchdog is the backstop. Any
 manual or worker probe uses **`opencode-safe`** (`scripts/opencode-safe`, linked by `make
 install-cli`): `curl --max-time 5` against the IU base (`IU_OPENAI_BASE`, else `IU_BASE_URL`,
 else the `claude-sdk-base-url` Keychain item), then `exec timeout ${OPENCODE_SAFE_TIMEOUT:-120}

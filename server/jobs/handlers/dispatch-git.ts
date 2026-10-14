@@ -1725,7 +1725,7 @@ export function opencodeRepoConfigPresent(root: string): string[] {
  * `opencode.json`/`opencode.jsonc` OVERRIDES an `OPENCODE_CONFIG` env var (a file path), so
  * a per-run config written to a temp file and pointed at by `OPENCODE_CONFIG` would have
  * LOST to a malicious repo config, not won. `OPENCODE_CONFIG_CONTENT` (the JSON itself, as
- * an env value — opencode-runner.ts's `buildOpencodeEnv`) is the one that wins over the repo
+ * an env value on the OpenCode server — opencode-server.ts's `opencodeServerEnv`) is the one that wins over the repo
  * file, which is why agent-gateway passes the config that way and never via `OPENCODE_CONFIG` at
  * all. This strip is still real defense in depth on top of that, not redundant with it: it
  * also removes `.opencode/`, whose plugin code executes regardless of which config wins.

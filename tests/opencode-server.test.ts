@@ -18,19 +18,20 @@ import {
   normalizeOpencodeVersion,
   OPENCODE_AGENT_IMPLEMENT,
   OPENCODE_AGENT_READONLY,
-  OPENCODE_DROPPED_EXTRA_ENV,
   OPENCODE_IMPLEMENT_PERMISSIONS,
   OPENCODE_PINNED_VERSION,
   OPENCODE_PROVIDER_CHAT,
   OPENCODE_PROVIDER_RESPONSES,
   OPENCODE_READONLY_PERMISSIONS,
-  opencodeServerCarriedEnv,
+  OPENCODE_SESSION_BLANKED_ENV,
   opencodeServerEnv,
   opencodeServerPort,
   opencodeServerUrl,
   readServerPassword,
   READ_ONLY_SHELL_RULES,
   type OpencodePermissionRule,
+  unreachableReason,
+  basicAuthHeader,
 } from "../server/mcp/opencode-server.ts";
 
 // ── v2 rule evaluation (mirrors https://opencode.ai/v2/docs/permissions) ─────────────────────
@@ -382,12 +383,29 @@ describe("buildOpencodeServerConfig", () => {
 
 // ── The env the server carries ────────────────────────────────────────────────────────────────
 
-describe("opencodeServerCarriedEnv / opencodeServerEnv", () => {
-  test("carries exactly GIT_DENY_CREDENTIALS_ENV — no research credential, ever", () => {
-    expect(opencodeServerCarriedEnv()).toEqual({ ...GIT_DENY_CREDENTIALS_ENV });
-    for (const name of OPENCODE_DROPPED_EXTRA_ENV) {
-      expect(Object.keys(opencodeServerCarriedEnv())).not.toContain(name);
+describe("opencodeServerEnv", () => {
+  test("carries no git credential-deny key — per-job env is delivered per session, not by the server", () => {
+    const env = opencodeServerEnv({ iuKey: "k", iuOpenaiBase: "b", password: "pw" });
+    for (const name of Object.keys(GIT_DENY_CREDENTIALS_ENV)) {
+      expect(Object.keys(env), name).not.toContain(name);
     }
+    expect(Object.keys(env).filter((name) => name.startsWith("GIT_"))).toEqual([]);
+  });
+
+  test("OPENCODE_SESSION_BLANKED_ENV is exactly the credentials the server env carries", () => {
+    const env = opencodeServerEnv({ iuKey: "k", iuOpenaiBase: "b", password: "pw" });
+    expect([...OPENCODE_SESSION_BLANKED_ENV].toSorted()).toEqual([
+      "IU_KEY",
+      "IU_OPENAI_BASE",
+      "OPENCODE_SERVER_PASSWORD",
+    ]);
+    // Each blanked name is something the server really holds (else the blank is dead weight) ...
+    for (const name of OPENCODE_SESSION_BLANKED_ENV) expect(Object.keys(env)).toContain(name);
+    // ... and the server carries nothing else credential-shaped.
+    const credentialShaped = Object.keys(env).filter((name) =>
+      /KEY|TOKEN|PASSWORD|SECRET|BASE/i.test(name),
+    );
+    expect(credentialShaped.toSorted()).toEqual([...OPENCODE_SESSION_BLANKED_ENV].toSorted());
   });
 
   test("agw's own research credentials in process.env never reach the server env", () => {
@@ -413,7 +431,7 @@ describe("opencodeServerCarriedEnv / opencodeServerEnv", () => {
     }
   });
 
-  test("the server env is the config, IU creds, state-root XDG/DB paths, password and carried env — nothing from agw's env", () => {
+  test("the server env is the config, IU creds, state-root XDG/DB paths and password — nothing from agw's env", () => {
     const env = opencodeServerEnv({
       iuKey: "sk-test",
       iuOpenaiBase: "https://iu.example/openai/v1",
@@ -430,7 +448,7 @@ describe("opencodeServerCarriedEnv / opencodeServerEnv", () => {
     expect(env.XDG_STATE_HOME).toBe(join(root, "state"));
     expect(env.XDG_CACHE_HOME).toBe(join(root, "cache"));
     expect(env.OPENCODE_DB).toBe(join(root, "opencode.db"));
-    expect(env.GIT_CONFIG_GLOBAL).toBe("/dev/null");
+    expect(env.GIT_CONFIG_GLOBAL).toBeUndefined();
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
   });
 });
@@ -732,5 +750,36 @@ describe("interruptOpencodeSession", () => {
       answer({ interrupted: true, apiKey: "sk-leak" }),
     );
     expect(JSON.stringify(result)).not.toContain("sk-leak");
+  });
+});
+
+const namedError = (name: string) => Object.assign(new Error("x"), { name });
+
+describe("unreachableReason / basicAuthHeader", () => {
+  test("a timeout/abort is ETIMEDOUT, a refused connect is ECONNREFUSED, anything else is fetch failed", () => {
+    expect(unreachableReason(namedError("TimeoutError"))).toBe(
+      "ETIMEDOUT (no answer within the request budget)",
+    );
+    expect(unreachableReason(namedError("AbortError"))).toContain("ETIMEDOUT");
+    expect(
+      unreachableReason(Object.assign(new Error("x"), { cause: { code: "ECONNREFUSED" } })),
+    ).toBe("ECONNREFUSED");
+    expect(unreachableReason(new TypeError("boom"))).toBe("fetch failed (connect error)");
+  });
+
+  test("every reason is connection-class for the retry ladder", () => {
+    for (const err of [
+      Object.assign(new Error("x"), { name: "TimeoutError" }),
+      Object.assign(new Error("x"), { cause: { code: "ECONNREFUSED" } }),
+      new TypeError("boom"),
+    ]) {
+      expect(
+        isRetryableSessionError(`opencode server unreachable: ${unreachableReason(err)}`),
+      ).toBe(true);
+    }
+  });
+
+  test("Basic auth uses the fixed username `opencode`", () => {
+    expect(basicAuthHeader("pw")).toBe(`Basic ${btoa("opencode:pw")}`);
   });
 });

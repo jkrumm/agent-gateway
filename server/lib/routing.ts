@@ -10,8 +10,8 @@
 // token, serves Claude AND gateway ids like DeepSeek-V4-Flash) and `max` (the inherited
 // Claude Code OAuth profile — the Max subscription, Claude ids only).
 //
-// Harness: `claude` (spawns `claude -p`, `session-runner.ts`) or `opencode` (spawns
-// `opencode run`, `server/mcp/opencode-runner.ts`) — ONLY `dispatch`,
+// Harness: `claude` (spawns `claude -p`, `session-runner.ts`) or `opencode` (a session on the
+// shared OpenCode server over HTTP, `server/mcp/opencode-runner.ts`) — ONLY `dispatch`,
 // `dispatch_implement` and `dispatch_implement_escalation` (the AGENT_OC/
 // AGENT_OC_IMPLEMENT/AGENT_OC_ESCALATION tiers below) plus the measured review angles
 // (ANGLE_OC) run on `opencode` — every other tool stays on `claude`. The dispatch family
@@ -90,8 +90,8 @@ import { getModel, listModels, type ModelEntry } from "./models.ts";
 
 export type Backend = "iu" | "max";
 
-/** Which CLI a session actually spawns. `claude` → `claude -p` (session-runner.ts,
- *  the default on every route). `opencode` → `opencode run` (opencode-runner.ts) —
+/** Which engine runs a session. `claude` → `claude -p` (session-runner.ts, the default on every
+ *  route). `opencode` → a session on the shared OpenCode server (opencode-runner.ts) —
  *  see the module header's Harness paragraph. */
 export type Harness = "claude" | "opencode";
 
@@ -166,7 +166,7 @@ export const HAIKU = "claude-haiku-4-5";
 export const GLM_FLASH = "glm-5.3-flash";
 export const DEEPSEEK_FLASH = "DeepSeek-V4-Flash";
 /** OpenCode-harness-only id — reached over the IU OpenAI-compatible route as
- *  `iu-chat/deepseek-v4.1-flash` (opencode-server.ts's `buildOpencodeServerConfig`, opencode-runner.ts's `buildOpencodeArgs`),
+ *  `iu-chat/deepseek-v4.1-flash` (opencode-server.ts's `buildOpencodeServerConfig`, opencode-runner.ts's session create),
  *  NOT the IU native Anthropic transport `DEEPSEEK_FLASH` above runs over — `claude -p`
  *  cannot reach this id at all. See AGENT_OC below. */
 export const DEEPSEEK_V41_FLASH = "deepseek-v4.1-flash";

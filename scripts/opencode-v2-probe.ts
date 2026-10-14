@@ -16,7 +16,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getIuConfig } from "../server/lib/iu-openai.ts";
 import { DEEPSEEK_V41_FLASH } from "../server/lib/routing.ts";
-import { buildOpencodeServerConfig, OPENCODE_PROVIDER_CHAT } from "../server/mcp/opencode-server.ts";
+import {
+  buildOpencodeServerConfig,
+  OPENCODE_PROVIDER_CHAT,
+} from "../server/mcp/opencode-server.ts";
 
 // Wire JSON of an API labelled experimental (0.0.1): deliberately untyped here. Wave 3's typed client
 // (zod over the routes in docs/opencode-v2.md) is where these shapes get real types.

@@ -1,2 +1,0 @@
-{"type":"error","timestamp":1791730988804,"sessionID":"ses_ed482c9f8ffe1il6WMBMps9tr9","error":{"type":"provider.no-route","message":"Model unavailable: iu-chat/does-not-exist"}}
-{"type":"error","timestamp":1791731066367,"sessionID":"ses_ed4819bcaffepc7GMYzc71DOk6","error":{"type":"provider.auth","message":"Provider request failed with HTTP 401: Unauthorized: Authorization parsing failed","status":401,"response":{"body":"Unauthorized: Authorization parsing failed"}}}

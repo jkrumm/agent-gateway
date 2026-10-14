@@ -1510,8 +1510,25 @@ interface ActiveProcEntry {
 }
 const activeProcs = new Map<ReturnType<typeof Bun.spawn>, ActiveProcEntry>();
 
+/** A worker with no local process: an OpenCode session driven over HTTP on the shared server
+ *  (opencode-runner.ts). Cancel and drain reach it through `stop` — which interrupts the
+ *  server-side session — exactly as they reach a subprocess through a signal. */
+interface ActiveRemoteEntry {
+  jobId: string | undefined;
+  stop: () => void;
+}
+const activeRemote = new Set<ActiveRemoteEntry>();
+
 export function activeSessionCount(): number {
-  return activeProcs.size;
+  return activeProcs.size + activeRemote.size;
+}
+
+/** Register a remote (HTTP-driven) worker so `POST /api/jobs/:id/cancel` and a drain can stop it.
+ *  Returns the untrack fn; the caller runs it in a `finally` once the session is over. */
+export function trackExternalSession(jobId: string | undefined, stop: () => void): () => void {
+  const entry: ActiveRemoteEntry = { jobId, stop };
+  activeRemote.add(entry);
+  return () => activeRemote.delete(entry);
 }
 
 /** Signal one registered subprocess the way its spawn shape requires. A detached child leads
@@ -1566,6 +1583,7 @@ export function __registerProcForTests(
 
 export function __resetActiveProcsForTests(): void {
   activeProcs.clear();
+  activeRemote.clear();
 }
 
 /** Kill every active worker subprocess and return the ids of the jobs they belonged to (a
@@ -1581,6 +1599,10 @@ export function terminateActiveSessions(): string[] {
       killRegisteredProc(proc, entry, "SIGTERM");
       if (entry.jobId !== undefined) jobIds.push(entry.jobId);
     }
+  }
+  for (const entry of activeRemote) {
+    entry.stop();
+    if (entry.jobId !== undefined) jobIds.push(entry.jobId);
   }
   return jobIds;
 }
@@ -1601,6 +1623,11 @@ export function terminateSessionsForJob(jobId: string): boolean {
     setTimeout(() => {
       if (proc.exitCode === null) killRegisteredProc(proc, entry, "SIGKILL");
     }, 5000);
+  }
+  for (const entry of activeRemote) {
+    if (entry.jobId !== jobId) continue;
+    signalled = true;
+    entry.stop();
   }
   if (!signalled) {
     // Not necessarily a bug: the job may still be `pending` (no proc yet — `cancelJob` handles

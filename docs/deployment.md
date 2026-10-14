@@ -280,7 +280,7 @@ log show --last 2m --info | grep -A3 agent-gateway.plist | grep effectiveItemDis
 
 `com.jkrumm.agent-gateway-opencode` (`com.jkrumm.agent-gateway-opencode.plist`,
 `scripts/agent-gateway-opencode-start.sh`) runs the one `opencode serve` that dispatch episodes
-attach to (`opencode run --server`; design and measurements in `docs/opencode-v2.md`). It is a
+drive sessions on (HTTP, opencode-client.ts; design and measurements in `docs/opencode-v2.md`). It is a
 separate agent so `make reload` of agent-gateway never kills in-flight episodes, and a crash
 restarts it without agent-gateway involvement.
 

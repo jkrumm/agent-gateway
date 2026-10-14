@@ -354,7 +354,7 @@ once this tier retired — nothing else in the codebase referenced it).
 
 AGENT_OC / AGENT_OC_IMPLEMENT — dispatch (investigate/author) and dispatch_implement,
 2026-09-24. Owner decision, moving dispatch off `claude -p` entirely onto the OpenCode
-harness (`opencode run`, opencode-runner.ts) running `deepseek-v4.1-flash` over the IU
+harness (HTTP sessions on the shared OpenCode server, opencode-runner.ts) running `deepseek-v4.1-flash` over the IU
 endpoint's OpenAI-compatible route (`iu-chat/deepseek-v4.1-flash`) — a DIFFERENT id and a
 DIFFERENT transport from AGENT's `DeepSeek-V4-Flash` over the IU native Anthropic
 transport above; `claude -p` cannot reach this id at all, hence the new harness rather

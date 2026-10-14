@@ -1,18 +1,19 @@
 // ── The shared OpenCode v2 server — the one long-lived `opencode serve` agw's episodes attach to ──
 //
 // Episodes used to spawn a private `opencode run --standalone` each. Wave 2 (docs/opencode-v2.md)
-// replaces that with ONE server under its own LaunchAgent (`com.jkrumm.agent-gateway-opencode`,
-// scripts/agent-gateway-opencode-start.sh) that outlives an agw `make reload`; an episode is
-// `opencode run --server <url> --agent <agw agent>` (opencode-runner.ts). This module is the
-// single owner of everything about that server that is not the NDJSON stream: where it lives,
-// how a client authenticates, the config it boots with, the env it carries, and whether it is up.
+// moved them onto ONE server under its own LaunchAgent (`com.jkrumm.agent-gateway-opencode`,
+// scripts/agent-gateway-opencode-start.sh) that outlives an agw `make reload`; Wave 3 drives an
+// episode as a session over HTTP (opencode-client.ts / opencode-runner.ts). This module is the
+// single owner of everything about that server that is not a session: where it lives, how a client
+// authenticates, the config it boots with, the env it carries, and whether it is up.
 //
-// What a run can and cannot vary against a shared server (measured on 2.0.25, 2026-10-14):
-//   - the working directory IS honoured from the client process's cwd/PWD;
-//   - the shell tool's environment is the SERVER process's env — client env never reaches it, so
-//     per-run env is impossible and `opencodeServerCarriedEnv` below is the whole list;
-//   - per-run permissions therefore live in two AGENTS defined in the server config
-//     (`--agent agw-readonly|agw-implement` selects one); `run --server` has no permission flag.
+// What a session can vary against the shared server (measured on 2.0.25):
+//   - the working directory (`location.directory` on session create);
+//   - the shell tool's environment: a sanitized base plus whatever `PUT /api/session/{id}/environment`
+//     sets — per-job env (git credential deny, research-gateway) is delivered per session, and
+//     the credentials the server needs (`OPENCODE_SESSION_BLANKED_ENV`) are blanked there too;
+//   - the permission profile: two AGENTS defined in the server config (`agent: agw-readonly|
+//     agw-implement` on session create).
 //
 // Permission model (v2, https://opencode.ai/v2/docs/permissions): an ORDERED array of
 // `{action, resource, effect}`, LAST matching rule wins, effects allow|deny|ask. An unmatched
@@ -28,7 +29,6 @@ import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { GIT_DENY_CREDENTIALS_ENV } from "../jobs/handlers/dispatch-git.ts";
 import { listModels, type ModelEntry } from "../lib/models.ts";
 
 // ── Constants ───────────────────────────────────────────────────────────────────
@@ -75,10 +75,10 @@ const shell = (resource: string, effect: "allow" | "deny"): OpencodePermissionRu
  *  a read-only worker create a permissive session on this very server, or echo `$IU_KEY`.
  *
  *  This is a COST-RAISING deny list on command text, NOT a security boundary: an obfuscated
- *  expansion (`${!x}`, built-up names, `printenv | …` on a different spelling) can evade it, and
- *  `IU_KEY` being readable from a worker shell is pre-existing and accepted. The real fix is
- *  Wave 3: per-session environment, and not carrying the password in the server env at all
- *  (docs/opencode-v2.md § Measured in Wave 2). */
+ *  expansion (a built-up name, a different spelling of the port) can evade it. Wave 3 closed the env
+ *  route (the worker shell does not inherit the server's credentials, and each session blanks them
+ *  anyway — `OPENCODE_SESSION_BLANKED_ENV`), so this list is defense in depth against a worker that
+ *  reads the password FILE or guesses the port (docs/opencode-v2.md § Measured in Wave 3). */
 function serverSelfAccessDenyRules(): OpencodePermissionRule[] {
   // The default port bare (any spelling), a configured one as `:<port>` (a short override must
   // not turn into a glob that matches half of all commands).
@@ -274,7 +274,7 @@ function modelConfigEntry(entry: ModelEntry) {
       ...(entry.rate.cacheRead !== undefined ? { cache_read: entry.rate.cacheRead } : {}),
     },
     // A model that exposes effort levels runs at "high" by default; `#<variant>` on the model
-    // ref (buildOpencodeArgs) picks another.
+    // ref (the runner's session create `variant`) picks another.
     ...(entry.effort.length > 0
       ? {
           options: { reasoningEffort: "high" },
@@ -332,22 +332,17 @@ export function buildOpencodeServerConfig(): Record<string, unknown> {
 
 // ── The env the server carries ──────────────────────────────────────────────────
 
-/** Keys the runner DROPS (with one warning) instead of throwing on: review passes the
- *  research-gateway credentials as `extraEnv`, and putting them in this server's env would let
- *  ANY worker shell on it read them. Research validation is therefore unavailable on OpenCode
- *  review angles until Wave 3 delivers per-session env (`PUT /api/session/{id}/environment`). */
-export const OPENCODE_DROPPED_EXTRA_ENV = [
-  "RESEARCH_GATEWAY_URL",
-  "RESEARCH_GATEWAY_TOKEN",
+/** Server-process variables a worker shell must NOT see. Measured on 2.0.25 the shell tool starts
+ *  from a sanitized env (HOME, LOGNAME, PATH, PWD, TERM, OPENCODE_* markers) and the server's own
+ *  env never reaches it, so this is defense in depth: the runner still blanks each of these per
+ *  session (`PUT /api/session/{id}/environment`; a blank value overrides an inherited one), so a
+ *  build that starts inheriting the server env cannot leak the credentials. The server itself
+ *  still reads them (provider auth, its own Basic password). */
+export const OPENCODE_SESSION_BLANKED_ENV = [
+  "OPENCODE_SERVER_PASSWORD",
+  "IU_KEY",
+  "IU_OPENAI_BASE",
 ] as const;
-
-/** The per-episode env a worker shell may need, fixed at server start: the git credential-deny
- *  env (`GIT_DENY_CREDENTIALS_ENV`, dispatch's `extraEnv`). THE authoritative list — the runner
- *  refuses any `extraEnv` outside it (bar `OPENCODE_DROPPED_EXTRA_ENV`), because a shared server
- *  cannot receive per-run env. No credential belongs here: every worker shell inherits it. */
-export function opencodeServerCarriedEnv(): Record<string, string> {
-  return { ...GIT_DENY_CREDENTIALS_ENV };
-}
 
 /** The server process's complete env, beyond the `PATH`/`HOME`/`TMPDIR`/`LANG` the wrapper adds.
  *  Nothing else from agw's environment (CLAUDE_*, GITHUB_TOKEN, …) reaches a worker shell.
@@ -368,7 +363,6 @@ export function opencodeServerEnv(input: {
     XDG_CACHE_HOME: join(root, "cache"),
     OPENCODE_DB: join(root, "opencode.db"),
     OPENCODE_SERVER_PASSWORD: input.password,
-    ...opencodeServerCarriedEnv(),
   };
 }
 
@@ -405,18 +399,20 @@ async function binaryVersion(): Promise<string | null> {
   }
 }
 
-function unreachable(err: unknown): { reason: string } {
+/** Connection-class reason text for a rejected `fetch` — carries `ECONNREFUSED`/`ETIMEDOUT`/
+ *  `fetch failed` so the runner's retry ladder and the circuit breaker classify it as transport. */
+export function unreachableReason(err: unknown): string {
   if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
-    return { reason: `ETIMEDOUT after ${STATUS_TIMEOUT_MS}ms` };
+    return "ETIMEDOUT (no answer within the request budget)";
   }
   // fetch rejects with `TypeError: fetch failed`; the errno lives on `cause`.
   const code = (err as { cause?: { code?: string } }).cause?.code;
-  return { reason: code === "ECONNREFUSED" ? code : "fetch failed (connect error)" };
+  return code === "ECONNREFUSED" ? code : "fetch failed (connect error)";
 }
 
 /** HTTP Basic header for the shared server: the username must be `opencode` (any other gets 401,
  *  measured 2.0.25), the password is the `0600` file's content. */
-function basicAuth(password: string): string {
+export function basicAuthHeader(password: string): string {
   return `Basic ${btoa(`opencode:${password}`)}`;
 }
 
@@ -447,7 +443,7 @@ export async function getOpencodeServerStatus(
 
   const get = (path: string) =>
     fetchImpl(`${opencodeServerUrl()}${path}`, {
-      headers: { authorization: basicAuth(password) },
+      headers: { authorization: basicAuthHeader(password) },
       signal: AbortSignal.timeout(STATUS_TIMEOUT_MS),
     });
 
@@ -466,7 +462,7 @@ export async function getOpencodeServerStatus(
       ...base,
       ok: false,
       up: false,
-      error: `opencode server unreachable: ${unreachable(result.reason).reason}`,
+      error: `opencode server unreachable: ${unreachableReason(result.reason)}`,
     };
   }
   const info = (infoResult as PromiseFulfilledResult<Response>).value;
@@ -528,10 +524,10 @@ export interface OpencodeInterruptResult {
 }
 
 /** `POST /api/session/{id}/interrupt` — the only reliable stop for a server-side session:
- *  killing the `opencode run --server` client leaves the session `running` and its tools keep
- *  executing (measured 2.0.25, a file was written 40 s after the kill). Best-effort: it never
- *  throws, never logs a body, and answers `{interrupted:false}` on an idle session, so calling
- *  it after every client exit is safe. `fetchImpl` is a test seam. */
+ *  a session keeps executing tools until it is interrupted, whatever happened to whoever
+ *  started it (measured 2.0.25 with a killed CLI client: a file was written 40 s later). Best-effort:
+ *  it never throws, never logs a body, and answers `{interrupted:false}` on an idle session, so
+ *  calling it after every non-clean exit is safe. `fetchImpl` is a test seam. */
 export async function interruptOpencodeSession(
   sessionId: string,
   fetchImpl: typeof fetch = fetch,
@@ -551,7 +547,7 @@ export async function interruptOpencodeSession(
       `${opencodeServerUrl()}/api/session/${encodeURIComponent(sessionId)}/interrupt`,
       {
         method: "POST",
-        headers: { authorization: basicAuth(password) },
+        headers: { authorization: basicAuthHeader(password) },
         signal: AbortSignal.timeout(INTERRUPT_TIMEOUT_MS),
       },
     );
@@ -563,6 +559,6 @@ export async function interruptOpencodeSession(
     if (!parsed.success) return { ok: false, interrupted: false, error: "unexpected response" };
     return { ok: true, interrupted: parsed.data.interrupted };
   } catch (err) {
-    return { ok: false, interrupted: false, error: unreachable(err).reason };
+    return { ok: false, interrupted: false, error: unreachableReason(err) };
   }
 }
