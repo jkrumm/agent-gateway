@@ -41,8 +41,10 @@ export const OPENCODE_PINNED_VERSION = "2.0.25";
 /** Fixed loopback port. Override: `AGENT_GATEWAY_OPENCODE_PORT` (read per call). */
 export const DEFAULT_OPENCODE_PORT = 49375;
 
-/** Hang guard for the status probe — a plain local HTTP call, not an agent run. */
-const STATUS_TIMEOUT_MS = 2_000;
+/** Hang guard for the status probe — a plain local HTTP call, not an agent run. The two requests
+ *  run in parallel, so `GET /api/jobs/health` (whose callers curl it with `--max-time 3` and fail
+ *  open) answers within roughly this budget even when the server hangs. */
+const STATUS_TIMEOUT_MS = 1_500;
 
 /** opencode provider ids the server config emits — one per IU OpenAI-route wire. */
 export const OPENCODE_PROVIDER_CHAT = "iu-chat";
@@ -65,6 +67,31 @@ const shell = (resource: string, effect: "allow" | "deny"): OpencodePermissionRu
   resource,
   effect,
 });
+
+/** Trailing `shell` denies (they must come AFTER every allow — last match wins) for any command
+ *  text that names the server's own credentials or API: `curl` is allowlisted and the permission
+ *  pattern matches the command TEXT, so `curl -u opencode:$OPENCODE_SERVER_PASSWORD
+ *  http://127.0.0.1:<port>/api/session …` would otherwise expand the password in the shell and let
+ *  a read-only worker create a permissive session on this very server, or echo `$IU_KEY`.
+ *
+ *  This is a COST-RAISING deny list on command text, NOT a security boundary: an obfuscated
+ *  expansion (`${!x}`, built-up names, `printenv | …` on a different spelling) can evade it, and
+ *  `IU_KEY` being readable from a worker shell is pre-existing and accepted. The real fix is
+ *  Wave 3: per-session environment, and not carrying the password in the server env at all
+ *  (docs/opencode-v2.md § Measured in Wave 2). */
+function serverSelfAccessDenyRules(): OpencodePermissionRule[] {
+  // The default port bare (any spelling), a configured one as `:<port>` (a short override must
+  // not turn into a glob that matches half of all commands).
+  const ports = [`*${DEFAULT_OPENCODE_PORT}*`];
+  if (opencodeServerPort() !== DEFAULT_OPENCODE_PORT) ports.push(`*:${opencodeServerPort()}*`);
+  return [
+    "*OPENCODE_SERVER_PASSWORD*",
+    "*IU_KEY*",
+    "*IU_OPENAI_BASE*",
+    ...ports,
+    "*/api/session*",
+  ].map((resource) => shell(resource, "deny"));
+}
 
 /** The read-only shell allowlist, as ORDERED v2 `shell` rules (last match wins). The leading
  *  `*` denies everything; the read commands below are allowed by name; every re-deny sits AFTER
@@ -132,6 +159,7 @@ export const READ_ONLY_SHELL_RULES: readonly OpencodePermissionRule[] = [
   // git diff/log/show --output=<file> writes to a file.
   shell("git * --output*", "deny"),
   shell("*>*", "deny"),
+  ...serverSelfAccessDenyRules(),
 ];
 
 /** `agw-readonly`: investigate / author / check / review workers. Catch-all deny first, so
@@ -401,7 +429,9 @@ function basicAuth(password: string): string {
  *  the version) and `GET /api/session/active` with Basic auth, which must be 200: it is the cheap
  *  authenticated route, and the only thing here that proves the password file still matches the
  *  running server (401 without or with a wrong password, measured 2.0.25). */
-export async function getOpencodeServerStatus(): Promise<OpencodeServerStatus> {
+export async function getOpencodeServerStatus(
+  fetchImpl: typeof fetch = fetch,
+): Promise<OpencodeServerStatus> {
   const base = { pinned: OPENCODE_PINNED_VERSION, version: null, versionOk: false };
   let password: string;
   try {
@@ -416,22 +446,32 @@ export async function getOpencodeServerStatus(): Promise<OpencodeServerStatus> {
   }
 
   const get = (path: string) =>
-    fetch(`${opencodeServerUrl()}${path}`, {
+    fetchImpl(`${opencodeServerUrl()}${path}`, {
       headers: { authorization: basicAuth(password) },
       signal: AbortSignal.timeout(STATUS_TIMEOUT_MS),
     });
 
-  let info: Response;
-  try {
-    info = await get("/api/info");
-  } catch (err) {
+  // In parallel: one hung server must cost one timeout, not two.
+  const [infoResult, activeResult] = await Promise.allSettled([
+    get("/api/info"),
+    get("/api/session/active"),
+  ]);
+  for (const result of [infoResult, activeResult]) {
+    if (result.status === "fulfilled") continue;
+    // The other response (if any) is not read — release it.
+    for (const other of [infoResult, activeResult]) {
+      if (other.status === "fulfilled") await other.value.body?.cancel();
+    }
     return {
       ...base,
       ok: false,
       up: false,
-      error: `opencode server unreachable: ${unreachable(err).reason}`,
+      error: `opencode server unreachable: ${unreachable(result.reason).reason}`,
     };
   }
+  const info = (infoResult as PromiseFulfilledResult<Response>).value;
+  const active = (activeResult as PromiseFulfilledResult<Response>).value;
+  await active.body?.cancel();
 
   if (!info.ok) {
     await info.body?.cancel();
@@ -454,18 +494,6 @@ export async function getOpencodeServerStatus(): Promise<OpencodeServerStatus> {
   const versionOk = version === OPENCODE_PINNED_VERSION;
   const found = { ...base, up: true, version, versionOk };
 
-  let active: Response;
-  try {
-    active = await get("/api/session/active");
-  } catch (err) {
-    return {
-      ...found,
-      ok: false,
-      up: false,
-      error: `opencode server unreachable: ${unreachable(err).reason}`,
-    };
-  }
-  await active.body?.cancel();
   if (active.status === 401) {
     return { ...found, ok: false, error: "opencode server password rejected (HTTP 401)" };
   }

@@ -426,7 +426,10 @@ permission/env/config flag, so (1) **permissions live in two v2 agents** in the 
 defaults to `ask`, which blocks an unattended session forever — `agw-readonly` opens with a
 catch-all deny, `agw-implement` with a catch-all allow, plus `question` and `external_directory`
 denied). `agw-readonly` allow-lists `shell` commands (`READ_ONLY_SHELL_RULES`, re-denies after
-the allows; `edit: deny` alone does not stop a shell redirect) and denies `subagent` (a subagent
+the allows;`agw-readonly` allow-lists `shell` commands (`READ_ONLY_SHELL_RULES`, re-denies after
+the allows, then trailing denies for command text naming `OPENCODE_SERVER_PASSWORD`, `IU_KEY`,
+`IU_OPENAI_BASE`, the server port or `/api/session` — a cost-raising deny list, not a boundary,
+see `docs/opencode-v2.md`; `edit: deny` alone does not stop a shell redirect) and denies `subagent` (a subagent
 runs under its own, broader permissions). (2) **Client env does not reach the worker's shell** —
 the shell inherits the SERVER's env, so the server carries the fixed set in
 `opencodeServerCarriedEnv()` (`GIT_DENY_CREDENTIALS_ENV` only — no credential, since every worker

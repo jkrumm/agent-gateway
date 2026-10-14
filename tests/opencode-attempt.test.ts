@@ -31,7 +31,7 @@ const fixtureLines = readFileSync(
   .split("\n")
   .filter(Boolean);
 
-function fakeProc(lines: string[], exitCode = 0): OpencodeSubprocess {
+function fakeProc(lines: string[], exitCode = 0, stderr = ""): OpencodeSubprocess {
   const enc = new TextEncoder();
   const stream = (chunk: string) =>
     new ReadableStream<Uint8Array>({
@@ -44,7 +44,7 @@ function fakeProc(lines: string[], exitCode = 0): OpencodeSubprocess {
     pid: 4242,
     exitCode,
     stdout: stream(lines.map((l) => `${l}\n`).join("")),
-    stderr: stream(""),
+    stderr: stream(stderr),
     exited: Promise.resolve(exitCode),
     kill() {},
   } as unknown as OpencodeSubprocess;
@@ -125,6 +125,46 @@ describe("runOpencodeAttempt — spawn", () => {
     );
     expect(spawns).toBe(1);
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("runOpencodeAttempt — secret redaction", () => {
+  // Both the IU key and the server password are in the SERVER's env, which every worker shell
+  // inherits, so a model can be talked into echoing either.
+  const attempt = (lines: string[], exitCode = 0, stderr = "") =>
+    runOpencodeAttempt(
+      { cwd: "/tmp", prompt: "p", route: routeFor("dispatch") },
+      { current: 0 },
+      { model: "deepseek-v4.1-flash", backend: "iu" },
+      { ...okDeps, spawn: () => fakeProc(lines, exitCode, stderr) },
+    );
+
+  test("the server password and the IU key are redacted from the final text / returned data", async () => {
+    const { key } = await (await import("../server/lib/iu-openai.ts")).getIuConfig();
+    const result = await attempt([text(JSON.stringify({ leak: `pw=test-password key=${key}` }))]);
+    expect(result.ok).toBe(true);
+    const out = JSON.stringify(result);
+    expect(out).not.toContain("test-password");
+    expect(out).not.toContain(key);
+    expect(out).toContain("[REDACTED]");
+  });
+
+  test("redacted from an error event's message", async () => {
+    const result = await attempt([
+      JSON.stringify({
+        type: "error",
+        error: { type: "provider.auth", message: "bad creds test-password" },
+      }),
+    ]);
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).not.toContain("test-password");
+  });
+
+  test("redacted from stderr surfaced in a non-zero-exit error", async () => {
+    const result = await attempt([], 1, "boom: password test-password rejected");
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("[REDACTED]");
+    expect(JSON.stringify(result)).not.toContain("test-password");
   });
 });
 

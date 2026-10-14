@@ -75,6 +75,23 @@ on an idle session) once the client process is gone, on every exit path, and log
 `session.opencode_interrupt`. `getOpencodeServerStatus` also requires an authenticated
 `GET /api/session/active` = 200, because `GET /api/info` is public and cannot prove the password.
 
+**Self-access: a deny list on command text, NOT a boundary.** The server's env (including
+`OPENCODE_SERVER_PASSWORD` and `IU_KEY`) is inherited by every worker shell, and `curl` is
+allowlisted for the read-only agent. The permission pattern matches the command TEXT while the
+shell expands `$VAR`, so `curl -u opencode:$OPENCODE_SERVER_PASSWORD http://127.0.0.1:<port>/api/session …`
+would let a read-only worker create a permissive session on this very server, or echo the IU key.
+`agw-readonly` therefore ends its `shell` rules (after every allow — last match wins) with denies
+for any command text containing `OPENCODE_SERVER_PASSWORD`, `IU_KEY`, `IU_OPENAI_BASE`, the server
+port and `/api/session` (`serverSelfAccessDenyRules`). This only **raises the cost**: an obfuscated
+expansion (`${!name}`, a name built up piecewise, a different spelling of the port) can evade
+it, and `IU_KEY` being readable from a worker shell is pre-existing and accepted. `agw-implement`
+has no such rules at all. The real fix is Wave 3: per-session environment, and not carrying the
+password in the server env. The server password and IU key are redacted from every runner output
+(final text, error message, stderr) like the IU key always was. `scripts/opencode-live-probe.ts`
+checks the refusal (with the same command succeeding in `agw-implement` as control); it needs the
+server reinstalled (`make install-opencode-agent`) to pick up new rules, as the config is
+generated at server start.
+
 ## Security notes
 
 - **`GET /api/config` returns the resolved provider `apiKey` in plaintext.** The server is

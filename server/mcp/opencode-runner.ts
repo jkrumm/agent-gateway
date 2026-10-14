@@ -958,15 +958,17 @@ export async function runOpencodeAttempt<T>(
   let { accum, exitCode, stderrTrimmed } = streamResult;
   const { killReason, idleMsAtKill } = streamResult;
 
-  // The runtime IU key is a live env var inside a session with Bash access — redact it out
-  // of everything that could echo it back BEFORE any of it is used to build an error message
-  // or gets parsed/returned as data. See `redactSecret`'s doc comment.
+  // The runtime IU key and the server password are live env vars inside a session with Bash
+  // access (the server's env, which every worker shell inherits) — redact both out of everything
+  // that could echo them back BEFORE any of it is used to build an error message or gets
+  // parsed/returned as data. See `redactSecret`'s doc comment.
+  const redact = (text: string): string => redactSecret(redactSecret(text, iuKey), password);
   accum = {
     ...accum,
-    lastAssistantText: redactSecret(accum.lastAssistantText, iuKey),
-    errorMessage: accum.errorMessage ? redactSecret(accum.errorMessage, iuKey) : accum.errorMessage,
+    lastAssistantText: redact(accum.lastAssistantText),
+    errorMessage: accum.errorMessage ? redact(accum.errorMessage) : accum.errorMessage,
   };
-  stderrTrimmed = redactSecret(stderrTrimmed, iuKey);
+  stderrTrimmed = redact(stderrTrimmed);
 
   const durationMs = Math.round(performance.now() - startMs);
   const costUsd = computeOpencodeCostUsd(accum, model);

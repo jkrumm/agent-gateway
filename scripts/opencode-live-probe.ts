@@ -8,6 +8,8 @@
 // model that simply skipped a step cannot make a refusal check pass vacuously:
 //   1. agw-readonly runs the allowlisted reads (`git status`, `cat`, `rg`) — liveness control —
 //      and refuses `touch`, `echo > f`, `curl -o` and any file-write tool (files absent after).
+//      A `curl -u opencode:$OPENCODE_SERVER_PASSWORD <server>/api/info` (the shell expands the
+//      password) is refused too, with the same command succeeding in agw-implement as control.
 //   2. agw-implement writes a file (control: the probe CAN observe a write) and sees
 //      GIT_CONFIG_GLOBAL=/dev/null (the env the server carries).
 //   3. The shell runs in the CLIENT's cwd, not the probe's own cwd.
@@ -32,6 +34,9 @@ import {
 } from "../server/mcp/opencode-server.ts";
 
 const MODEL = DEEPSEEK_V41_FLASH;
+/** A curl that authenticates AGAINST the shared server with its own password, expanded by the
+ *  worker's shell. No `-o`, so the older `curl -o` deny cannot be what refuses it. */
+const SELF_ACCESS_CMD = `curl -s -w ' HTTP=%{http_code}' -u opencode:$OPENCODE_SERVER_PASSWORD ${opencodeServerUrl()}/api/info`;
 const BIN = process.env.OPENCODE_BIN ?? Bun.which("opencode") ?? "opencode";
 /** Hang guard for one probe run — a probe harness, not an agent budget. */
 const RUN_GUARD_MS = 240_000;
@@ -172,6 +177,7 @@ const describeTools = (run: Run): string =>
       "6. shell: echo X > redirect.txt",
       "7. shell: curl -o curled.txt http://127.0.0.1:1/",
       "8. Use your file-writing tool (write or edit) to create written.txt containing X.",
+      `9. shell: ${SELF_ACCESS_CMD}`,
       "Then reply with exactly: DONE",
     ].join("\n"),
   });
@@ -189,6 +195,13 @@ const describeTools = (run: Run): string =>
   ] as const) {
     check(`readonly: ${label} refused — ${file} absent`, !existsSync(join(dir, file)));
   }
+  check(
+    "readonly: a curl expanding $OPENCODE_SERVER_PASSWORD against the server itself is refused",
+    ran(run, "OPENCODE_SERVER_PASSWORD") !== undefined &&
+      ran(run, "OPENCODE_SERVER_PASSWORD")?.status !== "completed" &&
+      !run.tools.some((t) => t.output.includes("HTTP=200")),
+    ran(run, "OPENCODE_SERVER_PASSWORD")?.status ?? "never attempted",
+  );
   check("readonly: no completed edit/write tool call", !run.tools.some((t) => (t.tool === "edit" || t.tool === "write") && t.status === "completed"));
 }
 
@@ -202,12 +215,19 @@ const describeTools = (run: Run): string =>
       "Run these steps in order, ONE shell tool call each:",
       "1. shell: touch control.txt",
       "2. shell: printenv GIT_CONFIG_GLOBAL",
+      `3. shell: ${SELF_ACCESS_CMD}`,
       "Then reply with exactly: DONE",
     ].join("\n"),
   });
   const code = await run.done;
   say(`implement run exit=${code} tools: ${redact(describeTools(run))}`);
   check("implement control: a write lands (the probe can observe a write)", existsSync(join(dir, "control.txt")));
+  check(
+    "implement control: the same self-access curl WORKS (the readonly refusal is the rule, not a broken command)",
+    ran(run, "OPENCODE_SERVER_PASSWORD")?.status === "completed" &&
+      (ran(run, "OPENCODE_SERVER_PASSWORD")?.output ?? "").includes("HTTP=200"),
+    (ran(run, "OPENCODE_SERVER_PASSWORD")?.output ?? "").slice(-40),
+  );
   check("implement: the server-carried env reaches the shell (GIT_CONFIG_GLOBAL=/dev/null)", (ran(run, "printenv")?.output ?? "").trim() === "/dev/null", (ran(run, "printenv")?.output ?? "").trim());
 }
 

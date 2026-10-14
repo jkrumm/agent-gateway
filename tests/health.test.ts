@@ -99,6 +99,27 @@ describe("computeHealth", () => {
     expect(Array.isArray(body.degradedRoutes)).toBe(true);
   });
 
+  test("GET /api/jobs/health answers within ~1.6 s even when the opencode server hangs", async () => {
+    const saved = process.env.AGENT_GATEWAY_OPENCODE_PORT;
+    const hang = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => new Promise<Response>(() => {}),
+    });
+    process.env.AGENT_GATEWAY_OPENCODE_PORT = String(hang.port);
+    try {
+      const t0 = performance.now();
+      const res = await jobsRoutes.handle(new Request("http://localhost/api/jobs/health"));
+      const body = (await res.json()) as { opencodeServer: { ok: boolean }; pageable: boolean };
+      expect(performance.now() - t0).toBeLessThan(2_000);
+      expect(body.opencodeServer.ok).toBe(false);
+      expect(body.pageable).toBe(true);
+    } finally {
+      process.env.AGENT_GATEWAY_OPENCODE_PORT = saved;
+      await hang.stop(true);
+    }
+  });
+
   test("GET /api/jobs/health reports opencodeServer; with no server (test port) it is not ok and pages", async () => {
     const res = await jobsRoutes.handle(new Request("http://localhost/api/jobs/health"));
     const body = (await res.json()) as {
