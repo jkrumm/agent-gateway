@@ -17,9 +17,11 @@ Run a step **once** if (and only if) the corresponding tool/script exists.
   - `test` → `pytest -q`
     Detect which tools exist via `uv run <tool> --version` or by checking `.venv/bin/`.
     Do NOT spend many turns hunting — try the obvious path once and skip a tool if absent.
-- **Makefile** (`Makefile`): if it declares `format`/`lint`/`typecheck`/`test`/`check`
-  targets (`grep -E '^(check|lint|test|typecheck|format):' Makefile`), prefer
+- **Makefile** (`Makefile`): if it declares `format`/`lint`/`typecheck`/`test`
+  targets (`grep -E '^(lint|test|typecheck|format):' Makefile`), prefer
   `make <target>` over raw tool invocation — the Makefile encodes the right flags/env.
+  A `check:` target is handled in the handler before this skill is ever loaded, so it
+  is never a per-step choice here.
 - **Rust** (`Cargo.toml`): `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`.
 - **Go** (`go.mod`): `gofmt -l .` (lists unformatted files → fail if non-empty),
   `go vet ./...`, `go test ./...`.
