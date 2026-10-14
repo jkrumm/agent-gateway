@@ -104,37 +104,41 @@ const MAKE_CHECK_PROBE_TIMEOUT_MS = 5_000;
 /** Sentinel the probe's `Promise.race` uses to tell a budget overrun apart from a normal exit. */
 const MAKE_CHECK_PROBE_TIMEOUT = Symbol("make-check-probe-timeout");
 
-/** Whether a `make -p` database dump contains an explicit `check:` rule WITH a recipe. The dump
- *  prints every registered rule as a header line (`check:`, `check::`, `check: dep …`) followed
- *  by `# …` comment lines and, when the rule has a recipe, a `#  commands to execute (from …)`
- *  / `#  recipe to execute (from …)` marker before the tab-indented recipe lines (the wording
- *  differs across GNU make versions, so both are matched). Requiring BOTH the header and the
- *  recipe marker — scoped to the header's own block — is what distinguishes a real target from
- *  the shapes exit-code sniffing cannot: a file/dir literally named `check` and a catch-all `%:`
- *  pattern rule register no `check:` header at all, and a `check:`-shaped line inside a
- *  `define … endef` block is dumped verbatim in the *variables* section with no marker. */
-function makeCheckTargetHasRecipe(db: string): boolean {
+/** Whether a `make -p` database dump registers `check` as a target. The dump lists every file
+ *  Make knows in its `# Files` section, one header line per entry (`check:`, `check::`,
+ *  `check: lint test`); an entry Make only knows as a prerequisite or an existing file is
+ *  prefixed by a `# Not a target:` line. So a `check` header inside `# Files` that is not marked
+ *  "not a target" is a real rule when it has prerequisites (`check: lint test`) or a recipe of
+ *  its own — both of which `make check` runs. Everything else stays out by construction: a
+ *  catch-all `%:` pattern rule is listed under `# Implicit Rules`, a `define … endef` body under
+ *  `# Variables`, and a file or dir literally named `check` carries the `# Not a target:` mark. */
+export function makeDatabaseHasCheckTarget(db: string): boolean {
   const lines = db.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    if (!/^check::?/.test(lines[i])) continue;
-    // Found an explicit `check` rule header. Its block runs to the next rule header — a
-    // column-0, non-whitespace, non-`#` line; `# …` comments and tab-indented recipe lines
-    // belong to this rule. The recipe marker only ever follows a REAL rule.
-    for (let j = i + 1; j < lines.length; j++) {
-      const line = lines[j];
-      if (/^[^ \t#]/.test(line)) break;
-      if (/(commands|recipe) to execute \(from/.test(line)) return true;
+  const from = lines.indexOf("# Files");
+  if (from < 0) return false;
+  for (let i = from + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith("# files hash-table stats") || line.startsWith("# VPATH Search Paths"))
+      break;
+    const header = /^check::?(.*)$/.exec(line);
+    if (!header || lines[i - 1] === "# Not a target:") continue;
+    if (header[1].trim() !== "") return true;
+    // A bare `check:` only counts with a recipe: `make check` on an empty rule prints "Nothing
+    // to be done" and exits 0 — a green with zero validation. The recipe marker sits in the
+    // header's own block (comment and tab-indented lines up to the next column-0 entry).
+    for (let j = i + 1; j < lines.length && !/^[^ \t#]/.test(lines[j]); j++) {
+      if (/(commands|recipe) to execute \(from/.test(lines[j])) return true;
     }
   }
   return false;
 }
 
-/** Whether the repo root Makefile declares an explicit `check:` target with a recipe — the gate
- *  for the deterministic `make check` path. Detected by parsing `make -p`'s database, not by
+/** Whether the repo root Makefile declares a `check` target — the gate for the deterministic
+ *  `make check` path. Detected by parsing `make -p`'s database, not by
  *  sniffing `make -q check`'s exit code: exit 0 also fires for a file/dir named `check` (or a
  *  recipe-less `check:` target), exit 1 for a catch-all `%:` pattern rule, and exit 2 both for
  *  "no rule to make target" AND for a genuine `check:` target whose prerequisite has no rule —
- *  so no exit code cleanly separates "real target with a recipe" from the rest. That is exactly
+ *  so no exit code cleanly separates a real target from the rest. That is exactly
  *  the distinction the old column-0 source regex got wrong too: a `define UNUSED\ncheck:\nendef`
  *  block or a disabled conditional contains the line but registers no rule, so the regex matched
  *  and produced the false red this path exists to avoid. A missing Makefile, a missing `make`,
@@ -191,7 +195,7 @@ export async function hasMakeCheckTarget(cwd: string): Promise<boolean> {
     }
     return false;
   }
-  return makeCheckTargetHasRecipe(await stdoutText);
+  return makeDatabaseHasCheckTarget(await stdoutText);
 }
 
 const MAKE_CHECK_IDLE_CHECK_INTERVAL_MS = 5_000;
