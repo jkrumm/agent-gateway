@@ -5,11 +5,22 @@
 // asserted rather than assumed.
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makefileDeclaresCheck, runCheck } from "../server/jobs/handlers/check.ts";
 import * as sessionRunner from "../server/mcp/session-runner.ts";
+import { SessionCancelledError } from "../server/mcp/session-runner.ts";
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 describe("makefileDeclaresCheck", () => {
   test("a real check: target is detected", () => {
@@ -42,6 +53,38 @@ describe("makefileDeclaresCheck", () => {
 
   test("an empty Makefile is not a match", () => {
     expect(makefileDeclaresCheck("")).toBe(false);
+  });
+
+  test("an immediate-assignment `check :=` is not a target", () => {
+    expect(makefileDeclaresCheck("check := 1\n")).toBe(false);
+  });
+
+  test("a POSIX-assignment `check ::=` is not a target", () => {
+    expect(makefileDeclaresCheck("check ::= foo\n")).toBe(false);
+  });
+
+  test("`check::=` with no spaces is not a target", () => {
+    expect(makefileDeclaresCheck("check::=foo\n")).toBe(false);
+  });
+
+  test("the `check :::=` assignment operator is not a target", () => {
+    expect(makefileDeclaresCheck("check :::= foo\n")).toBe(false);
+  });
+
+  test("a `check :=` line inside a define…endef block is not a target", () => {
+    expect(makefileDeclaresCheck("define rules\ncheck := 1\nendef\n")).toBe(false);
+  });
+
+  test("a `define check:` block declares no target `check`", () => {
+    expect(makefileDeclaresCheck("define check:\n\t@echo hi\nendef\n")).toBe(false);
+  });
+
+  test("a double-colon `check::` rule IS a real target", () => {
+    expect(makefileDeclaresCheck("check::\n\t@echo hi\n")).toBe(true);
+  });
+
+  test("a target-specific variable after the colon is still a target", () => {
+    expect(makefileDeclaresCheck("check: CFLAGS += -g\n\t@echo hi\n")).toBe(true);
   });
 });
 
@@ -155,4 +198,62 @@ describe("runCheck — deterministic make check path", () => {
     expect(runSessionSpy).toHaveBeenCalledTimes(1);
     expect(out.summary).toBe("canned");
   });
+});
+
+describe("runStep — child environment", () => {
+  test("a recipe's $(PWD) is the step's cwd, not the server's stale PWD", async () => {
+    // `Bun.spawn`'s cwd does not update `PWD`; without the pin a recipe reading `$(PWD)` would
+    // validate the server's own checkout instead of the worktree (a false green).
+    const outFile = join(cwd, "pwd.txt");
+    await writeFile(join(cwd, "Makefile"), `check:\n\t@echo $(PWD) > ${outFile}\n`);
+    spyOnSession();
+
+    const out = await runCheck({ cwd });
+
+    expect(out.passed).toBe(true);
+    expect(readFileSync(outFile, "utf8").trim()).toBe(cwd);
+  });
+});
+
+describe("runStep — process-group cleanup and cancellation", () => {
+  test("a check: target that backgrounds a stdout-inheriting process cannot hang the step", async () => {
+    // `sleep 300 &` is reparented away from `make`, and it inherits the stdout pipe — so the
+    // step used to hang forever once `make` itself exited. The whole process group must be
+    // killed, and the step must still report `make`'s own (successful) exit.
+    const pidFile = join(cwd, "child.pid");
+    await writeFile(
+      join(cwd, "Makefile"),
+      `check:\n\t@sleep 300 & echo $$! > ${pidFile}\n\t@echo done\n`,
+    );
+    spyOnSession();
+
+    const started = Date.now();
+    const out = await runCheck({ cwd });
+
+    expect(out.passed).toBe(true);
+    expect(Date.now() - started).toBeLessThan(15_000);
+    const pid = Number(readFileSync(pidFile, "utf8").trim());
+    expect(Number.isInteger(pid)).toBe(true);
+    expect(pidAlive(pid)).toBe(false);
+  }, 30_000);
+
+  test("a check killed by a signal this step never sent rejects, not reports a failed step", async () => {
+    // Stands in for an external kill (`job_cancel`'s `terminateSessionsForJob` / a drain's
+    // `terminateActiveSessions`), which lands faster than the watchdog's 5s poll.
+    await writeFile(join(cwd, "Makefile"), "check:\n\t@kill -TERM $$PPID\n");
+    spyOnSession();
+
+    await expect(runCheck({ cwd })).rejects.toBeInstanceOf(SessionCancelledError);
+  }, 20_000);
+
+  test("a cancel observed only after the process exits still rejects", async () => {
+    // The process exits 0 before the watchdog's first 5s tick can set `cancelled`, so only the
+    // post-exit re-check sees the cancel; without it the job would be persisted `done`.
+    await writeFile(join(cwd, "Makefile"), "check:\n\t@echo ok\n");
+    spyOnSession();
+
+    await expect(runCheck({ cwd }, undefined, "job-1", () => true)).rejects.toBeInstanceOf(
+      SessionCancelledError,
+    );
+  }, 20_000);
 });

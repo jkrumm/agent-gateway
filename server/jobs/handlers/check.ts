@@ -98,9 +98,15 @@ export type CheckOutput = z.infer<typeof CHECK_OUTPUT>;
 
 /** Whether a Makefile declares a real `check:` target. Anchored at a line start so a substring
  *  like `precheck:` or `check-all:` never counts, and a `# check:` comment never does either.
- *  Pure — unit-tested without touching the filesystem. */
+ *  The colon must not open an assignment operator: `check := 1`, `check ::= foo` and the
+ *  rarely-seen `check :::= foo` all start with `:`, so a bare `check\s*:` matches them and then
+ *  sends the deterministic path into `make check` on a Makefile with no such target — which
+ *  fails with "No rule to make target 'check'", the exact false-red this path exists to avoid.
+ *  `(?![=:]*=)` rejects every assignment operator (`:=`, `::=`, `:::=`) while still accepting a
+ *  real target, including a double-colon rule (`check::`). Pure — unit-tested without touching
+ *  the filesystem. */
 export function makefileDeclaresCheck(makefile: string): boolean {
-  return /^check\s*:/m.test(makefile);
+  return /^check\s*:(?![=:]*=)/m.test(makefile);
 }
 
 /** Whether the repo root's Makefile declares `check:` — the gate for the deterministic
@@ -117,6 +123,9 @@ function hasMakeCheckTarget(cwd: string): boolean {
 
 const MAKE_CHECK_IDLE_CHECK_INTERVAL_MS = 5_000;
 const MAKE_CHECK_SIGKILL_GRACE_MS = 5_000;
+/** Backstop on the drains once the step's leader is gone: after the process group is killed
+ *  the pipes close, but a writer that somehow survives must still not wedge the step forever. */
+const MAKE_CHECK_DRAIN_GRACE_MS = 5_000;
 const MAKE_CHECK_MAX_ERROR_LINES = 50;
 const MAKE_CHECK_LINE_MAX_CHARS = 500;
 const MAKE_CHECK_OUTPUT_TAIL_CHARS = 20_000;
@@ -163,6 +172,12 @@ async function runStep(
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
   scrubSensitiveEnv(env);
+  // `Bun.spawn`'s `cwd` does not update the child's `PWD` env var, and `process.env` carries the
+  // LaunchAgent's stale `PWD` — pinned to the main checkout, not this command's `cwd`. A `make
+  // check` recipe that reads `$(PWD)`/`$PWD` would then validate the WRONG tree (a false green
+  // against the dispatch worktree). Same pin, for the same measured reason, as
+  // `opencode-runner.ts`'s `buildOpencodeEnv`.
+  env.PWD = cwd;
 
   const proc = Bun.spawn(argv, {
     cwd,
@@ -170,6 +185,9 @@ async function runStep(
     stdout: "pipe",
     stderr: "pipe",
     env,
+    // New session/process group (`setsid`), so `killGroup` below reaches a recipe's backgrounded
+    // child — see the note on `killGroup`.
+    detached: true,
   });
   const untrack = trackExternalProc(proc, jobId);
 
@@ -179,12 +197,28 @@ async function runStep(
   let tail = "";
   let sigkillTimer: ReturnType<typeof setTimeout> | undefined;
 
+  // The child leads its own process group (`detached: true` → `setsid`), so a negative PID
+  // signals the whole group. That reach matters: a recipe that backgrounds a child
+  // (`check:; @sleep 999999 &`) has it reparented away from `make` by the shell, so `proc.kill`
+  // can only ever hit `make` itself — and that orphan is exactly what keeps the stdout/stderr
+  // pipes open after `make` has exited (the step then hangs forever, holding a global
+  // concurrency slot and blocking `make reload`). Signalling an already-reaped group throws
+  // ESRCH, which is not an error here.
+  const killGroup = (signal: "SIGTERM" | "SIGKILL"): void => {
+    try {
+      process.kill(-proc.pid, signal);
+    } catch {
+      /* the process group is already gone */
+    }
+  };
+
   const terminate = (): void => {
-    if (proc.exitCode !== null) return;
-    proc.kill("SIGTERM");
-    sigkillTimer = setTimeout(() => {
-      if (proc.exitCode === null) proc.kill("SIGKILL");
-    }, MAKE_CHECK_SIGKILL_GRACE_MS);
+    // No `proc.exitCode !== null` early return: `make` exiting does not mean its group is gone,
+    // and skipping the signal on that assumption is what let an orphaned recipe child wedge the
+    // step.
+    killGroup("SIGTERM");
+    if (sigkillTimer) return; // a second terminate() must not arm a second escalation
+    sigkillTimer = setTimeout(() => killGroup("SIGKILL"), MAKE_CHECK_SIGKILL_GRACE_MS);
   };
 
   const watchdog = setInterval(() => {
@@ -222,9 +256,42 @@ async function runStep(
 
   try {
     onProgress?.({ turns: 0, lastAction: label, lastActivityAt: Date.now() });
-    await Promise.all([drain(proc.stdout), drain(proc.stderr)]);
+    let drainsDone = false;
+    const drains = Promise.all([drain(proc.stdout), drain(proc.stderr)]).then(() => {
+      drainsDone = true;
+    });
+    drains.catch(() => {}); // a late rejection after the deadline below must not go unhandled
+
     const exitCode = await proc.exited;
-    if (cancelled) throw new SessionCancelledError(jobId ?? "check");
+
+    // `make` has exited, but a recipe can leave an orphan holding the write end, so the drains
+    // above may still be waiting on an EOF that never comes. Signal the whole group so every
+    // writer dies; buffered output is not lost — a closed pipe still yields its buffered bytes
+    // before EOF — and the deadline on top means even a writer that somehow survives cannot wedge
+    // the step forever.
+    if (!drainsDone) killGroup("SIGKILL");
+    let drainGraceTimer: ReturnType<typeof setTimeout> | undefined;
+    const drained = await Promise.race([
+      drains.then(() => true),
+      new Promise<boolean>((resolve) => {
+        drainGraceTimer = setTimeout(() => resolve(false), MAKE_CHECK_DRAIN_GRACE_MS);
+      }),
+    ]);
+    if (drainGraceTimer) clearTimeout(drainGraceTimer);
+    if (!drained) killGroup("SIGKILL");
+
+    // An external kill — `job_cancel`'s `terminateSessionsForJob`, or a drain's
+    // `terminateActiveSessions` — can land faster than this watchdog's 5s `isCancelled` poll, so
+    // `cancelled` is still false when `proc.exited` resolves and the step would otherwise look
+    // like an ordinary failing exit. `runCheck` would then RETURN that result and store.ts's
+    // `execute()` would persist the job `done` with a bogus verdict instead of landing it
+    // `cancelled` (or leaving it `running` for drain recovery). Re-check the cancel flag, and
+    // treat a leader killed by a signal this step never sent as a cancellation too (`idleKilled`
+    // covers the one signal we DID send ourselves).
+    const signalled = proc.signalCode === "SIGTERM" || proc.signalCode === "SIGKILL";
+    if (cancelled || (jobId !== undefined && isCancelled?.(jobId)) || (signalled && !idleKilled)) {
+      throw new SessionCancelledError(jobId ?? "check");
+    }
 
     if (!idleKilled && exitCode === 0) {
       return { step: { name, passed: true }, summary: `${label} passed` };
@@ -247,8 +314,10 @@ async function runStep(
     };
   } finally {
     clearInterval(watchdog);
+    // A no-op on the normal path (the group is already gone, so `killGroup`'s ESRCH is
+    // swallowed); this only bites if the try block threw before it could stop the step itself.
     terminate();
-    if (proc.exitCode === null) await proc.exited;
+    if (proc.exitCode === null && proc.signalCode === null) await proc.exited;
     // Cleared only once the child has exited — `terminate()` above may have just re-armed it.
     if (sigkillTimer) clearTimeout(sigkillTimer);
     untrack();
