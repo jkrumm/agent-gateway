@@ -156,6 +156,12 @@ async function capture(argv: string[], cwd: string) {
 
 const git = (cwd: string, args: string[]) => capture(["git", ...args], cwd);
 
+const ANSWER_SCHEMA = {
+  type: "object",
+  properties: { answer: { type: "string" } },
+  required: ["answer"],
+} as const;
+
 // ── Usage (attribution row written by runSession) ───────────────────────────────
 
 const ATTR_LOG = join(
@@ -300,6 +306,10 @@ async function runCell(
     route,
     readOnly: task.kind === "investigate",
     settingSources: "user,project",
+    // Investigate asks for a structured answer like production does; implement ends in a diff.
+    ...(task.kind === "investigate"
+      ? { jsonSchema: ANSWER_SCHEMA, prompt: `${task.text}\n\nReturn {"answer": "<your answer>"}.` }
+      : {}),
   });
   const wallS = (performance.now() - started) / 1000;
   const usage = readUsage(tool);
@@ -307,7 +317,8 @@ async function runCell(
   let pass = false;
   let detail = "";
   if (task.kind === "investigate") {
-    const answer = `${result.rawText ?? ""}\n${typeof result.data === "string" ? result.data : ""}`;
+    const data = result.data as { answer?: unknown } | undefined;
+    const answer = `${result.rawText ?? ""}\n${typeof data?.answer === "string" ? data.answer : ""}`;
     const text = answer.trim() || (result.error ?? "");
     const missing = task.expect.filter((s) => !text.toLowerCase().includes(s.toLowerCase()));
     pass = result.ok && missing.length === 0;
