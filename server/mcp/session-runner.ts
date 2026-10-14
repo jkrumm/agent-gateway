@@ -1599,7 +1599,10 @@ export function terminateSessionsForJob(jobId: string): boolean {
     signalled = true;
     killRegisteredProc(proc, entry, "SIGTERM");
     setTimeout(() => {
-      if (proc.exitCode === null) killRegisteredProc(proc, entry, "SIGKILL");
+      // A detached leader exiting does not mean its group is gone: a backgrounded recipe child
+      // can outlive `make`, so a detached entry always escalates (a reaped group is ESRCH,
+      // which `killRegisteredProc` swallows).
+      if (entry.detached || proc.exitCode === null) killRegisteredProc(proc, entry, "SIGKILL");
     }, 5000);
   }
   if (!signalled) {
