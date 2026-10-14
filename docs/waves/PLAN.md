@@ -162,19 +162,26 @@ warden, agent-gateway and dotfiles. Before editing a repo, check `rd agents` and
   `make verify`. Review findings deliberately not taken: splitting the probe into modules, unit tests
   for its helpers, parallelising the pagination seed.
 
-## Wave 2 — agw owns its server; episodes attach with `--server`            <!-- status: active -->
-- [ ] Add a server lifecycle as the Wave 1 design chose: start, health, restart on
+## Wave 2 — agw owns its server; episodes attach with `--server`            <!-- status: done -->
+- [x] Add a server lifecycle as the Wave 1 design chose: start, health, restart on
       crash, and a version pin with the live probe as the upgrade gate. Expose server
       health on `/api/jobs/health` and `make verify`.
-- [ ] Switch `--standalone` to `--server <agw server>`, keeping the JSON-stream parser
+- [x] Switch `--standalone` to `--server <agw server>`, keeping the JSON-stream parser
       for now. Move per-run config onto session/agent level wherever v2 allows it.
-- [ ] Delete the db-lock retry and any other workaround the server makes obsolete,
+- [x] Delete the db-lock retry and any other workaround the server makes obsolete,
       but only where it is measured as unneeded.
-- [ ] Gate, deploy and verify: a real `dispatch investigate`, a `review` with 3 OC
+- [x] Gate, deploy and verify: a real `dispatch investigate`, a `review` with 3 OC
       angles, and 3 concurrent jobs, all with no lock error.
-**Left behind:**
+**Left behind:** shipped in af81c7a + 7e795bb, deployed and verified (`make verify` now reports `opencode server ok`).
+- **Server:** LaunchAgent `com.jkrumm.agent-gateway-opencode` (:49375, `scripts/agent-gateway-opencode-start.sh`, scrubbed `env -i`, pin 2.0.25, refuses to start on a version mismatch). `server/mcp/opencode-server.ts` is the one module (config from the registry, agents `agw-readonly`/`agw-implement`, status, interrupt). Health: `opencodeServer` on `/api/jobs/health`; `deploy.sh` aborts before reload (no rollback) when it is not ok. `make install-opencode-agent` restarts it and kills attached episodes — it refuses while jobs run unless `FORCE=1`.
+- **Measured (2.0.25):** `run --server` honours the client's cwd, `--agent` carries permissions, but the shell env is the SERVER's (client env never arrives); Basic auth username must be `opencode`; killing the client leaves the server session running (a 40 s command finished after SIGTERM) — hence `interruptOpencodeSession` after every client exit; 5 concurrent `run --server` sessions: no db lock (the retry is deleted); `/api/info` needs auth.
+- **Live proof:** `scripts/opencode-live-probe.ts` (recreated for the shared server, all green: allowlist, refusals, hostile client env, interrupt-on-kill, self-access deny); 2 concurrent `dispatch investigate` (verdicts correct) + a `review` with 3 OC angles in parallel, no lock error; `session.opencode_interrupt` logged after each angle.
+- **Decisions / trade-offs Wave 3 inherits:** per-run `extraEnv` cannot reach the shell on `run --server`: `GIT_DENY_CREDENTIALS_ENV` is static server env; research-gateway creds are dropped (warn `session.opencode_extra_env_dropped`) so research validation is unavailable on OC review angles and `review.ts` still puts the curl recipe in their prompts — drop it or restore it via `PUT /api/session/{id}/environment`. The password and `IU_KEY` sit in the server env, visible to worker shells; `agw-readonly` has a cost-raising text deny list for them (not a boundary) — Wave 3's session environment should remove the password from the server env. `usageIncomplete` not re-measured under `--server`.
+- **Incident:** my `FORCE=1 make install-opencode-agent` restart (to load the final config) killed a foreign running dispatch (ec2d299b, warden's, `Transport: socket closed`; salvaged bundle `dispatch-a-prior-read-only-investigation-d4ababdb.bundle`). Restart only with `agw jobs --running` empty; Wave 3 should not need server restarts for config changes.
+- **Open:** the 2.0.29 upgrade (not decided; gate = `opencode-v2-probe.ts` + `opencode-live-probe.ts`), title generation off, the flaky 5 s timeouts in `tests/review-opencode-config.test.ts` under load.
 
-## Wave 3 — native HTTP runner            <!-- status: pending -->
+
+## Wave 3 — native HTTP runner            <!-- status: active -->
 - [ ] Replace the spawn with the HTTP API: create → prompt → wait → messages.
       Replace, don't layer: no CLI fallback path.
 - [ ] Take usage from the message records (exact tokens and cost per turn), so
