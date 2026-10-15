@@ -2,7 +2,7 @@
 
 Spec order for this migration: `docs/waves/PLAN.md` > this file > dotfiles
 `docs/agent-platform.md` > older docs. Everything under **Measured** was observed on
-**opencode 2.0.25** (Homebrew; re-probed on 2.0.29 on 2026-10-15) with `scripts/opencode-v2-probe.ts` on 2026-10-14; the probe is
+**opencode 2.0.25** (then Homebrew; re-probed on 2.0.29 on 2026-10-15, the pinned build since) with `scripts/opencode-v2-probe.ts` on 2026-10-14; the probe is
 the executable form of this page and the upgrade gate (below).
 
 **Status: Wave 4 shipped (2026-10-14).** An episode is a session on one agw-owned OpenCode v2
@@ -224,8 +224,17 @@ The 2026-10-11 `brew upgrade` changed behaviour under a running agw and broke ev
 
 - agw's server runs an **npm install of `@opencode/cli`** at the pinned version, under
   `~/.local/share/agent-gateway/opencode-bin/<version>/` (`npm i @opencode/cli@<version>`).
-  Homebrew's bottle stays at 2.0.25 (2026-10-15) and serves only interactive `oc`; the wrapper
-  prefers the npm build matching `OPENCODE_PINNED_VERSION` and falls back to PATH.
+  The wrapper prefers the npm build matching `OPENCODE_PINNED_VERSION` and falls back to PATH.
+- **One version on the whole machine (Wave 10, 2026-10-15).** Homebrew's `opencode` is uninstalled;
+  `scripts/opencode` (linked as `~/.local/bin/opencode` by `make install-cli`) execs
+  `opencode-bin/current/…/opencode`, a link `install-opencode-bin.sh` keeps on the pinned build.
+  Interactive `oc`, `rd wave|work|fan --kind opencode`, `opencode-safe` and the per-user shared
+  service (`opencode service restart` picks the new binary) therefore all run the pin. After a pin
+  bump re-run `make install-cli install-opencode-agent`. Verified 2026-10-15: `oc run` replied on
+  2.0.29 and `rd work <repo> --kind opencode` started, took a prompt and answered (the first start
+  on a new version shows a one-time release-notes dialog that swallows the initial prompt —
+  dismiss it with Enter). Never `brew install opencode`: it would sit earlier on PATH than nothing,
+  but unpinned.
 - The pin lives in `OPENCODE_PINNED_VERSION` (`server/mcp/opencode-server.ts`). The install
   directory is mini-local state; `make install-opencode-agent` runs the idempotent
   `scripts/install-opencode-bin.sh` first, so a bumped pin or a reprovisioned machine provisions itself.

@@ -8,7 +8,7 @@ import {
   trackExternalProc,
   zodValidator,
 } from "../../mcp/session-runner.ts";
-import { routeFor } from "../../lib/routing.ts";
+import { routeFor, type Harness } from "../../lib/routing.ts";
 import { IDLE_TIMEOUT_MS } from "../../lib/idle-timeout.ts";
 import { appLogger as logger } from "../../logger.ts";
 import type { ProgressSink } from "../store.ts";
@@ -508,7 +508,20 @@ export function checkSessionIdleTimeoutMs(stepSeconds: number, testSeconds: numb
  *  watchdog shell function itself is worker-authored bash embedded in the prompt (there is
  *  no handler-side subprocess to attach a real idle timer to; the worker's own Bash tool is
  *  the only thing actually running the command), so keeping one copy of the recipe matters. */
-function idleWatchdogBlock(stepSeconds: number, testSeconds: number): string {
+function idleWatchdogBlock(stepSeconds: number, testSeconds: number, harness: Harness): string {
+  // The OpenCode shell is allow-listed per command (`agw-check`): the `run_step` helper below is a
+  // shell function plus mktemp/kill/eval — none of which is an allowed command — so there the host
+  // is the only watchdog (the session's idle timeout, sized from the same two windows).
+  if (harness === "opencode") {
+    return (
+      `## Command safety\n\n` +
+      `Run each command exactly as given, one shell call per command, directly — no wrapper, no ` +
+      `\`timeout\`, no pipes, no \`cd\`, no background jobs. The host watches the session and ` +
+      `kills it after ${checkSessionIdleTimeoutMs(stepSeconds, testSeconds) / 1000}s without any ` +
+      `output; never retry a command. If a test command reports no tests ("0 test files", "No test ` +
+      `files found", pytest exit 5), mark the step passed — an empty suite is not a failure.`
+    );
+  }
   return (
     `## Command safety — idle watchdog, not a wall clock\n\n` +
     `A hung command must never stall the job. But many legitimate steps (e2e suites, slow ` +
@@ -555,6 +568,7 @@ function explicitCommandsPrompt(
   commands: string[],
   stepSeconds: number,
   testSeconds: number,
+  harness: Harness,
 ): string {
   return (
     `You are a code quality checker. The caller supplied the EXACT validation commands. ` +
@@ -564,7 +578,7 @@ function explicitCommandsPrompt(
     `Run EXACTLY these and nothing else. Do NOT explore the repo, read package.json/` +
     `pyproject.toml, sniff the ecosystem, run \`which\`/\`git remote -v\`, or run \`fallow\`. ` +
     `As soon as every command has run once, emit the JSON — do not re-run or re-read.\n\n` +
-    `${idleWatchdogBlock(stepSeconds, testSeconds)}\n\n` +
+    `${idleWatchdogBlock(stepSeconds, testSeconds, harness)}\n\n` +
     commands.map((c, i) => `${i + 1}. \`${c}\``).join("\n") +
     `\n\n` +
     OUTPUT_CONTRACT
@@ -575,9 +589,10 @@ async function loadSkillPrompt(
   commands: string[] | undefined,
   stepSeconds: number,
   testSeconds: number,
+  harness: Harness,
 ): Promise<string> {
   if (commands && commands.length > 0)
-    return explicitCommandsPrompt(commands, stepSeconds, testSeconds);
+    return explicitCommandsPrompt(commands, stepSeconds, testSeconds, harness);
   const skillPath = join(import.meta.dir, "../../skills/check.md");
   // Discovery path: drop the (now-unused) explicit-commands placeholder, and splice in the
   // caller-configured idle-watchdog block so both prompt paths run the same recipe.
@@ -585,7 +600,7 @@ async function loadSkillPrompt(
   return template
     .replace("{{COMMANDS}}\n", "")
     .replace("{{COMMANDS}}", "")
-    .replace("{{TIMEOUT_BLOCK}}", idleWatchdogBlock(stepSeconds, testSeconds));
+    .replace("{{TIMEOUT_BLOCK}}", idleWatchdogBlock(stepSeconds, testSeconds, harness));
 }
 
 // ── Core ───────────────────────────────────────────────────────────────────────
@@ -618,7 +633,8 @@ export async function runCheck(
     return runRepoContractCheck(cwd, testSeconds, jobId, isCancelled, onProgress);
   }
 
-  const prompt = await loadSkillPrompt(commands, stepSeconds, testSeconds);
+  const route = routeFor("check");
+  const prompt = await loadSkillPrompt(commands, stepSeconds, testSeconds, route.harness);
   const runWorker = (p: string) =>
     runSession<CheckOutput>({
       cwd,
@@ -628,8 +644,9 @@ export async function runCheck(
       isCancelled,
       reattachKey,
       jsonSchema: CHECK_JSON_SCHEMA,
-      route: routeFor("check"),
+      route,
       readOnly: true,
+      runsChecks: true,
       // The session watchdog must outlast the worker's own per-step idle windows: within a
       // single Bash step no stdout is emitted, so the shared 5-minute default would kill the
       // session before a long test step's window could apply.

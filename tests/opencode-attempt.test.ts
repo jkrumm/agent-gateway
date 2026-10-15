@@ -148,6 +148,14 @@ describe("runOpencodeAttempt — the session it creates", () => {
     ]);
   });
 
+  test("a check worker rides agw-check; a tool-less one agw-toolless (and may carry extraDisallowedTools)", async () => {
+    const { client, run } = setup(finalText('{"answer":1}'));
+    client.script(finalText('{"answer":2}'));
+    await run({ readOnly: true, runsChecks: true });
+    await run({ readOnly: true, toolless: true, extraDisallowedTools: ["Bash", "Read"] });
+    expect(client.created.map((c) => c.agent)).toEqual(["agw-check", "agw-toolless"]);
+  });
+
   test("a writable session uses agw-implement; a responses-wire model rides iu-responses", async () => {
     const { client, run } = setup(finalText('{"answer":1}'));
     await run({}, { model: "gpt-6.1-sol", variant: "high" });

@@ -396,6 +396,7 @@ export async function runOverview(
     // prompt alone, never read a live file (the same transcripts it was already given, this
     // time ungated by the caps/fence above) or shell out.
     extraDisallowedTools: ["Bash", "Read", "Grep", "Glob"],
+    toolless: true,
     validate: zodValidator(OVERVIEW_WORKER_OUTPUT),
     onActivity: onProgress,
   });

@@ -164,6 +164,18 @@ export interface SessionOptions<T = unknown> {
    */
   readOnly?: boolean;
   /**
+   * Check workers only: lets an OpenCode `readOnly` session also run the repo's build/test
+   * runners (make, bun, uv, pytest, …) — the `agw-check` permission profile. Edits stay
+   * denied. No effect on the claude harness, whose Bash is open under `readOnly` already.
+   */
+  runsChecks?: boolean;
+  /**
+   * The worker answers from the prompt alone: every tool denied. On the claude harness the caller
+   * expresses it with `extraDisallowedTools` (which is why that option may accompany this one on
+   * OpenCode); on OpenCode it selects the `agw-toolless` permission profile.
+   */
+  toolless?: boolean;
+  /**
    * Let a timeout AFTER first output still move onto the fallback lane. Default false:
    * a worker that already produced turns may have half-done its work (dispatch,
    * excalidraw), so only a silent timeout switches. Callers whose worker has no side

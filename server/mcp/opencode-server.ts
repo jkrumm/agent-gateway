@@ -52,9 +52,11 @@ export const OPENCODE_PROVIDER_RESPONSES = "iu-responses";
 /** The IU native `/anthropic` leg through `@ai-sdk/anthropic`, so OpenCode injects `cache_control`. */
 export const OPENCODE_PROVIDER_ANTHROPIC = "iu-anthropic";
 
-/** The two permission profiles an episode can select with `--agent`. */
+/** The permission profiles an episode can select with `agent` on session create. */
 export const OPENCODE_AGENT_READONLY = "agw-readonly";
 export const OPENCODE_AGENT_IMPLEMENT = "agw-implement";
+export const OPENCODE_AGENT_CHECK = "agw-check";
+export const OPENCODE_AGENT_TOOLLESS = "agw-toolless";
 
 // ── Permission rules ────────────────────────────────────────────────────────────
 
@@ -184,6 +186,69 @@ export const OPENCODE_READONLY_PERMISSIONS: readonly OpencodePermissionRule[] = 
   { action: "glob", resource: "*", effect: "allow" },
   { action: "grep", resource: "*", effect: "allow" },
   { action: "skill", resource: "*", effect: "allow" },
+];
+
+/** `agw-toolless`: the worker answers from the prompt alone — every action denied, so a model that
+ *  tries a tool gets a refusal instead of a blocked `ask`. overview / narrative: the prompt already
+ *  carries everything the worker may reason over, and a repo read would be ungated by their caps. */
+export const OPENCODE_TOOLLESS_PERMISSIONS: readonly OpencodePermissionRule[] = [
+  { action: "*", resource: "*", effect: "deny" },
+];
+
+/** Build/test runners `agw-check` may execute on top of the read-only allowlist. Edits stay denied
+ *  at the tool level, but this is NOT a write boundary: `bun -e`, `uv run python -c` or a test suite
+ *  can write anywhere the worker's user can — exactly as under the claude harness, where Bash is
+ *  open (the same trust: the repo is the owner's, the commands are the caller's). The profile
+ *  bounds WHICH programs the model may start; bare interpreters/shells (`sh`, `bash`, `python3`,
+ *  `node`) are deliberately absent. */
+const CHECK_RUNNER_PREFIXES = [
+  "make",
+  "bun",
+  "bunx",
+  "npm",
+  "npx",
+  "pnpm",
+  "yarn",
+  "uv",
+  "uvx",
+  "pytest",
+  "ruff",
+  "pyrefly",
+  "tsc",
+  "oxlint",
+  "oxfmt",
+  "fallow",
+  "cargo",
+  "go",
+  "gofmt",
+  "mypy",
+  "ty",
+  "vitest",
+  "jest",
+  "eslint",
+  "prettier",
+  "biome",
+  "deno",
+] as const;
+
+/** Read-only probes the check skill's discovery path runs (`server/skills/check.md`: Makefile
+ *  targets, `which fallow`, `git remote -v`). */
+const CHECK_DISCOVERY_PREFIXES = ["grep", "which", "command -v", "git remote"] as const;
+
+/** `agw-check`: the check worker. The read-only profile plus the runners above. Redirect and
+ *  pipe forms the runners are normally invoked with (`2>&1`, `| tail`) must pass, so the runner
+ *  allows come after the read-only `*>*` deny and the server-self-access denies are re-applied
+ *  last (last match wins). */
+export const OPENCODE_CHECK_PERMISSIONS: readonly OpencodePermissionRule[] = [
+  ...OPENCODE_READONLY_PERMISSIONS,
+  ...[...CHECK_DISCOVERY_PREFIXES, ...CHECK_RUNNER_PREFIXES].map((cmd) =>
+    shell(`${cmd} *`, "allow"),
+  ),
+  // The repo's own toolchain by path (a venv's python/pytest, a local node_modules binary).
+  ...[".venv/bin", "./.venv/bin", "node_modules/.bin", "./node_modules/.bin"].map((dir) =>
+    shell(`${dir}/*`, "allow"),
+  ),
+  ...serverSelfAccessDenyRules(),
 ];
 
 /** `agw-implement`: dispatch implement. Everything allowed (the leading catch-all also cancels
@@ -346,6 +411,16 @@ export function buildOpencodeServerConfig(): Record<string, unknown> {
         mode: "primary",
         permissions: OPENCODE_READONLY_PERMISSIONS,
       },
+      [OPENCODE_AGENT_TOOLLESS]: {
+        description: "agent-gateway tool-less worker (answers from the prompt, every tool denied)",
+        mode: "primary",
+        permissions: OPENCODE_TOOLLESS_PERMISSIONS,
+      },
+      [OPENCODE_AGENT_CHECK]: {
+        description: "agent-gateway check worker (read-only plus build/test runners, no edits)",
+        mode: "primary",
+        permissions: OPENCODE_CHECK_PERMISSIONS,
+      },
       [OPENCODE_AGENT_IMPLEMENT]: {
         description: "agent-gateway implement worker (full tools, no questions)",
         mode: "primary",
@@ -478,15 +553,16 @@ export async function getOpencodeServerStatus(
 
   // In parallel: one hung server must cost one timeout, not three. The model list rides along
   // (its failure proves nothing and is judged only after the version/password checks pass).
-  const [infoResult, activeResult, modelsResult] = await Promise.allSettled([
+  const [infoResult, activeResult, modelsResult, agentsResult] = await Promise.allSettled([
     get("/api/info"),
     get("/api/session/active"),
     get("/api/model"),
+    get("/api/agent"),
   ]);
   for (const result of [infoResult, activeResult]) {
     if (result.status === "fulfilled") continue;
     // The other responses (if any) are not read — release them.
-    for (const other of [infoResult, activeResult, modelsResult]) {
+    for (const other of [infoResult, activeResult, modelsResult, agentsResult]) {
       if (other.status === "fulfilled") await other.value.body?.cancel();
     }
     return {
@@ -538,14 +614,15 @@ export async function getOpencodeServerStatus(
       error: `opencode server version ${version ?? "unknown"} != pinned ${OPENCODE_PINNED_VERSION}`,
     };
   }
-  const missing = await missingServerModels(modelsResult);
+  const missingAgents = await missingServerAgents(agentsResult);
+  const missing = [...(await missingServerModels(modelsResult)), ...missingAgents];
   if (missing.length > 0) {
     return {
       ...found,
       ok: false,
       error:
         `opencode server config is stale: it does not list ${missing.join(", ")} ` +
-        "(registry models changed since it started) — `make install-opencode-agent` loads the current config",
+        "(the registry or the permission profiles changed since it started) — `make install-opencode-agent` loads the current config",
     };
   }
   return { ...found, ok: true };
@@ -554,6 +631,32 @@ export async function getOpencodeServerStatus(
 const ModelListSchema = z.object({
   data: z.array(z.object({ providerID: z.string(), id: z.string() })),
 });
+
+const AgentListSchema = z.object({
+  data: z.array(z.object({ name: z.string(), permissions: z.array(z.unknown()) })),
+});
+
+/** `agent:<name>` for every profile the current config defines that the running server lacks (or
+ *  carries with fewer rules — the server prepends its own base rules, so a longer list is normal).
+ *  Fails open like the model check: an unreadable answer proves nothing. */
+async function missingServerAgents(result: PromiseSettledResult<Response>): Promise<string[]> {
+  if (result.status !== "fulfilled") return [];
+  const res = result.value;
+  if (res.status !== 200) {
+    await res.body?.cancel();
+    return [];
+  }
+  const parsed = AgentListSchema.safeParse(await res.json().catch(() => null));
+  if (!parsed.success) return [];
+  const live = new Map(parsed.data.data.map((a) => [a.name, a.permissions.length]));
+  const expected = buildOpencodeServerConfig().agents as Record<
+    string,
+    { permissions: readonly unknown[] }
+  >;
+  return Object.entries(expected)
+    .filter(([name, def]) => (live.get(name) ?? -1) < def.permissions.length)
+    .map(([name]) => `agent:${name}`);
+}
 
 /** Registry models the running server does not list as `<provider>/<id>`. A server started
  *  before a registry change keeps its old `OPENCODE_CONFIG_CONTENT` (`make reload` never restarts

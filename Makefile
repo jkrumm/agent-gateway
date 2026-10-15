@@ -188,7 +188,8 @@ install-cli:
 	@mkdir -p ~/.local/bin
 	@ln -sf "$(CURDIR)/bin/agw.ts" ~/.local/bin/agw
 	@ln -sf "$(CURDIR)/scripts/opencode-safe" ~/.local/bin/opencode-safe
-	@echo "agent-gateway CLI symlinked to ~/.local/bin/agw (run: agw --help), opencode-safe (bounded opencode for probes)"
+	@ln -sf "$(CURDIR)/scripts/opencode" ~/.local/bin/opencode
+	@echo "agent-gateway CLI symlinked to ~/.local/bin/agw (run: agw --help), opencode-safe (bounded opencode for probes), opencode (the pinned build, machine-wide)"
 
 uninstall-agent:
 	launchctl bootout gui/$$(id -u)/com.jkrumm.agent-gateway

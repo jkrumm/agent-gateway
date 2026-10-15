@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# opencode — the machine's ONE opencode build: agw's pinned install under
+# ~/.local/share/agent-gateway/opencode-bin/ (OPENCODE_PINNED_VERSION, upgrade gate in
+# docs/opencode-v2.md). `make install-cli` links this as ~/.local/bin/opencode; Homebrew's
+# opencode is uninstalled (its bottle lags and a `brew upgrade` once broke every dispatch).
+# Interactive `oc`, `rd wave|fan --kind opencode` and herdr agent panes all resolve `opencode`
+# through here, so the shared per-user service and the agw server run the same version.
+# `scripts/install-opencode-bin.sh` maintains the `current` link.
+set -euo pipefail
+bin="$HOME/.local/share/agent-gateway/opencode-bin/current/node_modules/.bin/opencode"
+if [ ! -x "$bin" ]; then
+  echo "opencode: pinned build missing ($bin) — run 'make install-opencode-agent' in ~/SourceRoot/agent-gateway" >&2
+  exit 127
+fi
+exec "$bin" "$@"

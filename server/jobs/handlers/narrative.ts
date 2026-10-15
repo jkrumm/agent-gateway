@@ -684,6 +684,7 @@ export async function runNarrative(
       route,
       readOnly: true,
       extraDisallowedTools: ["Bash", "Read", "Grep", "Glob"],
+      toolless: true,
       validate: zodValidator(NARRATIVE_WORKER_OUTPUT),
       onActivity: onProgress,
     });

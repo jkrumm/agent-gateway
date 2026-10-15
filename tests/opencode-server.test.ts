@@ -17,7 +17,10 @@ import {
   interruptOpencodeSession,
   normalizeOpencodeVersion,
   OPENCODE_AGENT_IMPLEMENT,
+  OPENCODE_AGENT_CHECK,
   OPENCODE_AGENT_READONLY,
+  OPENCODE_AGENT_TOOLLESS,
+  OPENCODE_CHECK_PERMISSIONS,
   OPENCODE_IMPLEMENT_PERMISSIONS,
   OPENCODE_PINNED_VERSION,
   OPENCODE_PROVIDER_ANTHROPIC,
@@ -25,6 +28,7 @@ import {
   OPENCODE_PROVIDER_CHAT,
   OPENCODE_PROVIDER_RESPONSES,
   OPENCODE_READONLY_PERMISSIONS,
+  OPENCODE_TOOLLESS_PERMISSIONS,
   OPENCODE_SESSION_BLANKED_ENV,
   opencodeServerEnv,
   opencodeServerPort,
@@ -73,6 +77,59 @@ function evaluate(
 
 const shellOf = (rules: readonly OpencodePermissionRule[], command: string) =>
   evaluate(rules, "shell", command);
+
+// ── agw-check ─────────────────────────────────────────────────────────────────────────────────
+
+describe("agw-check permissions", () => {
+  const ck = OPENCODE_CHECK_PERMISSIONS;
+
+  test("runs the repo's build/test runners, redirects and pipes included", () => {
+    for (const cmd of [
+      "make check",
+      "bun run typecheck 2>&1 | tail -20",
+      "bun test tests/cli.test.ts",
+      "uv run ruff check .",
+      ".venv/bin/python -m compileall -q scripts",
+      "pytest -q",
+      "./node_modules/.bin/tsc --noEmit",
+      "grep -E '^(lint|test):' Makefile",
+      "which fallow",
+      "git remote -v",
+      "gofmt -l .",
+    ]) {
+      expect(shellOf(ck, cmd), cmd).toBe("allow");
+    }
+  });
+
+  test("still refuses interpreters, writers and the server's own credentials/API", () => {
+    for (const cmd of [
+      "sh -c 'rm -rf x'",
+      "bash x.sh",
+      "python3 -c 'print(1)'",
+      "rm -rf node_modules",
+      "git commit -am x",
+      "bun test $OPENCODE_SERVER_PASSWORD",
+      "make check IU_KEY=x",
+      "bun run x http://127.0.0.1:49375/api/session",
+    ]) {
+      expect(shellOf(ck, cmd), cmd).toBe("deny");
+    }
+  });
+
+  test("edits stay denied and the read-only tool actions are inherited", () => {
+    expect(ck.filter((r) => r.action === "edit")).toEqual([
+      { action: "edit", resource: "*", effect: "deny" },
+    ]);
+    expect(ck[0]).toEqual({ action: "*", resource: "*", effect: "deny" });
+  });
+});
+
+describe("agw-toolless permissions", () => {
+  test("is a single catch-all deny: no shell, read, glob or edit survives", () => {
+    expect(OPENCODE_TOOLLESS_PERMISSIONS).toEqual([{ action: "*", resource: "*", effect: "deny" }]);
+    expect(shellOf(OPENCODE_TOOLLESS_PERMISSIONS, "cat package.json")).toBe("deny");
+  });
+});
 
 // ── agw-readonly ──────────────────────────────────────────────────────────────────────────────
 
@@ -382,11 +439,20 @@ describe("buildOpencodeServerConfig", () => {
     expect(entry).not.toHaveProperty("settings");
   });
 
-  test("defines exactly the two agents with the exported rule arrays; no top-level permission block", () => {
+  test("defines exactly the four agents with the exported rule arrays; no top-level permission block", () => {
     const agents = cfg.agents as Record<string, { permissions: unknown }>;
     expect(Object.keys(agents).toSorted()).toEqual(
-      [OPENCODE_AGENT_IMPLEMENT, OPENCODE_AGENT_READONLY].toSorted(),
+      [
+        OPENCODE_AGENT_CHECK,
+        OPENCODE_AGENT_IMPLEMENT,
+        OPENCODE_AGENT_READONLY,
+        OPENCODE_AGENT_TOOLLESS,
+      ].toSorted(),
     );
+    expect(agents[OPENCODE_AGENT_CHECK]?.permissions).toEqual([...OPENCODE_CHECK_PERMISSIONS]);
+    expect(agents[OPENCODE_AGENT_TOOLLESS]?.permissions).toEqual([
+      ...OPENCODE_TOOLLESS_PERMISSIONS,
+    ]);
     expect(agents[OPENCODE_AGENT_READONLY]?.permissions).toEqual([
       ...OPENCODE_READONLY_PERMISSIONS,
     ]);
@@ -631,6 +697,38 @@ describe("getOpencodeServerStatus", () => {
     expect((await getOpencodeServerStatus()).ok).toBe(true);
   });
 
+  test("a server missing a permission profile (or carrying a shorter one) is NOT ok: stale agents", async () => {
+    const expected = buildOpencodeServerConfig().agents as Record<
+      string,
+      { permissions: unknown[] }
+    >;
+    const serve = (drop: string | null, shrink: string | null) =>
+      fake((req) => {
+        const path = new URL(req.url).pathname;
+        if (path === "/api/info") return Response.json({ version: OPENCODE_PINNED_VERSION });
+        if (path === "/api/agent") {
+          return Response.json({
+            data: Object.entries(expected)
+              .filter(([name]) => name !== drop)
+              .map(([name, def]) => ({
+                name,
+                permissions: def.permissions.slice(0, name === shrink ? 1 : undefined),
+              })),
+          });
+        }
+        return Response.json([]);
+      });
+    serve(null, null);
+    expect((await getOpencodeServerStatus()).ok).toBe(true);
+    serve(OPENCODE_AGENT_CHECK, null);
+    const missing = await getOpencodeServerStatus();
+    expect(missing.ok).toBe(false);
+    expect(missing.error).toContain(`agent:${OPENCODE_AGENT_CHECK}`);
+    expect(missing.error).toContain("make install-opencode-agent");
+    serve(null, OPENCODE_AGENT_READONLY);
+    expect((await getOpencodeServerStatus()).error).toContain(`agent:${OPENCODE_AGENT_READONLY}`);
+  });
+
   test("a v-prefixed version still matches the pin", async () => {
     fake(() => Response.json({ version: `v${OPENCODE_PINNED_VERSION}` }));
     expect((await getOpencodeServerStatus()).ok).toBe(true);
@@ -716,7 +814,7 @@ describe("getOpencodeServerStatus", () => {
     expect(status.ok).toBe(false);
   });
 
-  test("the three requests (info, active, model list) are issued concurrently", async () => {
+  test("the four requests (info, active, model list, agent list) are issued concurrently", async () => {
     let inFlight = 0;
     let maxInFlight = 0;
     const slow = (async (url: string) => {
@@ -729,7 +827,7 @@ describe("getOpencodeServerStatus", () => {
         : Response.json([]);
     }) as unknown as typeof fetch;
     expect((await getOpencodeServerStatus(slow)).ok).toBe(true);
-    expect(maxInFlight).toBe(3);
+    expect(maxInFlight).toBe(4);
   });
 
   test("a closed port is not up, and the error is connection-class so the retry ladder sees it", async () => {

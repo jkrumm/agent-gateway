@@ -60,7 +60,9 @@ import {
 import {
   getOpencodeServerStatus,
   OPENCODE_AGENT_IMPLEMENT,
+  OPENCODE_AGENT_CHECK,
   OPENCODE_AGENT_READONLY,
+  OPENCODE_AGENT_TOOLLESS,
   OPENCODE_SESSION_BLANKED_ENV,
   opencodeProviderForWire,
   readServerPassword,
@@ -770,7 +772,8 @@ function validateAttemptOptions(
   // opencode-server.ts) has no per-tool-name allow/deny surface to extend, unlike claude's
   // `--disallowedTools`. A caller that starts doing so needs this module updated, not a
   // silently-ignored option.
-  if (extraDisallowedTools && extraDisallowedTools.length > 0) {
+  // (`toolless` is the one exception: the same intent, expressed as the `agw-toolless` profile.)
+  if (extraDisallowedTools && extraDisallowedTools.length > 0 && !opts.toolless) {
     throw new Error(
       "runOpencodeAttempt: extraDisallowedTools is not supported on the opencode harness",
     );
@@ -902,6 +905,16 @@ interface AcquireInput {
   trace: AttemptTrace;
 }
 
+/** The permission profile a session runs under: implement unless `readOnly`; a read-only session
+ *  that `runsChecks` also gets the build/test runners. */
+function opencodeAgentFor(
+  opts: Pick<SessionOptions<unknown>, "readOnly" | "runsChecks" | "toolless">,
+): string {
+  if (opts.toolless) return OPENCODE_AGENT_TOOLLESS;
+  if (!opts.readOnly) return OPENCODE_AGENT_IMPLEMENT;
+  return opts.runsChecks ? OPENCODE_AGENT_CHECK : OPENCODE_AGENT_READONLY;
+}
+
 /** Re-attach to the session the caller or the ledger names, or create one. A ledger session the
  *  server DEFINITELY no longer has (HTTP 404: state wiped, pruned) is not an error: forget it and
  *  start the call over. Anything else — a refused connection, a timeout, a 5xx — says nothing
@@ -943,7 +956,7 @@ async function acquireSession(a: AcquireInput): Promise<SessionPlan> {
       id: base.model,
       variant: a.variant,
     },
-    agent: opts.readOnly ? OPENCODE_AGENT_READONLY : OPENCODE_AGENT_IMPLEMENT,
+    agent: opencodeAgentFor(opts),
     title: `agw ${base.tool ?? "episode"}`,
     metadata: { agw: { jobId: base.jobId, tool: base.tool } },
   });
