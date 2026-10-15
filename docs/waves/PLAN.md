@@ -240,16 +240,16 @@ warden, agent-gateway and dotfiles. Before editing a repo, check `rd agents` and
 - **Review (jobs 6931fff0 … + HEAD~1) not taken:** unifying the v1/v2 model-entry builders and the sync script's duplicated cost shaping, `summarizeOpencodeMessages` model param required, cacheWrite on the Claude-wire entries (not priced through OpenCode), the session-runner↔opencode-runner import cycle (pre-existing), bench-script style nits (nested ternaries, `sync-opencode-config`/bench scripts unreferenced by a Makefile target).
 - **Open:** 2.0.29 upgrade still undecided; review-angle recall is a regex-hint proxy (read `findings.json` for a real A/B before moving `frontend`); the >100K surcharge is unmeasured against IU's actual invoice (no gateway `usage.cost` on the Anthropic leg).
 
-## Wave 6 — decision model for warden triage, in shadow            <!-- status: active -->
-- [ ] Add an agw `decide` job/route using `@ai-sdk/typesafe-ai` on IU's decision API,
+## Wave 6 — decision model for warden triage, in shadow            <!-- status: partial -->
+- [x] Add an agw `decide` job/route using `@ai-sdk/typesafe-ai` on IU's decision API,
       mirroring email-gateway's Jev lane, including cost computation and usage records.
       Warden calls it through its agw client.
-- [ ] Build the **context**, which is the whole game because the model cannot search:
+- [x] Build the **context**, which is the whole game because the model cannot search:
       the incoming item, every same-repo candidate (title, summary, rootCause, state,
       linked PR/branch, last activity), the recent merged PRs for the fixed_by sweep,
       and the repo's one-line purpose. Budget it per model's context and log what was
       truncated.
-- [ ] Add questions for the triage action (attach/new/fixed_by/ignore), the attach
+- [x] Add questions for the triage action (attach/new/fixed_by/ignore), the attach
       target (a choice over candidate ids) and fixed_by (per waiting item). Run them in
       **shadow** next to the LLM triage, recording both answers plus confidence in the
       ledger.
@@ -259,9 +259,19 @@ warden, agent-gateway and dotfiles. Before editing a repo, check `rd agents` and
       agreement, then the decision model decides above confidence C with LLM fallback
       below.
 - [ ] Gate, deploy and verify: real intake items show shadow decisions in the ledger.
-**Left behind:**
+**Left behind:** PARTIAL — code shipped, live proof and the model comparison are open (the orchestrator closed the wave out early).
+- **agw (05ff9db; route fix 349dc9a):** `decide` job — `server/lib/decision.ts` (`runDecision`, `DECISION_MODELS` rates + `maxStateChars`), `server/jobs/handlers/decide.ts`, wired in types/executor/store recovery; HTTP-only (no MCP tool/CLI yet). AGENTS.md §Decide. `ai@7.0.137` + `@ai-sdk/typesafe-ai@3.0.17` added. Live wire facts: IU's own `confidence` per choice differs from the option probability (0.18 vs 0.59 on a coin-flip) — the runner uses `providerMetadata.typesafe.confidence`; booleans come back as `noul`/`probability`. Measured: `pplx-decider-v1-27b` 0.8–1.6 s, ~$0.00001/call; `decision-1-eu` 0.4 s, ~$0.000006. A live `decide` job (3bb4b916) returned correct typed answers on the first deployed build and wrote a `decide` row to the `agent-gateway-iu` sink. Also fixed a Wave 5 lint error (`scripts/bench-routes.ts` `new Array`) that was failing `make check`.
+- **Bug found live:** `POST /api/jobs` checked a per-job `decide.model` against the chat-model registry (400 `not a verified registry model`). Fixed (`server/routes/jobs.ts` exempts `decide`, test in `tests/jobs-submit-model.test.ts`), `make check` green (1480 tests) — **but the fix is not live**: my graceful `POST /api/shutdown` drain was still waiting on one foreign `review` (f5b3687d) at close-out, with 11 jobs pending behind it (warden's triage/dispatch among them). The orchestrator reported agw back; `/api/jobs/health` still said `draining: true`, `sinceBootMs` ~16 min. **First step of whoever continues: confirm `sinceBootMs` is small and `draining` false, then `curl` a `decide` job with `"model":"pplx-decider-v1-27b"` → 200.**
+- **warden (6126803, pushed, NOT deployed, live ledger still v20):** ledger v21 `decision_shadow`; `scripts/lifecycle/shadow.py` (context builder — event, same-repo open items with title/summary/root cause/state/PR/last activity, fixed items with PR titles, repo one-liner; 24k-char budget cut fixed-first, cut counts stored in `context_json`; private repos never reach the model); hooks in `loop/triaging.py` (submit after the triage job, `record_llm` in the fold, `settle` in `poll_triage_jobs`) and `loop/verify.py` (sweep: one boolean per waiting item, cap 16); every shadow failure is a stderr line, never a strike. Questions: `action`, `attach_target`, `fixed_by_target` (with a `none` option). Report: `python3 scripts/lifecycle/shadow.py report`. `tests/test_shadow.py` 8/8; `tests/test_warden_cli.py` now expects `triage, decide, dispatch`; `make check` green before the last commit.
+- **Still to do for Wave 6 (do these before calling it done):**
+  1. After agw is verified live: `make deploy` in warden (migrates to v21), then show real shadow rows: `sqlite3 ~/.warden/warden.db "select kind,event_id,model,status from decision_shadow"` after the next intake tick.
+  2. `WARDEN_DB=<copy of warden.db> .venv/bin/python3 scripts/shadow-replay.py` (copy was at `/tmp/replay.db`, migrated to v21) — compares `pplx-decider-v1-27b`, `decision-1-eu`, `decision-1`, `clef-eu` on 100 labelled items (10 duplicate, 2 fixed_by, 34 ignored, 40 sampled `new`); caveats are in the script header (candidates limited to the item's true repo). Not run: the route bug blocked it.
+  3. Write `warden/docs/decision-shadow.md` with the measured table and the **promotion rule** (suggested shape: ≥ 50 settled shadow triage rows, action agreement ≥ 90% on rows with decision confidence ≥ 0.95, attach-target agreement ≥ 90%; then the decision model decides above confidence C with the LLM triage as fallback below). Not written — no data yet, so I will not invent thresholds.
+  4. Sweep shadow is wired but only produces rows when a fix merges.
+- **Cost of my deploy:** the drain stalled warden's queue for ~16 min and counting. The first drain was needed (jobs never left a gap); the second was for a route fix. Prefer batching a fix with the next deploy.
+- **Review:** `/review` was not run on this wave's diff.
 
-## Wave 7 — no stale word left            <!-- status: pending -->
+## Wave 7 — no stale word left            <!-- status: active -->
 - [ ] Update every doc that describes the old spawn model or the DeepSeek-only tiers.
       Known list:
       - agent-gateway `docs/routing-and-quota.md`, `README.md`, `AGENTS.md`
