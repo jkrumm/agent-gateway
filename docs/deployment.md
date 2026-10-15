@@ -219,7 +219,7 @@ module-scope state, so it always resets to `false` the moment the fresh process 
 though the backlog of `pending` rows it left behind (their `created_at` predating the restart by
 up to the prior drain window) is still there. `evaluateJobHealth()` also grants the same
 `oldestPendingAgeMs` exemption for `BOOT_HEALTH_GRACE_MS` (5 min) after this process started —
-long enough for the `MAX_CONCURRENT`-wide queue to work through a typical post-restart backlog —
+long enough for the `MAX_CONCURRENT`-wide (session lane) queue to work through a typical post-restart backlog —
 so the first few minutes after an ordinary reload don't page for a queue that is draining
 normally, just from an old baseline.
 

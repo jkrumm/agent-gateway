@@ -138,6 +138,12 @@ logger.info(
   `agent-gateway running on ${HOSTNAME}:${PORT}`,
 );
 
+// Drain waits for every running job, whichever admission lane it is in.
+const totalRunning = (): number => {
+  const stats = queueStats();
+  return stats.running + stats.singleShot.running;
+};
+
 // One drain state machine, two triggers, each with its own window (see lib/shutdown.ts's
 // two-window note for the "why"):
 //
@@ -175,7 +181,7 @@ logger.info(
 const shutdownController = createShutdownController({
   terminateActiveSessions,
   activeSessionCount,
-  queueStats: () => ({ running: queueStats().running }),
+  queueStats: () => ({ running: totalRunning() }),
   setDraining,
   markDrainKilled,
   markDrainCompleted,
@@ -229,7 +235,7 @@ process.on("SIGINT", () => onSignal("signal", "forced", 0));
 // graceMs }` mapping itself lives in `httpShutdownParams` (lib/shutdown.ts), not inline here, so
 // it's unit-testable independent of this file's module-scope side effects.
 registerShutdownTrigger((force) => {
-  const { running } = queueStats();
+  const running = totalRunning();
   const { origin, mode, graceMs } = httpShutdownParams(force);
   onSignal(origin, mode, graceMs);
   return { running };

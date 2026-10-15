@@ -122,6 +122,8 @@ describe("evaluateJobHealth", () => {
   const base = {
     running: 0,
     pending: 0,
+    max: 3,
+    singleShot: { running: 0, pending: 0, max: 6, oldestPendingAgeMs: null as number | null },
     failedLastHour: 0,
     interruptedLastHour: 0,
     oldestPendingAgeMs: null,
@@ -134,6 +136,18 @@ describe("evaluateJobHealth", () => {
 
   test("healthy by default", () => {
     expect(evaluateJobHealth(base).ok).toBe(true);
+  });
+
+  test("a single-shot lane row waiting >15 min trips it on its own, and a drain still exempts it", () => {
+    const stuck = { ...base.singleShot, oldestPendingAgeMs: 15 * 60 * 1000 + 1 };
+    expect(evaluateJobHealth({ ...base, singleShot: stuck }).ok).toBe(false);
+    expect(
+      evaluateJobHealth({
+        ...base,
+        singleShot: { ...stuck, oldestPendingAgeMs: 15 * 60 * 1000 },
+      }).ok,
+    ).toBe(true);
+    expect(evaluateJobHealth({ ...base, singleShot: stuck, draining: true }).ok).toBe(true);
   });
 
   test("three failures in the hour trip it; two do not", () => {
@@ -214,6 +228,7 @@ describe("jobHealth against an empty store", () => {
       failedLastHour: 0,
       interruptedLastHour: 0,
       oldestPendingAgeMs: null,
+      singleShot: { running: 0, pending: 0, oldestPendingAgeMs: null },
       lastFailure: null,
       draining: false,
       // No prior process wrote the drain_completed marker for this fresh test DB — this boot

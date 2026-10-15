@@ -233,10 +233,16 @@ checked both as a file compare and against launchd's own live
 out first so that bootstrap reliably takes, waits for the old PID to
 actually exit before copying the plist and bootstrapping, and now fails
 loudly — rather than reporting success unconditionally — if the new
-instance never comes up on `:7705`) does. A **global concurrency
-cap** (`AGENT_GATEWAY_JOB_CONCURRENCY`, default 3) queues excess submissions as
+instance never comes up on `:7705`) does. A **concurrency
+cap per admission lane** (`laneOf(tool)` in `server/jobs/store.ts`) queues excess submissions as
 `pending` so parallel agents can't trip the IU unified endpoint's rate
-limits — while draining, that queue backs up too, which `GET
+limits. The **session lane** (every tool but the two below; `AGENT_GATEWAY_JOB_CONCURRENCY`,
+default 3) is the original cap. The **single-shot lane** (`triage`, `decide` — one tool-less IU
+request each, no worker session; `AGENT_GATEWAY_SINGLE_SHOT_CONCURRENCY`, default 6) does NOT
+count against the session cap, so a warden shadow `decide` never waits behind a 10-minute
+`review`. `promote()` walks pending rows oldest first and admits a row when ITS lane has room (FIFO
+per lane; a full lane never blocks the other). `review_router` is not a job, it runs inside the
+`review` job. While draining, the queue backs up too, which `GET
 /api/jobs/health`'s `draining: true` flag distinguishes from a wedged queue.
 
 **Durable and steerable OpenCode episodes (Wave 4, `docs/opencode-v2.md`).** A drain/restart
@@ -287,11 +293,14 @@ Job lifecycle events log to `~/Library/Logs/agent-gateway.jsonl` (`job.create` /
 `job.start` / `job.done` / `job.fail` / `job.cancelled` / `job.recover` /
 `job.requeue` / `job.shutdown_abandoned` / `job.lease_unavailable`). Inspect the queue:
 `curl -s localhost:7705/api/jobs | jq`.
-**`GET /api/jobs/health`** → `{ ok, running, pending, failedLastHour,
+**`GET /api/jobs/health`** → `{ ok, running, pending, max, singleShot: { running, pending, max,
+oldestPendingAgeMs }, failedLastHour,
 interruptedLastHour, oldestPendingAgeMs, leaseQueued, lastFailure, draining, sinceBootMs,
-recoveredFromDrain }` (`leaseQueued` counts pending rows waiting behind a per-repo implement
+recoveredFromDrain }` (`running`/`pending`/`max`/`oldestPendingAgeMs` are the session lane;
+`singleShot` is the `triage`/`decide` lane with its own oldest-waiting age;
+`leaseQueued` counts pending rows waiting behind a per-repo implement
 lease; they are excluded from `oldestPendingAgeMs`), `ok: false` when ≥3 jobs failed in the last hour, or
-the oldest pending job has waited >15 min **and neither grace applies**: a
+the oldest pending job in EITHER lane has waited >15 min **and neither grace applies**: a
 drain intentionally stalls promotion, so queue backup alone never trips it
 while one is in flight (`draining: true`); the same backlog also gets a
 `BOOT_HEALTH_GRACE_MS` (5 min) pass right after a restart, but **only** when

@@ -48,6 +48,22 @@ mkdirSync(dirname(DB_PATH), { recursive: true });
 // an agent firing N parallel jobs from tripping the endpoint's rate limits.
 const MAX_CONCURRENT = parseInt(process.env.AGENT_GATEWAY_JOB_CONCURRENCY ?? "3", 10);
 
+// Single-shot lane: `triage`/`decide` are one non-agentic IU request each (no worker session, no
+// tool loop), so they neither load the endpoint like a session does nor deserve to wait behind a
+// 10-minute `review`. They are admitted against their own cap and do NOT count in MAX_CONCURRENT.
+const MAX_SINGLE_SHOT = parseInt(process.env.AGENT_GATEWAY_SINGLE_SHOT_CONCURRENCY ?? "6", 10);
+
+export type JobLane = "single_shot" | "session";
+
+const SINGLE_SHOT_TOOLS: ReadonlySet<string> = new Set<JobTool>(["triage", "decide"]);
+
+/** Admission lane of a job tool. `single_shot` = a tool-less completion (`triage`, `decide`);
+ *  everything else runs a worker session (or is otherwise heavy) and shares MAX_CONCURRENT.
+ *  `review_router` is not a job — it runs inside the `review` job, so it has no lane of its own. */
+export function laneOf(tool: string): JobLane {
+  return SINGLE_SHOT_TOOLS.has(tool) ? "single_shot" : "session";
+}
+
 // Retention: keep terminal jobs queryable for a while after they finish, then GC.
 const PRUNE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_TERMINAL_ROWS = 200;
@@ -175,6 +191,24 @@ db.run(`
 // `status` column is the source of truth for persistence; this set drives the
 // concurrency gate cheaply without re-querying on every promotion tick.
 const runningIds = new Set<string>();
+/** The single-shot-lane subset of `runningIds` (kept inside it so drain still sees every
+ *  running job); the session lane's count is `runningIds.size - singleShotRunningIds.size`. */
+const singleShotRunningIds = new Set<string>();
+
+function runningInLane(lane: JobLane): number {
+  return lane === "single_shot"
+    ? singleShotRunningIds.size
+    : runningIds.size - singleShotRunningIds.size;
+}
+
+function laneHasRoom(lane: JobLane): boolean {
+  return runningInLane(lane) < (lane === "single_shot" ? MAX_SINGLE_SHOT : MAX_CONCURRENT);
+}
+
+function forgetRunning(id: string): void {
+  runningIds.delete(id);
+  singleShotRunningIds.delete(id);
+}
 
 /** Jobs that hold a per-repo implement lease (`server/lib/repo-lease.ts`), job id → the `cwd`
  *  it was taken under. Acquired by `promote()` the instant a job is admitted, released by
@@ -258,6 +292,7 @@ export function __resetForTests(): void {
   drainKilledIds.clear();
   cancelRequested.clear();
   runningIds.clear();
+  singleShotRunningIds.clear();
   leasedCwdByJob.clear();
   leaseQueueLogged.clear();
   __resetRepoLeasesForTests();
@@ -547,12 +582,39 @@ export function latestJobResult(tool: JobTool): { result: unknown; finishedAt: n
   return { result: JSON.parse(row.result), finishedAt: row.finished_at ?? row.created_at };
 }
 
+/** Per-lane queue depth. The top-level `running`/`pending`/`max` are the SESSION lane (the
+ *  original semantics, `AGENT_GATEWAY_JOB_CONCURRENCY`); `singleShot` is the `triage`/`decide`
+ *  lane (`AGENT_GATEWAY_SINGLE_SHOT_CONCURRENCY`). */
+export interface QueueStats {
+  running: number;
+  pending: number;
+  max: number;
+  singleShot: { running: number; pending: number; max: number };
+}
+
 /** Snapshot of queue depth — for monitoring/logging. */
-export function queueStats(): { running: number; pending: number; max: number } {
-  const pending =
-    db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM jobs WHERE status = 'pending'").get()
-      ?.n ?? 0;
-  return { running: runningIds.size, pending, max: MAX_CONCURRENT };
+export function queueStats(): QueueStats {
+  const pendingByTool = db
+    .query<{ tool: string; n: number }, []>(
+      "SELECT tool, COUNT(*) AS n FROM jobs WHERE status = 'pending' GROUP BY tool",
+    )
+    .all();
+  let singleShotPending = 0;
+  let sessionPending = 0;
+  for (const { tool, n } of pendingByTool) {
+    if (laneOf(tool) === "single_shot") singleShotPending += n;
+    else sessionPending += n;
+  }
+  return {
+    running: runningInLane("session"),
+    pending: sessionPending,
+    max: MAX_CONCURRENT,
+    singleShot: {
+      running: runningInLane("single_shot"),
+      pending: singleShotPending,
+      max: MAX_SINGLE_SHOT,
+    },
+  };
 }
 
 // ── Health (GET /api/jobs/health — read by dotfiles' devhost-health) ─────────
@@ -561,12 +623,17 @@ const FAILED_LAST_HOUR_LIMIT = 3;
 const OLDEST_PENDING_LIMIT_MS = 15 * 60 * 1000;
 
 export interface JobHealthStats {
+  /** Session lane (`running`/`pending`/`max` keep their pre-lane meaning). */
   running: number;
   pending: number;
+  max: number;
+  /** The single-shot lane (`triage`/`decide`) with its own oldest-waiting age: a single-shot
+   *  waiting >15 min for one of its slots pages exactly like a session job does. */
+  singleShot: { running: number; pending: number; max: number; oldestPendingAgeMs: number | null };
   failedLastHour: number;
   interruptedLastHour: number;
-  /** Age of the oldest `pending` row that is waiting for a concurrency slot, or null when none
-   *  is. A row queued behind a per-repo implement lease (`leaseQueued`) is NOT counted: it is
+  /** Age of the oldest session-lane `pending` row that is waiting for a concurrency slot, or null
+   *  when none is. A row queued behind a per-repo implement lease (`leaseQueued`) is NOT counted: it is
    *  waiting for a legitimately long-running episode (30 min+), not for a wedged queue. */
   oldestPendingAgeMs: number | null;
   /** `pending` rows waiting on a per-repo implement lease (`queuedBehind` on the job view). They
@@ -604,8 +671,8 @@ export function evaluateJobHealth(stats: JobHealthStats): JobHealth {
   const pendingAgeExempt =
     stats.draining ||
     (stats.recoveredFromDrain && stats.sinceBootMs < BOOT_HEALTH_GRACE_MS) ||
-    stats.oldestPendingAgeMs === null ||
-    stats.oldestPendingAgeMs <= OLDEST_PENDING_LIMIT_MS;
+    ((stats.oldestPendingAgeMs ?? 0) <= OLDEST_PENDING_LIMIT_MS &&
+      (stats.singleShot.oldestPendingAgeMs ?? 0) <= OLDEST_PENDING_LIMIT_MS);
   const ok = stats.failedLastHour < FAILED_LAST_HOUR_LIMIT && pendingAgeExempt;
   return { ok, ...stats };
 }
@@ -625,17 +692,21 @@ export function jobHealth(now = Date.now()): JobHealth {
   // `JobHealthStats.leaseQueued`. The first row that is NOT lease-blocked is the oldest one a
   // wedged queue could be holding back.
   const slotWaiting = pendingRows.filter((r) => leaseBlockerOf(rowToRecord(r)) === undefined);
-  const oldestPending = slotWaiting[0];
+  const oldestSession = slotWaiting.find((r) => laneOf(r.tool) === "session");
+  const oldestSingleShot = slotWaiting.find((r) => laneOf(r.tool) === "single_shot");
+  const ageOf = (row: JobRow | undefined) => (row ? Math.max(0, now - row.created_at) : null);
+  const stats = queueStats();
   const lastFailed = db
     .query<JobRow, []>(
       "SELECT * FROM jobs WHERE status = 'failed' ORDER BY finished_at DESC LIMIT 1",
     )
     .get();
   return evaluateJobHealth({
-    ...queueStats(),
+    ...stats,
+    singleShot: { ...stats.singleShot, oldestPendingAgeMs: ageOf(oldestSingleShot) },
     failedLastHour: count("failed"),
     interruptedLastHour: count("interrupted"),
-    oldestPendingAgeMs: oldestPending ? Math.max(0, now - oldestPending.created_at) : null,
+    oldestPendingAgeMs: ageOf(oldestSession),
     leaseQueued: pendingRows.length - slotWaiting.length,
     lastFailure: lastFailed
       ? {
@@ -652,7 +723,11 @@ export function jobHealth(now = Date.now()): JobHealth {
 
 // ── Scheduler ────────────────────────────────────────────────────────────────
 
-/** Promote pending jobs to running while concurrency slots remain — never while draining.
+/** Promote pending jobs to running while their lane has room — never while draining.
+ *
+ *  Two lanes (`laneOf`): worker/session jobs share MAX_CONCURRENT, single-shot jobs
+ *  (`triage`/`decide`) have their own cap. A row is admitted when ITS lane has room, so a full
+ *  lane never blocks a younger row of the other lane; per lane the order is FIFO.
  *
  *  Oldest first, with ONE exception: an implement-class job (`repoLeaseCwdFor`) whose repo's
  *  lease another job holds is skipped, not started — it stays `pending` (`queuedBehind` on its
@@ -662,12 +737,13 @@ export function jobHealth(now = Date.now()): JobHealth {
  *  is acquired only after the concurrency check, so a full queue never strands a lease. */
 function promote(): void {
   if (!executor || draining) return;
-  if (runningIds.size >= MAX_CONCURRENT) return;
+  if (!laneHasRoom("session") && !laneHasRoom("single_shot")) return;
   const rows = db
     .query<JobRow, []>("SELECT * FROM jobs WHERE status = 'pending' ORDER BY created_at ASC")
     .all();
   for (const row of rows) {
-    if (runningIds.size >= MAX_CONCURRENT) return;
+    const lane = laneOf(row.tool);
+    if (!laneHasRoom(lane)) continue;
     if (!acquireJobLease(row)) continue;
 
     const now = Date.now();
@@ -676,6 +752,7 @@ function promote(): void {
       [now, row.id],
     );
     runningIds.add(row.id);
+    if (lane === "single_shot") singleShotRunningIds.add(row.id);
     leaseQueueLogged.delete(row.id);
     const job = rowToRecord({
       ...row,
@@ -780,7 +857,7 @@ async function execute(job: JobRecord): Promise<void> {
       // `GET /api/jobs/health` on every ordinary reload that happens to catch a job mid-flight
       // — the exact false-alarm class that route exists to avoid.
       drainKilledIds.delete(job.id);
-      runningIds.delete(job.id);
+      forgetRunning(job.id);
       releaseJobLease(job.id);
       logger.warn(
         {
@@ -997,7 +1074,7 @@ function finish(
     job.id,
   ]);
   recordJobStats(job.id);
-  runningIds.delete(job.id);
+  forgetRunning(job.id);
   releaseJobLease(job.id);
   leaseQueueLogged.delete(job.id);
   logger.info(jobFinishLogFields(job, status, outcome, now), `job ${status}`);

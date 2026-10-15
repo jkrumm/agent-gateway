@@ -50,7 +50,7 @@ export async function computeHealth(
   const reasons: string[] = [];
   if (!health.ok) {
     reasons.push(
-      `queue unhealthy (failedLastHour=${health.failedLastHour}, oldestPendingAgeMs=${health.oldestPendingAgeMs})`,
+      `queue unhealthy (failedLastHour=${health.failedLastHour}, oldestPendingAgeMs=${health.oldestPendingAgeMs}, singleShotOldestPendingAgeMs=${health.singleShot.oldestPendingAgeMs})`,
     );
   }
   if (degradedRoutes.length > 0) reasons.push(`degraded routes: ${degradedRoutes.join(", ")}`);
