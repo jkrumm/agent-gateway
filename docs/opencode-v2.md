@@ -9,9 +9,10 @@ the executable form of this page and the upgrade gate (below).
 server (`com.jkrumm.agent-gateway-opencode`, `server/mcp/opencode-server.ts`), driven over HTTP by
 `runOpencodeAttempt` through the `OpencodeClient` port (`server/mcp/opencode-client.ts`): create →
 environment → prompt → wait → messages. No `opencode run` child process, no NDJSON parser, no CLI
-fallback. Since Wave 4 a drain detaches a worktree dispatch's session (it keeps running on the
-server), the next boot re-attaches it, and `POST /api/jobs/:id/steer` injects new facts into a
-running episode.
+fallback. Since Wave 4 a drain detaches a dispatch's session (it keeps running on the server), the
+next boot re-attaches it, and `POST /api/jobs/:id/steer` injects new facts into a running episode.
+Since Wave 9 that holds for EVERY OpenCode session run under a job (in-place dispatch, review
+angles, any other OpenCode-harness tool): a reload no longer waits for them (§ Durability).
 
 ## Measured
 
@@ -154,20 +155,49 @@ the idle watchdog is the only kill; a refused connection or an HTTP/schema error
 once. Cancel and drain call the session's registered `stop` (`trackExternalSession`), which
 interrupts it.
 
-**Durability (Wave 4, shipped).** A dispatch worktree episode runs with `reattachable: true`. On a
-drain/SIGTERM (`terminateActiveSessions` → `stop("drain")`) its session is DETACHED: not
-interrupted, still running on the shared server, `SessionDetachedError` thrown, so the dispatch
-handler skips salvage and worktree teardown and the job stays `running` for the next boot. A job
-cancel (`stop("cancel")`) still interrupts. `recover()` keeps `session_id` + `worktree_meta`
-(requeue-for-resume, as for the claude harness) and `runOpencodeAttempt` re-attaches by state:
-the session is in `GET /api/session/active` → wait only (no prompt, no environment call); newest
-message is a `succeeded` idle → it finished while agw was down, read the result; otherwise (cut
-off, e.g. a killed server) `prompt {resume:true}`. `session.opencode_reattach` logs the mode. A
-detach writes no attribution row (the attaching attempt reads the whole turn, so nothing bills
-twice); a resumed attempt after an earlier COUNTED attempt can still double-count that attempt's
-turns — rare, accepted. A detached session whose job is NOT resumed (recover → `interrupted`, or a
-fresh re-run) is interrupted on boot so it cannot keep editing an orphaned worktree. In-place
-episodes and non-dispatch tools are never `reattachable`: a drain interrupts them as before.
+**Durability (Wave 4 for dispatch, Wave 9 for every session under a job).** A drain detaches an
+OpenCode session instead of interrupting it, at the START of the drain
+(`createShutdownController.begin()` → `detachRemoteSessions()`, session-runner.ts): the session is
+not interrupted, keeps running on the shared server, `SessionDetachedError` is thrown out of
+`runOpencodeAttempt`, the owning jobs get a durable `detached_at` marker, and the drain waits only
+for the jobs it cannot detach (`drainBlockers`: `claude -p` sessions, check steps, single-shot
+requests, jobs between phases). A session registered after the drain began (or an attempt that starts
+then) detaches before creating anything; a session detached between its creation and its prompt sends
+no prompt. A job cancel (`stop("cancel")`) still interrupts; so does a session with no job id (nothing
+can re-attach it). A detach skips the post-run message read: the attaching attempt reads the whole
+session, so nothing bills twice.
+
+Re-attach is by state, identical for every caller (`runOpencodeAttempt`): the session is in
+`GET /api/session/active` → wait only (no prompt, no environment call); newest message is a
+non-failed `idle` → it finished while agw was down, read the result; otherwise, when it has
+messages (cut off, e.g. a killed server) `prompt {resume:true}`; with no message at all it is
+prompted as a first prompt. `session.opencode_reattach` logs the mode (and `fromLedger`). Who hands
+the session id back:
+
+- **dispatch** — the job row (`session_id` via `onSessionId`, plus `worktree_meta`); `recover()` keeps
+  both and the handler passes `resumeSessionId` with the continuation nudge. Worktree episodes skip
+  salvage and teardown on a detach. **In-place** episodes resume too: their `worktree_meta` marker
+  persists the pre-episode `InPlaceSnapshot` (`{ path, workspace: "in-place", snapshot }`), so the
+  re-attached run attributes `applied_in_place` edits against the same baseline; without a persisted
+  snapshot (a row from before this change) or without the detach marker (a crash — the session may be
+  gone and the per-repo lease was process-local) the row stays `interrupted`, edits left uncommitted.
+- **every other tool** — the **session ledger** (`job_sessions`): `SessionOptions.reattachKey` names a
+  call; `runSession` extends it to `<key>:<call>.<attempt>` (the call ordinal makes a JSON-only retry
+  a second session; the attempt number keeps a transport-retried attempt from aliasing the failed
+  one) and `runOpencodeAttempt` records each created session and looks the key up before creating
+  one. A finished attempt `settle`s its row (usage already attributed → a re-attach writes no second
+  row), a failed one drops it (the re-run starts that call over); a ledger session gone from the
+  server is replaced, not an error. Rows die with the job (`finish`, boot `interrupted`/`cancelled`,
+  prune of orphans). Review keys: `angle:<name>`, `synthesis`; check, overview, excalidraw one key
+  each. A `ref`-mode review keeps its throwaway worktree on detach and the re-run reopens it.
+
+`recover()` requeues a `detached_at` row regardless of `attempts` and gives the attempt back — a
+detach is not a failure, and the requeue-once budget is for crashes (`docs/deployment.md` § OpenCode
+sessions are detached, not drained). A detached session whose job is NOT resumed (`recover` →
+`interrupted`/`cancelled`, or a fresh re-run) is interrupted on boot so it cannot keep editing an
+orphaned worktree. Known gap: a ledger re-run after a sibling detached re-runs a failed first
+attempt of an angle before reaching its detached second one (the failed row was dropped) — one wasted
+session, bounded by `ANGLE_MAX_ATTEMPTS`.
 
 **Steer (Wave 4, shipped).** `POST /api/jobs/:id/steer {text}` (MCP `job_steer`, CLI `agw steer
 <jobId> <text…|--file F|->`, `server/lib/steer.ts`) posts `delivery: "steer"` into the running

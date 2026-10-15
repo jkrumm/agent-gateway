@@ -622,6 +622,7 @@ export async function runCheck(
       tool: "check",
       jobId,
       isCancelled,
+      reattachKey: "check",
       jsonSchema: CHECK_JSON_SCHEMA,
       route: routeFor("check"),
       readOnly: true,

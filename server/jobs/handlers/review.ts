@@ -2,7 +2,7 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
-import { runSession, zodValidator } from "../../mcp/session-runner.ts";
+import { runSession, SessionDetachedError, zodValidator } from "../../mcp/session-runner.ts";
 import { routeFor, routeForReviewAngle } from "../../lib/routing.ts";
 import { textComplete } from "../../lib/iu-openai.ts";
 import { dataBlock, newFenceNonce } from "../../lib/prompt-fence.ts";
@@ -16,6 +16,7 @@ import { parseParams } from "./util.ts";
 import {
   createReadWorktree,
   opencodeRepoConfigPresent,
+  PROJECT_SETTINGS_FILES,
   removeWorktree,
   resolveRepoIdentity,
   restoreStrippedSettings,
@@ -86,7 +87,8 @@ JSON object specified above. Your entire message must be a single JSON object (o
 wrapped in one \`\`\`json fence) — no preamble such as "Here's the verdict", no markdown
 headings, no commentary before or after. Emit it as your final message and stop.`;
 
-/** Run `fn` over `items` with at most `limit` in flight. Preserves input order. */
+/** Run `fn` over `items` with at most `limit` in flight. Preserves input order. After one call
+ *  throws (a cancel, a drain detach) no further item is started: the run is already lost. */
 async function mapWithConcurrency<T, R>(
   items: T[],
   limit: number,
@@ -94,11 +96,17 @@ async function mapWithConcurrency<T, R>(
 ): Promise<R[]> {
   const results: R[] = [];
   let next = 0;
+  let aborted = false;
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (true) {
+    while (!aborted) {
       const i = next++;
       if (i >= items.length) return;
-      results[i] = await fn(items[i]);
+      try {
+        results[i] = await fn(items[i]);
+      } catch (err) {
+        aborted = true;
+        throw err;
+      }
     }
   });
   await Promise.all(workers);
@@ -906,6 +914,36 @@ async function runAdversaryAngle(opts: {
 
 // ── Core ───────────────────────────────────────────────────────────────────────
 
+/** Boot-recovery plumbing for a `pr`/`branch` review (`store.ts` `recover()` → `executor.ts`).
+ *  A drain detaches the angle sessions and keeps the throwaway worktree they are reading, so
+ *  `worktreeMeta` (the persisted `DispatchWorktree`) is the worktree to reopen instead of cutting
+ *  a new one; `onWorktreeReady` persists it the instant it exists. Both optional: a direct call
+ *  has neither, and a review in scope mode has no worktree. */
+export interface ReviewResumeContext {
+  worktreeMeta?: Record<string, unknown> | null;
+  onWorktreeReady?: (meta: DispatchWorktree) => void;
+}
+
+/** The persisted worktree a re-run may reopen: well-formed AND still on disk (a crash's was
+ *  swept at boot, which `recover()` already cleared from the row — this is the belt). */
+function reusableWorktree(
+  meta: Record<string, unknown> | null | undefined,
+): DispatchWorktree | undefined {
+  if (!meta) return undefined;
+  const { path, branch, base, baseRef, pushable } = meta;
+  if (
+    typeof path !== "string" ||
+    typeof branch !== "string" ||
+    typeof base !== "string" ||
+    typeof baseRef !== "string" ||
+    typeof pushable !== "boolean" ||
+    !existsSync(path)
+  ) {
+    return undefined;
+  }
+  return { path, branch, base, baseRef, pushable };
+}
+
 /** Multi-angle code review pipeline: data gather → parallel angle sessions →
  *  synthesis. Returns structured findings. Throws on git-diff failure (bad
  *  scope/not a repo) or synthesis failure; no-changes and all-angles-failed are
@@ -923,6 +961,7 @@ export async function runReview(
   onProgress?: ProgressSink,
   jobId?: string,
   isCancelled?: (jobId: string) => boolean,
+  resumeCtx?: ReviewResumeContext,
 ): Promise<ReviewOutput> {
   const { cwd, scope, context, angles, pr, branch, model } = parseParams(REVIEW_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
@@ -979,6 +1018,9 @@ export async function runReview(
   // exit (throw, all-angles-failed) never leaves `ocr` reading a worktree being torn down.
   let ocrAbort: AbortController | undefined;
   let ocrPromise: Promise<RunOcrReviewResult> | undefined;
+  // A drain detached an angle session: the sessions keep running in `worktree`, so the `finally`
+  // must leave it (and its restored-settings state) alone for the next boot's re-run to reopen.
+  let detachedForRestart = false;
 
   try {
     // Every downstream git/session call runs in `effectiveCwd`: the caller's own checkout for
@@ -994,13 +1036,24 @@ export async function runReview(
     let baseOid: string | undefined;
 
     if (refMode) {
-      bump("fetching ref");
-      const headOid = await fetchReviewHead(cwd, jobKey, { pr, branch }, () => {
-        fetchRefCreated = true;
-      });
-      ({ baseOid } = await resolveReviewBase(cwd));
-      bump("checking out worktree");
-      worktree = await createReadWorktree(cwd, jobKey, headOid);
+      const reopened = reusableWorktree(resumeCtx?.worktreeMeta);
+      if (reopened) {
+        // A re-run after a drain detached the angle sessions: they are still reading this
+        // worktree, so reopen it as it is. It was stripped by the run a restart interrupted
+        // (the strip below finds nothing) — restore every settings path at the end.
+        bump("reopening worktree");
+        ({ baseOid } = await resolveReviewBase(cwd));
+        worktree = reopened;
+      } else {
+        bump("fetching ref");
+        const headOid = await fetchReviewHead(cwd, jobKey, { pr, branch }, () => {
+          fetchRefCreated = true;
+        });
+        ({ baseOid } = await resolveReviewBase(cwd));
+        bump("checking out worktree");
+        worktree = await createReadWorktree(cwd, jobKey, headOid);
+      }
+      resumeCtx?.onWorktreeReady?.(worktree);
       effectiveCwd = worktree.path;
       // A repo-local opencode config/plugin would execute the moment an opencode-harness
       // angle session loads this worktree (a `.opencode/` plugin runs regardless of the
@@ -1009,7 +1062,7 @@ export async function runReview(
       // worktree tiers use (`stripProjectSettings`/`restoreStrippedSettings`), not a second
       // implementation. Safe for the diff: ref mode compares commits (baseOid...HEAD), not the
       // working tree.
-      strippedSettings = stripProjectSettings(worktree);
+      strippedSettings = reopened ? [...PROJECT_SETTINGS_FILES] : stripProjectSettings(worktree);
       diffCmd = refDiffCommand(baseOid);
       filesCmd = refDiffFilesCommand(baseOid);
       fallowCmd = fallowCommand({ kind: "base", ref: baseOid });
@@ -1213,6 +1266,11 @@ export async function runReview(
             tool: "review:angle",
             jobId,
             isCancelled,
+            // A drain detaches this angle's session and the re-run re-attaches it through the
+            // job's session ledger. SessionDetachedError is deliberately NOT caught below: a
+            // detach is not an angle failure and must not burn the retry attempt — it unwinds
+            // the pipeline so the job is left for the next boot.
+            reattachKey: `angle:${agent.angle}`,
             route: angleRoute,
             model,
             jsonSchema: ANGLE_JSON_SCHEMA,
@@ -1346,6 +1404,7 @@ export async function runReview(
         tool: "review:synthesis",
         jobId,
         isCancelled,
+        reattachKey: "synthesis",
         route: routeFor("review"),
         model,
         jsonSchema: REVIEW_JSON_SCHEMA,
@@ -1452,6 +1511,9 @@ export async function runReview(
     );
 
     return { ...data, schemaVersion: REVIEW_SCHEMA_VERSION };
+  } catch (err) {
+    if (err instanceof SessionDetachedError) detachedForRestart = true;
+    throw err;
   } finally {
     ocrAbort?.abort();
     await ocrPromise;
@@ -1461,7 +1523,7 @@ export async function runReview(
     // in the caller's live repo, gated on two independent flags: `worktree` may not exist yet
     // even when the fetch ref does (a throw from `resolveReviewBase`/`createReadWorktree`
     // lands exactly there), so cleanup must not be gated on `worktree` alone.
-    if (worktree) {
+    if (worktree && !detachedForRestart) {
       // Put the stripped settings back before teardown — the worktree is discarded either
       // way, but this keeps the strip/restore contract symmetric with dispatch's (and leaves
       // a whole tree if `removeWorktree` itself fails).

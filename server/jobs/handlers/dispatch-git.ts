@@ -787,10 +787,14 @@ export interface DispatchWorktree {
 
 /** The marker persisted as an in-place episode's `worktree_meta` — recognized by the
  *  `workspace` key a real `DispatchWorktree` never carries (see `store.ts`'s `recover()` /
- *  `protectedWorktreePaths`). `path` is the LIVE repo root, not a worktree directory. */
+ *  `protectedWorktreePaths`). `path` is the LIVE repo root, not a worktree directory. `snapshot`
+ *  is the pre-episode baseline (`snapshotInPlace`): persisted so a drain-detached episode,
+ *  re-attached after the restart, attributes its edits against the same baseline
+ *  (`inPlaceChangedFiles`). A row without it (written before it was persisted) is never resumed. */
 export interface InPlaceWorktreeMarker {
   path: string;
   workspace: "in-place";
+  snapshot?: InPlaceSnapshot;
 }
 
 /** Everything `DispatchResumeContext.onWorktreeReady` may be called with: a worktree tier's

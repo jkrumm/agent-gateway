@@ -54,7 +54,8 @@ governs which window:
 Both constants live in `server/lib/shutdown.ts`; both are exercised by the SAME
 `createShutdownController` state machine (`server/index.ts` passes a different `graceMs` per
 trigger) — the drain/abort/escalation logic itself did not need to change, only how long each
-trigger is allowed to wait.
+trigger is allowed to wait. Since the zero-downtime reload both windows bound only the wait for the
+drain *blockers* — jobs that cannot be detached — not for OpenCode sessions (next section but one).
 
 A third, narrower kill surface sits alongside these two process-wide ones: `POST
 /api/jobs/:id/cancel` (`server/jobs/store.ts`'s `cancelJob`) SIGTERMs a single job's worker via
@@ -178,9 +179,52 @@ proceeds without waiting). The target now also polls the new instance's `/health
 `bootstrap` and exits non-zero with a pointer to the log if it never comes up, instead of the
 previous unconditional "installed and started."
 
+### OpenCode sessions are detached, not drained (zero-downtime reload)
+
+A drain used to wait for every running job because a worker had no checkpoint. An OpenCode session
+does: it lives on the shared OpenCode server (`com.jkrumm.agent-gateway-opencode`), a separate
+LaunchAgent a reload never touches. So the drain's first act (`createShutdownController.begin()` →
+`detachSessions`, `detachRemoteSessions()` in `session-runner.ts`) is to **detach every OpenCode
+session run under a job**: it stops being awaited, keeps running on the server, and its handler
+unwinds with `SessionDetachedError`. The affected jobs are marked durably first (`jobs.detached_at`,
+`markJobsDetached`), so even a SIGKILL a moment later leaves them requeueable. The drain then waits
+only for **`drainBlockers`** (`QueueStats`, exported in `/api/jobs/health`): running jobs that are not
+detachable-only — a live `claude -p` session, a `make check` step, a single-shot request, or a job
+between phases (it reaches its next OpenCode session, which detaches before creating anything, or it
+finishes). Review angles, a worktree or in-place dispatch and any other OpenCode-harness tool detach;
+a drain with only those in flight finishes immediately.
+
+What the next boot does (`recover()` in `store.ts`): a `running` row with `detached_at` is requeued
+**without spending its requeue-once budget** — whatever its `attempts`, for every tool, and the attempt
+the requeue would charge is given back, so repeated deploys never push a job toward `interrupted` and
+a later genuine crash still gets its one requeue. A crash (no marker) keeps today's rules. Dispatch
+resumes its recorded session; any other tool re-runs and finds its sessions in the ledger
+(`job_sessions`, written by `runOpencodeAttempt` under `SessionOptions.reattachKey`), re-attaching by
+state: live → wait, finished while down → read the result, cut off → `prompt {resume:true}`. Usage is
+attributed once (a detach writes no row; a ledger row already `settled` re-attaches silently). A
+ref-mode review keeps its read-only worktree across the restart (`worktree_meta`, protected from the
+boot sweep) and the re-run reopens it. An in-place dispatch resumes too, because its metadata marker
+carries the pre-episode snapshot; one without it (a crash, or a row from before it was persisted) is
+`interrupted` as before.
+
+`make reload`'s preflight (`scripts/reload-preflight.sh`) therefore refuses only while
+`drainBlockers - singleShot.running > 0` (single-shot jobs, seconds long and requeued on boot, never
+refused and still do not); OpenCode-only runs never refuse. `FORCE=1` is unchanged for what it
+discards — `claude -p` workers are still killed and recovered like a crash — but it no longer
+interrupts OpenCode sessions: the forced abort detaches them first too.
+
+**Health during the gap.** Detached jobs wait as `running` rows for the new process, then become
+`pending` for the seconds before `promote()` starts them. `oldestPendingAgeMs` is measured from
+`requeued_at` (set by `recover()`), not from submission, so a job that ran 40 minutes before the reload
+does not read as a wedged queue; `recoveredFromDrain` still grants `BOOT_HEALTH_GRACE_MS` on top.
+The gap is recorded: `job.requeue` carries `detached: true, detachedForMs` (drain → boot),
+`job.recover` carries `detachedResumed`, and `job.start` carries `pendingMs` (requeue → restart).
+Measure a live reload with
+`jq 'select(.event=="job.requeue" and .detached) | {jobId,detachedForMs}' ~/Library/Logs/agent-gateway.jsonl`.
+
 ### FORCE=1: SIGINT (or its HTTP equivalent), never SIGKILL
 
-`FORCE=1 make reload` exists to discard in-flight jobs rather than wait out a drain. Discarding
+`FORCE=1 make reload` exists to discard in-flight `claude -p` jobs rather than wait out a drain. Discarding
 jobs does not require an unabortable process kill: SIGKILL is not catchable, so it would skip
 both `POST /api/shutdown`'s trigger and `server/lib/shutdown.ts`'s `createShutdownController`
 handler entirely, and with it `terminateActiveSessions()` — the `claude -p` worker subprocesses
@@ -302,7 +346,8 @@ restarts it without agent-gateway involvement.
   bootstrap, wait for the port, fail loudly otherwise) after a plist, wrapper-environment or
   model-registry change — the config is generated at server start, so a new verified model needs
   a restart. It refuses while jobs run (`FORCE=1` skips): a restart kills attached episodes (the
-  server exits in ~50 ms on SIGTERM, no drain; Wave 4 re-attaches them). `make deploy` installs
+  server exits in ~50 ms on SIGTERM, no drain; the next agw boot re-attaches them by state, but a
+  killed turn is resumed with `prompt {resume:true}`, not continued). `make deploy` installs
   the agent only when it is not loaded and never restarts a loaded one. It then requires
   `bun scripts/opencode-server-env.ts --status` to be ok and otherwise aborts before the reload (no
   rollback); a post-reload verify failing ONLY on `opencodeServer` is reported as an opencode

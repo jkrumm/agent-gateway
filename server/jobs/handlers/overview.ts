@@ -382,6 +382,7 @@ export async function runOverview(
     tool: "overview",
     jobId,
     isCancelled,
+    reattachKey: "overview",
     jsonSchema: OVERVIEW_WORKER_JSON_SCHEMA,
     route,
     readOnly: true,

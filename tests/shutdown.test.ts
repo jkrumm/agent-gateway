@@ -61,6 +61,9 @@ function fakeDeps(): ShutdownDeps & {
   flushes: (() => void)[];
   markDrainKilledCalls: string[][];
   markDrainCompletedCalls: number;
+  detachCalls: number;
+  /** Job ids the fake `detachSessions` reports as detached (stand-ins for OpenCode sessions). */
+  detachable: string[];
 } {
   const clock = { now: 0 };
   const running = { count: 0 };
@@ -72,6 +75,12 @@ function fakeDeps(): ShutdownDeps & {
     flushes: [] as (() => void)[],
     markDrainKilledCalls: [] as string[][],
     markDrainCompletedCalls: 0,
+    detachCalls: 0,
+    detachable: [] as string[],
+    detachSessions: () => {
+      self.detachCalls++;
+      return self.detachable;
+    },
     terminateActiveSessions: () => {
       self.terminateCalls++;
       // One synthetic job id per "running" job, standing in for the real ids
@@ -398,5 +407,97 @@ describe("forced shutdown over the HTTP origin", () => {
     controller.begin("http", "forced", 0);
     expect(deps.terminateCalls).toBe(1);
     expect(deps.markDrainCompletedCalls).toBe(1);
+  });
+});
+
+// ── Detaching OpenCode sessions at the start of a drain ─────────────────────────────────────────
+//
+// `queueStats().running` is the drain's BLOCKER count (running jobs that are not detachable-only),
+// so a drain that holds only OpenCode sessions is over the moment they are detached.
+
+describe("createShutdownController — detach before waiting", () => {
+  /** The fake job queue of a drain: `detachable` OpenCode jobs and `blocking` claude jobs. The
+   *  blocker count is what `queueStats` reports, and detaching removes the detachable ones from
+   *  it — exactly what `drainBlockerCount()` does. */
+  function queueWith(blocking: number, detachable: string[]) {
+    const deps = fakeDeps();
+    deps.running.count = blocking + detachable.length;
+    deps.detachSessions = () => {
+      deps.detachCalls++;
+      deps.running.count = blocking;
+      return detachable;
+    };
+    return deps;
+  }
+
+  test("a graceful drain with only OpenCode sessions finishes immediately, without waiting a tick", () => {
+    const deps = queueWith(0, ["job-a", "job-b"]);
+    const controller = createShutdownController(deps);
+
+    controller.begin("http", "graceful", Infinity);
+
+    expect(deps.detachCalls).toBe(1);
+    expect(controller.isActive()).toBe(false);
+    expect(deps.terminateCalls).toBe(1);
+    expect(deps.markDrainCompletedCalls).toBe(1);
+    expect(deps.flushes).toHaveLength(1);
+  });
+
+  test("a graceful drain with a claude job still waits for it — and only for it", () => {
+    const deps = queueWith(1, ["job-a"]);
+    const controller = createShutdownController(deps);
+
+    controller.begin("http", "graceful", Infinity);
+    expect(deps.detachCalls).toBe(1);
+    expect(controller.isActive()).toBe(true);
+    expect(deps.terminateCalls).toBe(0);
+
+    deps.clock.now = 60_000;
+    controller.tick();
+    expect(controller.isActive()).toBe(true);
+
+    deps.running.count = 0; // the claude job finishes
+    controller.tick();
+    expect(controller.isActive()).toBe(false);
+    expect(deps.terminateCalls).toBe(1);
+    expect(deps.detachCalls).toBe(1); // detached once, not on every tick
+  });
+
+  test("the signal window still bounds a blocking job: grace over → terminated", () => {
+    const deps = queueWith(1, []);
+    const controller = createShutdownController(deps);
+    controller.begin("signal", "graceful", 45_000);
+    deps.clock.now = 45_000;
+    controller.tick();
+    expect(controller.isActive()).toBe(false);
+    expect(deps.terminateCalls).toBe(1);
+  });
+
+  test("a forced drain detaches too (never interrupts a re-attachable session) and still aborts at once", () => {
+    const deps = queueWith(2, ["job-a"]);
+    const controller = createShutdownController(deps);
+    controller.begin("http", "forced", 0);
+    expect(deps.detachCalls).toBe(1);
+    expect(controller.isActive()).toBe(false);
+    expect(deps.terminateCalls).toBe(1);
+  });
+
+  test("a forced request escalating a graceful drain does not detach a second time", () => {
+    const deps = queueWith(1, ["job-a"]);
+    const controller = createShutdownController(deps);
+    controller.begin("http", "graceful", Infinity);
+    controller.begin("http", "forced", 0);
+    expect(deps.detachCalls).toBe(1);
+    expect(deps.terminateCalls).toBe(1);
+  });
+
+  test("the detach is logged on begin and on finish", () => {
+    const deps = queueWith(0, ["job-a", "job-b"]);
+    const logs: Array<Record<string, unknown>> = [];
+    deps.log = (_level, fields) => {
+      logs.push(fields);
+    };
+    createShutdownController(deps).begin("http", "graceful", Infinity);
+    expect(logs.map((l) => l.detachedJobs)).toEqual([2, 2]);
   });
 });

@@ -28,10 +28,13 @@ dev:
 start:
 	@echo "ERROR: agent-gateway runs via LaunchAgent only. Use 'make reload' to apply changes." && exit 1
 
-# Refuses while jobs are running unless FORCE=1 — a reload kills every worker session
-# mid-flight (check/overview/narrative/review are re-queued once on boot; dispatch and
-# excalidraw, and anything killed mid-drain regardless of tool, are left `running` for that
-# same boot recovery to reconcile — server/jobs/store.ts's `execute()`).
+# Refuses while jobs it cannot detach are running unless FORCE=1 (scripts/reload-preflight.sh,
+# `drainBlockers` in /api/jobs/health): every OpenCode session under a job is DETACHED at the start
+# of the drain and re-attached by the next boot, so OpenCode-only runs never refuse or wait. What
+# remains — `claude -p` sessions, check steps — is killed mid-flight by FORCE=1 (check/overview/
+# narrative/review are re-queued once on boot; dispatch and excalidraw, and anything killed
+# mid-drain regardless of tool, are left `running` for that same boot recovery to reconcile —
+# server/jobs/store.ts's `execute()`).
 #
 # This target no longer SIGNALS the server — it POSTs to /api/shutdown (server/routes/
 # shutdown.ts) and asks it to exit ITSELF. That distinction is load-bearing, not stylistic:

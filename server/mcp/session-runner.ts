@@ -315,13 +315,16 @@ export interface SessionOptions<T = unknown> {
    */
   onSessionId?: (sessionId: string) => void;
   /**
-   * The caller will re-attach this session after a restart (dispatch worktree episodes: the
-   * worktree is preserved and `recover()` hands the recorded session id back as
-   * `resumeSessionId`). A drain then DETACHES an OpenCode session — leaves it running on the
-   * shared server and throws `SessionDetachedError` — instead of interrupting it. Ignored by the
-   * claude harness (a killed `claude -p` is resumed from its transcript).
+   * Stable name of this call within its job, for a job that runs several OpenCode sessions
+   * (review's angles, a retry's second session). With a `jobId` the runner records each OpenCode
+   * session it creates in the job's session ledger (`SessionLedger`, `job_sessions`) under
+   * `<reattachKey>:<call>.<attempt>`, and a re-run of the job after a drain re-attaches that
+   * session instead of creating one — by the same live / finished / cut-off state logic as
+   * `resumeSessionId`. Omit it when the caller persists the session id itself (dispatch:
+   * `onSessionId` → the job row → `resumeSessionId`). Ignored by the claude harness and without
+   * a `jobId`.
    */
-  reattachable?: boolean;
+  reattachKey?: string;
 }
 
 /** JSON-stringify for diagnostics only. Never throws — a value that cannot be serialized
@@ -1524,27 +1527,80 @@ const activeProcs = new Map<ReturnType<typeof Bun.spawn>, ActiveProcEntry>();
 interface ActiveRemoteEntry {
   jobId: string | undefined;
   stop: (reason: RemoteStopReason) => void;
+  /** A drain DETACHES this session (leaves it running on the shared server for the next boot to
+   *  re-attach) instead of interrupting it: true for every session run under a job. */
+  detachable: boolean;
+  /** `stop("drain")` has been delivered (the session detached). */
+  detached: boolean;
 }
 
 /** Why a remote worker is being stopped: `cancel` is an owner's `job_cancel` (the session must
- *  die), `drain` is this process going away (a re-attachable session may keep running on the
- *  server and be re-attached by the next boot — Wave 4). */
+ *  die), `drain` is this process going away (a session run under a job keeps running on the
+ *  server and is re-attached by the next boot). */
 export type RemoteStopReason = "cancel" | "drain";
 const activeRemote = new Set<ActiveRemoteEntry>();
+
+/** Jobs that had an OpenCode session detached by THIS process's drain, and whether a drain has
+ *  begun at all. Process-lifetime state (a drain ends in an exit): it keeps those jobs out of the
+ *  drain's blocker count after their session's drive loop has already unregistered, and makes a
+ *  session that starts mid-drain detach before it ever creates anything. */
+const detachedJobIds = new Set<string>();
+let sessionDrainBegun = false;
 
 export function activeSessionCount(): number {
   return activeProcs.size + activeRemote.size;
 }
 
+/** True once a drain has begun (`detachRemoteSessions`): an OpenCode attempt under a job must not
+ *  start a new session — it detaches at once and the next boot starts it. */
+export function isSessionDraining(): boolean {
+  return sessionDrainBegun;
+}
+
 /** Register a remote (HTTP-driven) worker so `POST /api/jobs/:id/cancel` and a drain can stop it.
- *  Returns the untrack fn; the caller runs it in a `finally` once the session is over. */
+ *  `detachable` = a drain leaves it running for the next boot to re-attach (every session run
+ *  under a job). Returns the untrack fn; the caller runs it in a `finally` once the session is
+ *  over. A session registered after the drain began is detached on the spot. */
 export function trackExternalSession(
   jobId: string | undefined,
   stop: (reason: RemoteStopReason) => void,
+  detachable = jobId !== undefined,
 ): () => void {
-  const entry: ActiveRemoteEntry = { jobId, stop };
+  const entry: ActiveRemoteEntry = { jobId, stop, detachable, detached: false };
   activeRemote.add(entry);
+  if (sessionDrainBegun && detachable) detachEntry(entry);
   return () => activeRemote.delete(entry);
+}
+
+function detachEntry(entry: ActiveRemoteEntry): void {
+  entry.detached = true;
+  if (entry.jobId !== undefined) detachedJobIds.add(entry.jobId);
+  entry.stop("drain");
+}
+
+/** Detach every OpenCode session that is run under a job: stop being awaited, keep running on
+ *  the shared server, re-attached by the next boot. Called at the START of a drain, so the drain
+ *  waits only for work that cannot be detached. Idempotent. Returns the ids of every job with a
+ *  detached session (this and any earlier call) so the store can mark them for budget-free
+ *  recovery. */
+export function detachRemoteSessions(): string[] {
+  sessionDrainBegun = true;
+  for (const entry of activeRemote) {
+    if (entry.detachable && !entry.detached) detachEntry(entry);
+  }
+  return [...detachedJobIds];
+}
+
+/** Jobs whose live work is a detachable OpenCode session — a running one or one this drain has
+ *  already detached. Such a job aborts promptly on detach and is requeued by the next boot, so
+ *  neither a drain nor `make reload` need wait for it; whatever else it had in flight (sibling
+ *  review angles, OCR) is rerun on boot. */
+export function detachableJobIds(): Set<string> {
+  const ids = new Set(detachedJobIds);
+  for (const entry of activeRemote) {
+    if (entry.detachable && entry.jobId !== undefined) ids.add(entry.jobId);
+  }
+  return ids;
 }
 
 /** Signal one registered subprocess the way its spawn shape requires. A detached child leads
@@ -1600,6 +1656,8 @@ export function __registerProcForTests(
 export function __resetActiveProcsForTests(): void {
   activeProcs.clear();
   activeRemote.clear();
+  detachedJobIds.clear();
+  sessionDrainBegun = false;
 }
 
 /** Kill every active worker subprocess and return the ids of the jobs they belonged to (a
@@ -1616,7 +1674,10 @@ export function terminateActiveSessions(): string[] {
       if (entry.jobId !== undefined) jobIds.push(entry.jobId);
     }
   }
+  // A session detached at the start of the drain (`detachRemoteSessions`) is not killed here:
+  // only a remote worker nothing can re-attach (no job) is still stopped — and interrupted.
   for (const entry of activeRemote) {
+    if (entry.detached) continue;
     entry.stop("drain");
     if (entry.jobId !== undefined) jobIds.push(entry.jobId);
   }
@@ -1672,14 +1733,67 @@ export class SessionCancelledError extends Error {
   }
 }
 
-/** Thrown by a re-attachable remote session (OpenCode, `SessionOptions.reattachable`) when a
- *  drain detached it: the session keeps running on the server and the next boot's `recover()`
- *  re-attaches it. The handler must leave everything the session is using (its worktree) in
- *  place — this is not a failure and not a cancel. */
+/** Thrown by an OpenCode session run under a job when a drain detached it: the session keeps
+ *  running on the server and the next boot re-attaches it (dispatch: the job row's `session_id`
+ *  via `recover()`; any other tool: the job's session ledger). The handler must leave everything
+ *  the session is using (its worktree) in place and must not count this as a failure, retry it
+ *  or fall back — this is not a failure and not a cancel. */
 export class SessionDetachedError extends Error {
   constructor(jobId: string | undefined) {
     super(`session detached for a restart (job ${jobId ?? "unknown"}) — re-attached on boot`);
     this.name = "SessionDetachedError";
+  }
+}
+
+// ── Session ledger (multi-session jobs) ───────────────────────────────────────────────
+//
+// A job that runs several OpenCode sessions (review: one per angle) cannot hand a single
+// `resumeSessionId` back to its re-run. Each session created under a `reattachKey` is recorded
+// in the job's ledger instead (server/jobs/store.ts, `job_sessions`), and `runOpencodeAttempt`
+// looks the key up before it creates anything. Injected rather than imported: store.ts already
+// imports this module, so the reverse import would be a cycle (same reason as `isCancelled`).
+
+export interface SessionLedgerRow {
+  sessionId: string;
+  /** The session's usage was already attributed (`writeAttribution`) by an earlier attempt, so a
+   *  re-attach reads the result without writing a second usage row. */
+  settled: boolean;
+}
+
+export interface SessionLedger {
+  get(jobId: string, key: string): SessionLedgerRow | undefined;
+  put(jobId: string, key: string, sessionId: string): void;
+  settle(jobId: string, key: string): void;
+  drop(jobId: string, key: string): void;
+}
+
+let sessionLedger: SessionLedger | null = null;
+
+export function setSessionLedger(ledger: SessionLedger | null): void {
+  sessionLedger = ledger;
+}
+
+export function getSessionLedger(): SessionLedger | null {
+  return sessionLedger;
+}
+
+/** How many `runSession` calls this process has made per (job, `reattachKey`) — the `<call>` in
+ *  the ledger key, so a handler that calls twice under one key (a JSON-only retry) gets two
+ *  sessions, and a re-run after a restart (counters start over, the handler replays the same
+ *  calls in the same order) lands on the same keys. */
+const ledgerCalls = new Map<string, number>();
+
+function nextLedgerCall(jobId: string, reattachKey: string): number {
+  const id = `${jobId}\u0000${reattachKey}`;
+  const call = (ledgerCalls.get(id) ?? 0) + 1;
+  ledgerCalls.set(id, call);
+  return call;
+}
+
+/** Drop a finished job's call counters (store.ts, when the job leaves `running`). */
+export function forgetLedgerCalls(jobId: string): void {
+  for (const id of ledgerCalls.keys()) {
+    if (id.startsWith(`${jobId}\u0000`)) ledgerCalls.delete(id);
   }
 }
 
@@ -2623,6 +2737,12 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
   // other lane switch, so a failure there is never switched again.
   let forced = breakerPreempt(opts.tool ?? "unknown", route, fallback, Date.now());
   if (forced) usedFallback = true;
+  // Ledger key for this call, fixed up front; each attempt appends its number so a retry's fresh
+  // session never aliases the failed one. Only an OpenCode session under a job uses it.
+  const ledgerBase =
+    opts.jobId !== undefined && opts.reattachKey
+      ? `${opts.reattachKey}:${nextLedgerCall(opts.jobId, opts.reattachKey)}`
+      : undefined;
   while (true) {
     attempt++;
     // Checked at the TOP of every iteration — the first attempt and every retry/fallback
@@ -2637,7 +2757,11 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       throw new SessionCancelledError(opts.jobId);
     }
     const turnsRef = { current: 0 };
-    const result = await attemptRunner(opts, turnsRef, forced);
+    const result = await attemptRunner(
+      ledgerBase ? { ...opts, reattachKey: `${ledgerBase}.${attempt}` } : opts,
+      turnsRef,
+      forced,
+    );
     // One route key per attempt, primary or forced fallback alike — each backend/model
     // combination a job actually ran on gets its own streak, so a healthy `max` fallback
     // never gets buried under a struggling `iu` primary's count.

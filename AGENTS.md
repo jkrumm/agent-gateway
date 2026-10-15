@@ -58,7 +58,7 @@ on `bun scripts/opencode-v2-probe.ts` (`docs/opencode-v2.md`).
 - Port 7705 is owned by the LaunchAgent. Starting a second process there causes conflicts.
 
 ```bash
-make reload          # After code changes: self-initiated drain (POST /api/shutdown, ≤50 min — launchd's real signal-and-wait timer never engages on this path) + restart. Refuses while jobs run — FORCE=1 aborts the drain at once (force=1 request, or a real SIGINT): claude workers are killed and resumed on boot, a worktree dispatch's OpenCode session is detached and re-attached on boot, everything else is discarded, escalating an in-progress drain if one is running. Falls back to `launchctl kill` (short window, capped by launchd's measured 60s ExitTimeOut) if the endpoint doesn't answer. Also refuses on tracked/installed plist drift (file AND launchd's live state) — see docs/deployment.md § Two shutdown paths, two windows
+make reload          # After code changes: self-initiated drain (POST /api/shutdown) + restart. Every OpenCode session under a job is DETACHED at the start of the drain (keeps running on the shared server, re-attached by the next boot), so the drain waits only for jobs it cannot detach — `claude -p` sessions, check steps, single-shot requests (≤50 min — launchd's real signal-and-wait timer never engages on this path). Refuses only while such blockers run (`drainBlockers` in `/api/jobs/health`; OpenCode-only runs never refuse) — FORCE=1 aborts the drain at once (force=1 request, or a real SIGINT): claude workers are killed and resumed/requeued on boot, OpenCode sessions are still detached, not discarded; escalating an in-progress drain if one is running. Falls back to `launchctl kill` (short window, capped by launchd's measured 60s ExitTimeOut) if the endpoint doesn't answer. Also refuses on tracked/installed plist drift (file AND launchd's live state) — see docs/deployment.md § Two shutdown paths, two windows
 make install-agent   # One-time: install + start LaunchAgent
 make uninstall-agent # Remove LaunchAgent
 
@@ -206,11 +206,14 @@ reconnects; disk persistence survives an HTTP restart: on boot `recover()`
 re-queues an interrupted `check`/`overview`/`narrative`/`review`/`triage` **once**
 (all read-only and idempotent) and marks everything else `interrupted`
 (`dispatch` is never auto re-run — an `implement` episode may already have
-pushed). `make reload` refuses while jobs are running unless `FORCE=1` (which
-asks for the same forced abort as always — never SIGKILL, which isn't
-catchable and would skip `terminateActiveSessions()` entirely, orphaning
-`claude -p` workers that keep writing/committing after the reload believed it
-had stopped them). Otherwise `make reload` now asks the server to shut itself
+pushed). A job whose OpenCode session(s) a drain **detached** is not a crash and is
+requeued whatever its attempts say — see *Durable and steerable OpenCode
+episodes* below. `make reload` refuses while jobs it cannot detach are running
+(`drainBlockers`: `claude -p` sessions, check steps — OpenCode-only runs never
+refuse) unless `FORCE=1` (which asks for the same forced abort as always — never
+SIGKILL, which isn't catchable and would skip `terminateActiveSessions()`
+entirely, orphaning `claude -p` workers that keep writing/committing after the
+reload believed it had stopped them). Otherwise `make reload` now asks the server to shut itself
 down (`POST /api/shutdown`, `server/routes/shutdown.ts`) instead of signaling
 it: launchd's `ExitTimeOut` only engages when launchd itself sends the signal
 and waits, so a self-initiated exit never starts that clock and can drain for
@@ -245,11 +248,41 @@ per lane; a full lane never blocks the other). `review_router` is not a job, it 
 `review` job. While draining, the queue backs up too, which `GET
 /api/jobs/health`'s `draining: true` flag distinguishes from a wedged queue.
 
-**Durable and steerable OpenCode episodes (Wave 4, `docs/opencode-v2.md`).** A drain/restart
-DETACHES a worktree dispatch's OpenCode session instead of interrupting it (`SessionOptions.reattachable`,
-`SessionDetachedError`; the handler keeps the worktree), and the next boot's `recover()` re-attaches:
-live session → wait only, finished while down → read the result, cut off → `prompt {resume:true}`.
-Cancel still interrupts. **`POST /api/jobs/:id/steer {text}`** (MCP `job_steer`, CLI `agw steer`)
+**Durable and steerable OpenCode episodes (Waves 4 and 9, `docs/opencode-v2.md`).** EVERY OpenCode
+session run under a job is detached by a drain — not interrupted — and re-attached by the next boot;
+only `claude -p` sessions still drain or requeue. The drain does it at its **start**
+(`createShutdownController` → `detachSessions` → `detachRemoteSessions()`, session-runner.ts): the
+session keeps running on the shared server, `SessionDetachedError` unwinds its handler, and the jobs
+are marked durably (`jobs.detached_at`, `markJobsDetached`) before the process can exit. The drain
+then waits only for **`drainBlockers`** (`QueueStats`/`/api/jobs/health`): running jobs whose live work
+is NOT a detachable OpenCode session (a `claude -p` session, a check step, a single-shot request, a
+job between phases) — a drain with only OpenCode sessions in flight is over at once, and a session
+that would start mid-drain detaches before it creates anything. Re-attach is by state, the same
+logic everywhere (`runOpencodeAttempt`): live → wait only, finished while down → read the result,
+cut off → `prompt {resume:true}`, never prompted → a first prompt. How a job hands its session back
+differs: **dispatch** persists the session id on the job row (`onSessionId` → `session_id`, the
+worktree's `worktree_meta`); **every other tool** passes `SessionOptions.reattachKey` and the runner
+records each session it creates in the **session ledger** (`job_sessions(job_id, key, session_id,
+settled)`, key `<reattachKey>:<call>.<attempt>`) — review: `angle:<name>` per angle and `synthesis`; a
+`ref`-mode review also keeps its throwaway worktree on detach (`worktree_meta`, protected from the
+boot sweep) and the re-run reopens it. A detached `review` aborts at once (the detach is not an angle
+failure, does not consume `ANGLE_MAX_ATTEMPTS`) and is requeued by `recover()`; its OCR run, claude
+sibling sessions, adversary and synthesis simply run again, while angles with a ledger row re-attach
+(finished → result read from the messages, still running → waited). A detached session writes no usage
+row; a `settled` ledger row (usage already attributed) re-attaches without writing a second one.
+**Requeue accounting:** a row with `detached_at` is requeued by `recover()` regardless of `attempts`,
+for every tool, and gives the attempt back (`attempts - 1`, so a later genuine crash still gets its
+requeue-once); a row without it keeps today's rules. **In-place dispatch** is detached and resumed
+too: its metadata marker persists the pre-episode snapshot (`{ path, workspace: "in-place", snapshot }`,
+dispatch-git.ts `InPlaceSnapshot`), so the re-attached run reports `applied_in_place` against the
+SAME baseline; with no marker (a crash) or no persisted snapshot (an older row) it is still
+`interrupted`, its edits left uncommitted. The snapshot's stash commit is a dangling object — safe
+across a reload, not across `git gc` weeks later. Pending-time accounting: `recover()` sets
+`requeued_at` and `jobHealth` ages `oldestPendingAgeMs` from there (not from submission), so a
+requeued job never trips the 15-min rule; `job.requeue` logs `detached`/`detachedForMs`, `job.recover`
+logs `detachedResumed`, `job.start` logs `pendingMs`. A detached session whose job is NOT resumed
+(recover → `interrupted`/`cancelled`) is interrupted on boot. Cancel still interrupts.
+**`POST /api/jobs/:id/steer {text}`** (MCP `job_steer`, CLI `agw steer`)
 injects `delivery: steer` text into a RUNNING dispatch's session (409 when nothing is live; logged
 `job.steer`). A new MCP tool needs a `/mcp` reconnect before a connected client sees it.
 
@@ -291,12 +324,14 @@ failed/interrupted → `failed`, cancelled → `cancelled`.
 
 Job lifecycle events log to `~/Library/Logs/agent-gateway.jsonl` (`job.create` /
 `job.start` / `job.done` / `job.fail` / `job.cancelled` / `job.recover` /
-`job.requeue` / `job.shutdown_abandoned` / `job.lease_unavailable`). Inspect the queue:
+`job.requeue` / `job.shutdown_abandoned` / `job.shutdown_detached` / `job.lease_unavailable`). Inspect the queue:
 `curl -s localhost:7705/api/jobs | jq`.
 **`GET /api/jobs/health`** → `{ ok, running, pending, max, singleShot: { running, pending, max,
-oldestPendingAgeMs }, failedLastHour,
+oldestPendingAgeMs }, drainBlockers, failedLastHour,
 interruptedLastHour, oldestPendingAgeMs, leaseQueued, lastFailure, draining, sinceBootMs,
 recoveredFromDrain }` (`running`/`pending`/`max`/`oldestPendingAgeMs` are the session lane;
+`drainBlockers` is what a reload waits for or discards — `make reload`'s preflight reads it;
+`oldestPendingAgeMs` runs from the last requeue, `jobs.requeued_at`, not the submission;
 `singleShot` is the `triage`/`decide` lane with its own oldest-waiting age;
 `leaseQueued` counts pending rows waiting behind a per-repo implement
 lease; they are excluded from `oldestPendingAgeMs`), `ok: false` when ≥3 jobs failed in the last hour, or

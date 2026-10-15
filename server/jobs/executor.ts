@@ -26,7 +26,12 @@ export function executeJob(job: JobRecord, onProgress: ProgressSink): Promise<un
     case "check":
       return runCheck(job.params, onProgress, job.id, isCancelRequested);
     case "review":
-      return runReview(job.params, onProgress, job.id, isCancelRequested);
+      // `worktreeMeta` is non-null only for a ref-mode review a drain detached (`recover()` keeps
+      // the throwaway worktree its angle sessions are still reading): reopen it, don't recut it.
+      return runReview(job.params, onProgress, job.id, isCancelRequested, {
+        worktreeMeta: job.worktreeMeta,
+        onWorktreeReady: (meta) => updateJobWorktreeMeta(job.id, meta),
+      });
     case "excalidraw_diagram":
       return runExcalidrawDiagram(job.params, onProgress, job.id, isCancelRequested);
     case "dispatch":

@@ -12,14 +12,19 @@ harness) on the model and backend the routing table assigns it. Mini-only by des
 
 ```bash
 make install-agent   # one-time: install + start the LaunchAgent
-make reload          # after code changes: self-initiated drain via POST /api/shutdown (≤50 min), restart — falls back to `launchctl kill` if the endpoint doesn't answer
-FORCE=1 make reload  # forced abort now, discarding running jobs (read-only ones are re-queued once on boot)
+make reload          # after code changes: self-initiated drain via POST /api/shutdown, restart — falls back to `launchctl kill` if the endpoint doesn't answer
+FORCE=1 make reload  # forced abort now: `claude -p` workers are killed and recovered on boot (read-only ones re-queued once)
 ```
 
-`make reload`'s normal drain is long (~50 min) because it's self-initiated — launchd's own
-`ExitTimeOut` (60s, its measured hard cap regardless of the plist) never engages on that path.
-Only a real signal (reboot, logout, or the fallback above) is bound by that 60s cap. Full story:
-`docs/deployment.md` § Two shutdown paths, two windows.
+`make reload` does not wait for OpenCode sessions: every one run under a job (dispatch, review
+angles, …) is detached at the start of the drain, keeps running on the shared OpenCode server and is
+re-attached by the next boot, so a reload with only OpenCode work in flight is immediate and never
+refuses. It waits for (and refuses on) only what cannot be detached — `claude -p` sessions and check
+steps (`drainBlockers` in `/api/jobs/health`). That wait can be long (~50 min) because the drain is
+self-initiated — launchd's own `ExitTimeOut` (60s, its measured hard cap regardless of the plist)
+never engages on that path. Only a real signal (reboot, logout, or the fallback above) is bound by
+that 60s cap. Full story: `docs/deployment.md` § Two shutdown paths, two windows and § OpenCode
+sessions are detached, not drained.
 
 Never start the server by hand (`bun server/index.ts`) — the LaunchAgent owns the port.
 The MCP server is registered at user scope by dotfiles' `make setup`

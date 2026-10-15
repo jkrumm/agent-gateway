@@ -306,7 +306,7 @@ exactly. If your reduced budget only supports a partial answer, say so in \`verd
  *  may be stale relative to what actually landed on disk before the kill. */
 const RESUME_CONTINUATION_PROMPT =
   "Continue the task; the daemon that hosted you restarted. Re-read `git status`/`git diff` " +
-  "in this worktree before acting, then finish and emit the structured output.";
+  "in your working directory before acting, then finish and emit the structured output.";
 
 export { newFenceNonce };
 
@@ -856,17 +856,37 @@ function reconstructWorktree(meta: Record<string, unknown>): DispatchWorktree {
   };
 }
 
+/** The pre-episode snapshot a resumed in-place episode attributes against, read back from the
+ *  metadata marker `recover()` verified carries one. Refuses loudly on a mismatch rather than
+ *  taking a fresh snapshot, which would silently swallow the edits made so far. */
+function inPlaceSnapshotOf(meta: Record<string, unknown> | undefined): InPlaceSnapshot {
+  const snapshot = meta?.snapshot as Partial<InPlaceSnapshot> | undefined;
+  if (
+    typeof snapshot?.headOid !== "string" ||
+    typeof snapshot.branch !== "string" ||
+    typeof snapshot.stashOid !== "string" ||
+    !Array.isArray(snapshot.untracked)
+  ) {
+    throw new Error("dispatch resume refused: persisted in-place snapshot is malformed");
+  }
+  return {
+    headOid: snapshot.headOid,
+    branch: snapshot.branch,
+    stashOid: snapshot.stashOid,
+    untracked: snapshot.untracked.filter((p): p is string => typeof p === "string"),
+  };
+}
+
 /** Run one dispatch episode and return its verdict. Throws on failure — the store turns a
  *  throw into `status: "failed"`.
  *
- *  Boot-recovery for an in-place episode: a worktree episode resumes by reopening its
- *  worktree; an in-place one has no worktree to reconstruct and its lock, snapshot and
- *  change-set attribution are all process-local — a `--resume` against the live checkout
- *  could not attribute a re-run's edits against a snapshot nobody kept. So an in-place run
- *  interrupted mid-session is marked `interrupted` by `recover()` (dispatch.ts passes
- *  `workspace` through `onWorktreeReady`, store.ts refuses to resume a row without
- *  reconstructible worktree metadata) and its partial edits sit in the owner's tree like
- *  any other uncommitted work. */
+ *  Boot-recovery: a worktree episode resumes by reopening its worktree. An in-place episode has
+ *  no worktree; its change-set attribution rests on the pre-episode snapshot, which is persisted
+ *  in the row's metadata marker (`onWorktreeReady`) so a session a drain DETACHED — still editing
+ *  the live checkout while the server restarts — is re-attached and attributed against the same
+ *  baseline. A crash (no detach marker) or a row without a persisted snapshot is still marked
+ *  `interrupted` by `recover()`, its partial edits sitting in the owner's tree like any other
+ *  uncommitted work. */
 export async function runDispatch(
   rawParams: Record<string, unknown>,
   onProgress?: ProgressSink,
@@ -897,8 +917,8 @@ export async function runDispatch(
   // the same checks at submit (`dispatchSubmitRefusal`); this copy stays for a direct caller.
   assertDispatchRequestAllowed(input, effectiveSensitive);
   const inPlace = tier === "implement" && workspace === "in-place";
-  // A resumed row never re-runs this: the store refuses to resume an in-place row (see the
-  // runDispatch doc comment), so `resuming` and `inPlace` cannot both be true.
+  // True for a boot-recovery resume — a worktree episode or, after a drain detached its session
+  // and its snapshot was persisted, an in-place one (`resumingWorktree` below is the former).
   const resuming = resumeCtx?.resume !== undefined;
   const jobKey = jobId ?? randomUUID();
   const startMs = performance.now();
@@ -993,13 +1013,16 @@ export async function runDispatch(
       lockHeld = !lease.reentrant;
     }
     if (inPlace) {
-      // Recorded before the session starts — the snapshot is the in-place run's only
-      // attribution baseline, exactly what `onWorktreeReady`'s persisted metadata is for a
-      // worktree run. It is NOT persisted as worktree metadata (the store would then
-      // classify the row as worktree-resumable); the store treats an in-place row's
-      // metadata marker (`workspace: "in-place"`) as a never-resume signal instead.
-      snapshot = await snapshotInPlace(cwd);
-      note(`in-place snapshot ${snapshot.headOid.slice(0, 12)}`);
+      // The snapshot is the in-place run's only attribution baseline. It is persisted in the
+      // row's metadata marker (`onWorktreeReady` below) so a drain-detached episode, re-attached
+      // after the restart, attributes its edits against the SAME baseline; a resume reads it
+      // back instead of taking a new one (a new one would swallow the edits made so far).
+      snapshot = resuming
+        ? inPlaceSnapshotOf((resumeCtx as DispatchResumeContext).resume?.worktreeMeta)
+        : await snapshotInPlace(cwd);
+      note(
+        `${resuming ? "resuming in-place" : "in-place snapshot"} ${snapshot.headOid.slice(0, 12)}`,
+      );
     } else if (resumeCtx?.resume) {
       // Reopen exactly what `dispatchRecoveryStatusFor` verified existed at `recover()` time —
       // reconstructed from the persisted object, not re-derived: `base` in particular is a
@@ -1054,7 +1077,7 @@ export async function runDispatch(
       // into a writable episode, and the policy ceiling still decides which repos are
       // reachable. Everything else (`GIT_DENY_CREDENTIALS_ENV`, the fence, the read-only
       // profile) is unchanged.
-      worktreeMeta = { path: cwd, workspace: "in-place" };
+      worktreeMeta = { path: cwd, workspace: "in-place", snapshot };
       sessionCwd = cwd;
       strippedSettings = [];
     } else {
@@ -1104,11 +1127,9 @@ export async function runDispatch(
         extraEnv: GIT_DENY_CREDENTIALS_ENV,
         validate: workerValidator(tier),
         onActivity: relayProgress,
+        // Every OpenCode session under a job is detached by a drain and re-attached by the next
+        // boot (recover() keeps session_id + worktree_meta — for in-place, the snapshot too).
         onSessionId: resumeCtx?.onSessionId,
-        // A worktree episode's session survives a restart on the OpenCode server and the next boot
-        // re-attaches it (recover() keeps session_id + worktree_meta); an in-place one is never
-        // resumed, so a detached session would be orphaned in the live checkout.
-        reattachable: !inPlace,
       });
     const runEpisode = async (p: string, opts: { resumeSessionId?: string } = {}) => {
       const r = await spawnEpisode(p, opts);
@@ -1119,9 +1140,8 @@ export async function runDispatch(
     // A resume attaches to the existing transcript with a short continuation nudge instead of
     // re-sending the original (already-seen) brief prompt; everything past this first call —
     // the schema-validation retry below — is unaffected and always a fresh session, resume or
-    // not, same as before this feature existed. (In-place never reaches this branch — see the
-    // `resumingWorktree` note above.)
-    let result = resumingWorktree
+    // not, same as before this feature existed.
+    let result = resuming
       ? await runEpisode(RESUME_CONTINUATION_PROMPT, {
           resumeSessionId: resumeCtx?.resume?.sessionId,
         })

@@ -6,7 +6,7 @@
 // handler-side seams (`runDispatch` refusals, `snapshotInPlace`, `inPlaceChangedFiles`,
 // `finishInPlace`).
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -20,6 +20,7 @@ import {
 } from "../server/jobs/handlers/dispatch.ts";
 import { releaseRepoLease, tryAcquireRepoLease } from "../server/lib/repo-lease.ts";
 import { inPlaceChangedFiles, snapshotInPlace } from "../server/jobs/handlers/dispatch-git.ts";
+import * as sessionRunner from "../server/mcp/session-runner.ts";
 import { SessionCancelledError } from "../server/mcp/session-runner.ts";
 import { git as fixtureGit, run as fixtureRun, Fixture, makeFixture } from "./git-fixture.ts";
 
@@ -468,5 +469,101 @@ describe("recover() — an in-place dispatch row", () => {
     } finally {
       __resetForTests();
     }
+  });
+});
+
+// ── Drain-detach: an in-place episode survives a reload ─────────────────────────────────
+//
+// The OpenCode session keeps editing the live checkout while the server restarts, so the episode
+// is re-attached on boot (recover() requires the detach marker AND a persisted snapshot — see
+// tests/jobs-detach-recovery.test.ts). The handler half: the snapshot rides in the metadata
+// marker, a detach leaves everything in place, and a resume attributes against the PERSISTED
+// snapshot instead of taking a new one (which would swallow the edits made so far).
+
+describe("runDispatch — in-place detach and resume", () => {
+  let runSessionSpy: ReturnType<typeof spyOn> | undefined;
+  let calls: sessionRunner.SessionOptions<unknown>[];
+
+  beforeEach(() => {
+    calls = [];
+    runSessionSpy = spyOn(sessionRunner, "runSession").mockImplementation((async (
+      opts: sessionRunner.SessionOptions<unknown>,
+    ) => {
+      calls.push(opts);
+      throw new sessionRunner.SessionDetachedError(opts.jobId);
+    }) as unknown as typeof sessionRunner.runSession);
+  });
+
+  afterEach(() => {
+    runSessionSpy?.mockRestore();
+  });
+
+  const params = (): Record<string, unknown> => ({
+    cwd: fx.repo,
+    brief: "do it",
+    tier: "implement",
+    workspace: "in-place",
+  });
+
+  test("the snapshot is persisted in the metadata marker and a detach leaves the checkout and lock alone", async () => {
+    fx.write("owner-wip.txt", "owner's uncommitted work\n");
+    const metas: unknown[] = [];
+
+    await expect(
+      runDispatch(params(), undefined, "job-ip-1", undefined, {
+        onWorktreeReady: (meta) => metas.push(meta),
+      }),
+    ).rejects.toBeInstanceOf(sessionRunner.SessionDetachedError);
+
+    const snap = await snapshotInPlace(fx.repo);
+    expect(metas).toEqual([
+      {
+        path: fx.repo,
+        workspace: "in-place",
+        snapshot: expect.objectContaining({
+          headOid: snap.headOid,
+          branch: "master",
+          untracked: ["owner-wip.txt"],
+        }),
+      },
+    ]);
+    // Nothing was reverted or torn down, and the per-repo lease is free again.
+    expect(await fixtureGit(["status", "--porcelain"], fx.repo)).toContain("owner-wip.txt");
+    expect(tryAcquireRepoLease(fx.repo, "someone-else").ok).toBe(true);
+    releaseRepoLease(fx.repo, "someone-else");
+    // A job id is all that makes the OpenCode session detachable.
+    expect(calls[0]?.jobId).toBe("job-ip-1");
+  });
+
+  test("a resume re-attaches the recorded session with the continuation nudge and the PERSISTED snapshot", async () => {
+    const persisted = { headOid: "0".repeat(40), branch: "master", stashOid: "", untracked: [] };
+    const metas: unknown[] = [];
+
+    await expect(
+      runDispatch(params(), undefined, "job-ip-2", undefined, {
+        resume: {
+          sessionId: "ses_ip_resume",
+          worktreeMeta: { path: fx.repo, workspace: "in-place", snapshot: persisted },
+        },
+        onWorktreeReady: (meta) => metas.push(meta),
+      }),
+    ).rejects.toBeInstanceOf(sessionRunner.SessionDetachedError);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.resumeSessionId).toBe("ses_ip_resume");
+    expect(calls[0]?.prompt).toMatch(/^Continue the task/);
+    expect((metas[0] as { snapshot?: unknown }).snapshot).toEqual(persisted); // not re-taken: HEAD is not all zeros
+  });
+
+  test("a resume whose persisted snapshot is malformed refuses loudly instead of re-snapshotting", async () => {
+    await expect(
+      runDispatch(params(), undefined, "job-ip-3", undefined, {
+        resume: {
+          sessionId: "ses_ip_resume",
+          worktreeMeta: { path: fx.repo, workspace: "in-place" },
+        },
+      }),
+    ).rejects.toThrow(/in-place snapshot is malformed/);
+    expect(calls).toEqual([]);
   });
 });

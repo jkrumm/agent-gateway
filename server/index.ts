@@ -14,6 +14,7 @@ import {
   initJobStore,
   markDrainCompleted,
   markDrainKilled,
+  markJobsDetached,
   protectedWorktreePaths,
   queueStats,
   setDraining,
@@ -21,7 +22,11 @@ import {
 import { executeJob } from "./jobs/executor";
 import { pushOverviewToArgo } from "./lib/argo-push.ts";
 import { startKumaPush, stopKumaPush } from "./lib/kuma-push.ts";
-import { activeSessionCount, terminateActiveSessions } from "./mcp/session-runner.ts";
+import {
+  activeSessionCount,
+  detachRemoteSessions,
+  terminateActiveSessions,
+} from "./mcp/session-runner.ts";
 import { setProcessKind } from "./lib/process-context.ts";
 import { logRoutingOverrides, logStaleQuotaEnvVars } from "./lib/routing.ts";
 import { logDispatchPolicy } from "./lib/dispatch-policy.ts";
@@ -138,11 +143,16 @@ logger.info(
   `agent-gateway running on ${HOSTNAME}:${PORT}`,
 );
 
-// Drain waits for every running job, whichever admission lane it is in.
+// What `POST /api/shutdown` reports: every running job, whichever admission lane it is in.
 const totalRunning = (): number => {
   const stats = queueStats();
   return stats.running + stats.singleShot.running;
 };
+
+// What a drain WAITS for: the running jobs that cannot be detached (`drainBlockerCount`) — a job
+// whose live work is an OpenCode session is detached at the start of the drain and requeued by
+// the next boot, so it never holds a reload up.
+const drainBlockers = (): number => queueStats().drainBlockers;
 
 // One drain state machine, two triggers, each with its own window (see lib/shutdown.ts's
 // two-window note for the "why"):
@@ -160,11 +170,15 @@ const totalRunning = (): number => {
 //     `mode: "forced"`'s immediate-abort behavior with a real SIGINT, never its origin, so the
 //     shutdown log and the escalation logic can each tell which one actually happened.
 //
-// Worker sessions have no checkpoint — a `claude -p` run is atomic from the job's point of view
-// — so a drain buys a job time to actually finish, not just "seconds from finishing". Whatever
-// is still running after the grace period is terminated and exits with the process; a
-// drain-killed job's row is left `running` for the next boot's ordinary crash-recovery to
-// reconcile (store.ts `execute()`/`recover()`) rather than written `failed` here. KeepAlive
+// A `claude -p` run has no checkpoint — it is atomic from the job's point of view — so a drain
+// buys such a job time to actually finish. An OpenCode session is different: it lives on the
+// shared OpenCode server, outside this process, so the drain DETACHES every one at its start
+// (`detachSessions`, session-runner.ts `detachRemoteSessions`), marks the jobs durably, and
+// waits only for the jobs that cannot be detached (`drainBlockerCount`). Whatever is still
+// running after the grace period is terminated and exits with the process; a drain-killed job's
+// row is left `running` for the next boot's ordinary crash-recovery to reconcile (store.ts
+// `execute()`/`recover()`) rather than written `failed` here, and a detached job is requeued
+// without spending its requeue budget. KeepAlive
 // brings the server straight back. The two grace constants, `SHUTDOWN_FLUSH_MS`, their sizing
 // rationale, and the drain state machine itself live in lib/shutdown.ts (kept out of this
 // module so they're importable — and unit-testable with fake deps/clock — without pulling in
@@ -179,9 +193,14 @@ const totalRunning = (): number => {
 // period. SIGINT is not otherwise wired in this process (no readline/TTY prompt to interrupt), so
 // reusing it here doesn't shadow anything.
 const shutdownController = createShutdownController({
+  detachSessions: () => {
+    const jobIds = detachRemoteSessions();
+    markJobsDetached(jobIds);
+    return jobIds;
+  },
   terminateActiveSessions,
   activeSessionCount,
-  queueStats: () => ({ running: totalRunning() }),
+  queueStats: () => ({ running: drainBlockers() }),
   setDraining,
   markDrainKilled,
   markDrainCompleted,

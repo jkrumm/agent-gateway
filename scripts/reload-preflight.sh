@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The refusals `make reload` makes BEFORE it touches the running server: tracked/installed plist
-# drift (file compare and launchd's live ExitTimeOut) and running jobs without FORCE=1.
+# drift (file compare and launchd's live ExitTimeOut) and running jobs the reload cannot detach
+# (OpenCode sessions can be, so they never refuse) without FORCE=1.
 #
 # Exit 0 = clear to reload. Exit 3 = REFUSED (nothing was drained or killed; the reason is
 # printed). Own script, not Makefile recipe lines, because make collapses every recipe failure
@@ -30,9 +31,14 @@ if [ -n "$tracked_exit" ] && [ -n "$live_exit" ] && [ "$tracked_exit" != "$live_
 fi
 
 if [ -z "${FORCE:-}" ]; then
-  n=$(curl -sf --max-time 3 http://127.0.0.1:7705/api/jobs/health 2>/dev/null | jq -r '.running // 0' 2>/dev/null || echo 0)
+  # Only jobs a reload would WAIT for or discard count: `drainBlockers` excludes a job whose live
+  # work is an OpenCode session — the drain detaches those at its start and the next boot
+  # re-attaches them. Single-shot jobs (triage/decide, seconds long, requeued on boot) were never
+  # a reason to refuse and still are not; the drain itself does wait for them. An older server
+  # without the field falls back to every running session-lane job.
+  n=$(curl -sf --max-time 3 http://127.0.0.1:7705/api/jobs/health 2>/dev/null | jq -r 'if .drainBlockers != null then .drainBlockers - (.singleShot.running // 0) else (.running // 0) end' 2>/dev/null || echo 0)
   if [ "${n:-0}" != "0" ]; then
-    echo "refusing to reload: $n job(s) running — waiting is normal (jobs commonly run minutes), or FORCE=1 make reload discards them"
+    echo "refusing to reload: $n job(s) running that a reload cannot detach (claude -p sessions, check steps) — waiting is normal (jobs commonly run minutes), or FORCE=1 make reload discards them. OpenCode sessions are not counted: they survive a reload."
     exit "$REFUSED"
   fi
 fi

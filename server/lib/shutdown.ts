@@ -101,6 +101,11 @@ export function shouldKeepDraining(running: number, now: number, deadline: numbe
 // future caller (e.g. an unexpected double-signal) may want "warn" without a second dependency.
 
 export interface ShutdownDeps {
+  /** Detach every OpenCode session run under a job — they stop being awaited and keep running on
+   *  the shared server for the next boot to re-attach — and make the detach durable on the job
+   *  rows. Returns the ids of the jobs affected. Called first thing in a drain (graceful or
+   *  forced), so the drain waits only for work that cannot be detached. Idempotent. */
+  detachSessions: () => string[];
   /** Kill every active worker subprocess. Returns the ids of the jobs those subprocesses
    *  belonged to (a session run outside the job system contributes nothing). Must be safe to
    *  call more than once (idempotent) — the controller already guards against calling it
@@ -108,6 +113,9 @@ export interface ShutdownDeps {
   terminateActiveSessions: () => string[];
   /** Worker subprocesses alive right now — logged once, at the start of a drain. */
   activeSessionCount: () => number;
+  /** `running` = the drain blockers: running jobs that are NOT detachable-only (a live
+   *  `claude -p` session, a check step, a single-shot request, a job between phases). Detached
+   *  jobs are not counted, so a drain with only OpenCode sessions in flight is over at once. */
   queueStats: () => { running: number };
   /** Marks the job store as draining — `promote()` then refuses new `pending → running`
    *  transitions for the rest of this process's life, so a job promoted into the grace
@@ -201,6 +209,8 @@ export function createShutdownController(deps: ShutdownDeps): ShutdownController
   let forced = false;
   let finished = false;
   let deadline = 0;
+  // Jobs whose OpenCode session this drain detached — logged, never waited for.
+  let detachedJobs = 0;
   // The origin most recently responsible for the drain's current deadline/outcome — starts as
   // whatever triggered `begin()` first, and moves to `"signal"` if a real signal later
   // shortens or escalates an http-origin drain (see `begin()` below). Logged on both `begin`
@@ -224,6 +234,7 @@ export function createShutdownController(deps: ShutdownDeps): ShutdownController
       {
         event: "app.shutdown",
         running: left,
+        detachedJobs,
         killedWorkers: killed,
         flushMs: SHUTDOWN_FLUSH_MS,
         forced,
@@ -283,6 +294,9 @@ export function createShutdownController(deps: ShutdownDeps): ShutdownController
     forced = mode === "forced";
     activeOrigin = origin;
     deps.setDraining();
+    // Before the blocker count is read: a detached session is the one thing a graceful drain no
+    // longer waits for, and a forced one no longer interrupts (the next boot re-attaches it).
+    detachedJobs = deps.detachSessions().length;
     const { running } = deps.queueStats();
     // `forced` means abandon now, so it ignores graceMs here exactly as the escalation branch
     // above does. Today every forced caller passes 0 anyway; deriving it from `mode` instead of
@@ -293,6 +307,7 @@ export function createShutdownController(deps: ShutdownDeps): ShutdownController
       {
         event: "app.shutdown",
         running,
+        detachedJobs,
         workers: deps.activeSessionCount(),
         graceMs,
         forced,
@@ -300,7 +315,7 @@ export function createShutdownController(deps: ShutdownDeps): ShutdownController
       },
       forced
         ? `${origin} — forced abort, abandoning running jobs`
-        : `${origin} — draining running jobs`,
+        : `${origin} — draining running jobs (${detachedJobs} detached, ${running} blocking)`,
     );
     if (!shouldKeepDraining(running, deps.now(), deadline)) finish();
   }

@@ -652,8 +652,8 @@ describe("runOpencodeAttempt — durable episodes (Wave 4)", () => {
     return { client, settled };
   };
 
-  test("a drain DETACHES a reattachable session: no interrupt, SessionDetachedError, no usage row", async () => {
-    const { client, settled } = await hangingRun({ reattachable: true });
+  test("a drain DETACHES any session run under a job: no interrupt, SessionDetachedError, no usage row", async () => {
+    const { client, settled } = await hangingRun({});
     expect(terminateActiveSessions()).toEqual(["job-7"]);
     const { error } = await settled;
     expect(error).toBeInstanceOf(SessionDetachedError);
@@ -662,8 +662,8 @@ describe("runOpencodeAttempt — durable episodes (Wave 4)", () => {
     expect(attemptRows()).toEqual([]);
   });
 
-  test("a drain still INTERRUPTS a session nobody will re-attach", async () => {
-    const { client, settled } = await hangingRun({});
+  test("a drain still INTERRUPTS a session that runs under no job (nobody can re-attach it)", async () => {
+    const { client, settled } = await hangingRun({ jobId: undefined });
     terminateActiveSessions();
     const { value, error } = await settled;
     expect(error).toBeUndefined();
@@ -671,8 +671,8 @@ describe("runOpencodeAttempt — durable episodes (Wave 4)", () => {
     expect(client.interrupts).toEqual(["ses_fake_1"]);
   });
 
-  test("a job cancel interrupts even a reattachable session", async () => {
-    const { client, settled } = await hangingRun({ reattachable: true });
+  test("a job cancel interrupts a session run under a job", async () => {
+    const { client, settled } = await hangingRun({});
     expect(terminateSessionsForJob("job-7")).toBe(true);
     const { value } = await settled;
     expect(value?.error).toContain("interrupted by request");
@@ -683,7 +683,7 @@ describe("runOpencodeAttempt — durable episodes (Wave 4)", () => {
     const { client, run } = setup();
     const session = client.seed("ses_live", [assistantMessage({ content: [text("working")] })]);
     session.turn = { assistant: [{ content: [text('{"answer":3}')] }] };
-    const result = await run({ resumeSessionId: "ses_live", reattachable: true });
+    const result = await run({ resumeSessionId: "ses_live", jobId: "job-live" });
     expect(result).toMatchObject({ ok: true, data: { answer: 3 } });
     expect(client.created).toEqual([]);
     expect(client.prompts).toEqual([]);
