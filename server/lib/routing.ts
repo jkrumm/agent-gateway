@@ -15,7 +15,7 @@
 // `dispatch_implement`, `dispatch_editorial` and `dispatch_implement_escalation` (the AGENT_OC/
 // AGENT_OC_IMPLEMENT/AGENT_OC_ESCALATION tiers below), the measured review angles (ANGLE_OC) and,
 // since Wave 10, the CLASSIFY tier (check, overview, narrative, excalidraw) run on `opencode` —
-// review's synthesis/frontend angle and otel stay on `claude`. The dispatch family
+// only otel stays on `claude`. The dispatch family
 // defaults to `opencode`; the `claude` harness is an explicit opt-in there, reachable ONLY via
 // `AGENT_GATEWAY_HARNESS_DISPATCH=claude` (paired with a Claude `AGENT_GATEWAY_MODEL_DISPATCH`)
 // or the reactive `iu`→`max` reverse fallback after an IU failure — the one AUTOMATIC Claude
@@ -707,7 +707,6 @@ export function reviewAngleRouteKey(angle: string): RoutedTool {
   return (ROUTED_TOOLS as readonly string[]).includes(key) ? (key as RoutedTool) : "review";
 }
 
-/** The effective route for one review angle session — its own key when it has one, else `review`. */
 /** The route a session runs on when an OpenCode harness is unsafe in the cwd (a live checkout
  *  carrying its own `opencode.json`/`.opencode/`: a plugin there executes regardless of the
  *  permission profile). Built from the JUDGE constant — Sonnet on Max over `claude -p` — and
@@ -717,6 +716,7 @@ export function claudeSafeRoute(): ToolRoute {
   return { ...JUDGE, fallback: JUDGE.fallback ? { ...JUDGE.fallback } : null };
 }
 
+/** The effective route for one review angle session — its own key when it has one, else `review`. */
 export function routeForReviewAngle(angle: string): ToolRoute {
   return routeFor(reviewAngleRouteKey(angle));
 }

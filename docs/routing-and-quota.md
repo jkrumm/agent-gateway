@@ -541,7 +541,9 @@ was not judged against code (no later fix commit to anchor it), and n=3 commits 
 **Decision:** moved to `ANGLE_OC` (Sonnet on Max stays the reverse lane). The synthesis already folds
 low-value improvements, so the extra nits cost reading time, not gates. Revert, one line each:
 `AGENT_GATEWAY_MODEL_REVIEW_ANGLE_FRONTEND=claude-sonnet-5[1m] AGENT_GATEWAY_HARNESS_REVIEW_ANGLE_FRONTEND=claude
-AGENT_GATEWAY_BACKEND_REVIEW_ANGLE_FRONTEND=max`. Watch item: warden's review outcomes on frontend-heavy
+AGENT_GATEWAY_BACKEND_REVIEW_ANGLE_FRONTEND=max`. The reverted route has no IU retry (the
+declared fallback is Max-to-Max and is dropped), unlike the old `JUDGE` shape; a Max outage fails the angle,
+which the review retries once. Watch item: warden's review outcomes on frontend-heavy
 PRs. Everything routed through `routeFor` is now off Claude except `otel`.
 
 ### dispatch_editorial

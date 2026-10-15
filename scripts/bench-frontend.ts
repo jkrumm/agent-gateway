@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Frontend-angle bench (Wave 11): the review `frontend` angle over real weatherorb commits, two
-// arms — Haiku 5.5 EU on OpenCode vs the Sonnet-on-Max route the angle ships on today. Drives
+// arms — Haiku 5.5 EU on OpenCode (the shipped default since Wave 11) vs the pre-Wave-11 Sonnet-on-Max baseline. Drives
 // `runSession` directly with the pipeline's own angle prompt and schema, like bench-routes'
 // review path. Costs IU tokens and Max quota; never run from CI.
 //
@@ -29,9 +29,10 @@ const COMMITS = ["5de4e2d", "6264775", "4ea52bf"];
 const ANGLE = "frontend";
 
 /** Built literally (not via `routeFor`) so every arm runs exactly the route named.
- *  A: Haiku 5.5 EU on OpenCode, no fallback (a fallback would measure a different model).
- *  B: `review_angle_frontend`'s default route (routing.ts JUDGE) verbatim — Sonnet on Max over
- *  `claude -p`, with its IU fallback. */
+ *  A: Haiku 5.5 EU on OpenCode, no fallback (a fallback would measure a different model). This is
+ *  the production `review_angle_frontend` default since Wave 11.
+ *  B: the pre-Wave-11 `JUDGE` shape (Sonnet on Max, claude harness, IU fallback), kept literally
+ *  as the baseline arm — it no longer tracks routing.ts. */
 const ARMS = {
   a: {
     model: HAIKU_5_5,
@@ -50,6 +51,8 @@ const ARMS = {
 } as const satisfies Record<string, ToolRoute>;
 
 type ArmId = keyof typeof ARMS;
+
+const ARM_ROLE = { a: "candidate", b: "baseline" } as const satisfies Record<ArmId, string>;
 
 // ── CLI ─────────────────────────────────────────────────────────────────────────
 
@@ -134,8 +137,10 @@ async function materializeTree(rev: string, treePath: string): Promise<void> {
     SOURCE_REPO,
   );
   if (!archive.ok) throw new Error(`git archive ${rev} failed: ${archive.stderr}`);
-  await git(treePath, ["init", "-q"]);
-  await git(treePath, ["add", "-A"]);
+  const init = await git(treePath, ["init", "-q"]);
+  if (!init.ok) throw new Error(`git init failed: ${init.stderr}`);
+  const add = await git(treePath, ["add", "-A"]);
+  if (!add.ok) throw new Error(`git add failed: ${add.stderr}`);
   const commit = await capture(
     [
       "git",
@@ -152,8 +157,9 @@ async function materializeTree(rev: string, treePath: string): Promise<void> {
   );
   if (!commit.ok) throw new Error(`base commit failed: ${commit.stderr}`);
   const modules = join(SOURCE_REPO, "node_modules");
-  if (existsSync(modules))
-    await capture(["ln", "-s", modules, join(treePath, "node_modules")], treePath);
+  if (!existsSync(modules)) return;
+  const link = await capture(["ln", "-s", modules, join(treePath, "node_modules")], treePath);
+  if (!link.ok) throw new Error(`node_modules symlink failed: ${link.stderr}`);
 }
 
 // ── One cell ────────────────────────────────────────────────────────────────────
@@ -167,6 +173,7 @@ interface Finding {
 
 interface Cell {
   arm: ArmId;
+  role: (typeof ARM_ROLE)[ArmId];
   model: string;
   commit: string;
   rep: number;
@@ -212,17 +219,18 @@ async function runCell(arm: ArmId, commit: string, rep: number, outRoot: string)
 
   const parsed = ANGLE_OUTPUT.safeParse(result.data);
   const findings: Finding[] = parsed.success ? parsed.data.findings : [];
-  const error = result.ok
-    ? parsed.success
-      ? null
-      : `output failed schema validation: ${parsed.error.message.slice(0, 200)}`
-    : (result.error ?? "unknown");
+  let error: string | null;
+  if (!result.ok) error = result.error ?? "unknown";
+  else if (!parsed.success)
+    error = `output failed schema validation: ${parsed.error.message.slice(0, 200)}`;
+  else error = null;
   writeFileSync(join(cellDir, "findings.json"), `${JSON.stringify(findings, null, 2)}\n`);
 
   const input = usage.inputTokens ?? 0;
   const cacheRead = usage.cacheReadTokens ?? 0;
   const cell: Cell = {
     arm,
+    role: ARM_ROLE[arm],
     model: route.model,
     commit,
     rep,
@@ -247,34 +255,38 @@ async function runCell(arm: ArmId, commit: string, rep: number, outRoot: string)
 const usd = (n: number | null) => (n === null ? "n/a" : `$${n.toFixed(4)}`);
 const median = (xs: number[]) => {
   const s = xs.toSorted((a, b) => a - b);
-  return s.length ? s[Math.floor((s.length - 1) / 2)]! : 0;
+  if (!s.length) return 0;
+  const mid = s.length >> 1;
+  const hi = s[mid] ?? 0;
+  return s.length % 2 ? hi : ((s[mid - 1] ?? 0) + hi) / 2;
 };
 
 function render(cells: Cell[], arms: ArmId[]): string {
   const out = [
     "# Frontend angle bench",
     "",
-    "| arm | model | commit | runs ok | findings (per rep) | median s | total cost |",
-    "|-|-|-|-|-|-|-|",
+    "| arm | model | commit | runs ok | failed | findings (per rep; FAIL = run failed, not zero findings) | median s | total cost |",
+    "|-|-|-|-|-|-|-|-|",
   ];
   for (const arm of arms) {
     for (const commit of COMMITS) {
       const rows = cells.filter((c) => c.arm === arm && c.commit === commit);
       if (!rows.length) continue;
       const costs = rows.map((c) => c.costUsd).filter((c): c is number => c !== null);
+      const failedCount = rows.filter((c) => c.error).length;
       out.push(
-        `| ${arm.toUpperCase()} | ${ARMS[arm].model} | ${commit} | ${rows.filter((c) => c.sessionOk && !c.error).length}/${rows.length} | ` +
-          `${rows.reduce((a, c) => a + c.findings.length, 0)} (${rows.map((c) => c.findings.length).join("/")}) | ` +
+        `| ${arm.toUpperCase()} | ${ARMS[arm].model} | ${commit} | ${rows.filter((c) => c.sessionOk && !c.error).length}/${rows.length} | ${failedCount} | ` +
+          `${rows.reduce((a, c) => a + c.findings.length, 0)} (${rows.map((c) => (c.error ? "FAIL" : c.findings.length)).join("/")}) | ` +
           `${median(rows.map((c) => c.wallS)).toFixed(0)} | ${usd(costs.length ? costs.reduce((a, b) => a + b, 0) : null)} |`,
       );
     }
   }
-  const failed = cells.filter((c) => c.error);
+  const failed = cells.filter((c): c is Cell & { error: string } => c.error !== null);
   if (failed.length) {
     out.push("", "## Failed cells", "");
     for (const c of failed)
       out.push(
-        `- ${c.arm.toUpperCase()} ${c.commit} #${c.rep}: ${c.error!.replace(/\n/g, " ").slice(0, 200)}`,
+        `- ${c.arm.toUpperCase()} ${c.commit} #${c.rep}: ${c.error.replace(/\n/g, " ").slice(0, 200)}`,
       );
   }
   return out.join("\n");
@@ -284,7 +296,7 @@ function renderPooled(cells: Cell[], commit: string): string {
   const out = [
     `# Pooled frontend findings — weatherorb ${commit}`,
     "",
-    "Each finding is tagged arm+rep (A = Haiku 5.5 EU on OpenCode, B = Sonnet on Max).",
+    "Each finding is tagged arm+rep (A = Haiku 5.5 EU on OpenCode, candidate; B = Sonnet on Max, baseline).",
     "",
   ];
   let n = 0;
@@ -329,8 +341,17 @@ const arms = (args.get("arms") ?? "a,b")
     if (s === "a" || s === "b") return s;
     throw new Error(`unknown arm "${s}" (expected a or b)`);
   });
-const reps = Number.parseInt(args.get("reps") ?? "2", 10);
-const concurrency = Number.parseInt(args.get("concurrency") ?? "3", 10);
+function positiveIntFlag(name: string, fallback: string): number {
+  const raw = args.get(name) ?? fallback;
+  const n = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(n) || n < 1) {
+    console.error(`--${name} must be a positive integer (got "${raw}")`);
+    process.exit(1);
+  }
+  return n;
+}
+const reps = positiveIntFlag("reps", "2");
+const concurrency = positiveIntFlag("concurrency", "3");
 const outRoot =
   args.get("out") ??
   join(homedir(), ".local", "share", "agent-gateway", "bench", "wave11", "frontend");
@@ -357,6 +378,7 @@ const cells = await pool(jobs, concurrency, async ({ arm, commit, rep }) => {
     );
     return {
       arm,
+      role: ARM_ROLE[arm],
       model: ARMS[arm].model,
       commit,
       rep,
