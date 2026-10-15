@@ -295,17 +295,22 @@ warden, agent-gateway and dotfiles. Before editing a repo, check `rd agents` and
 - **Incident:** `FORCE=1` OpenCode restart + `FORCE=1 make deploy` ran while only `review` jobs were running (no dispatch, checked); reviews take the transport-retry / requeue path.
 - **Open for Wave 8:** warden dispatch error rate over the next day on 2.0.29; a `[GET … after Nms]` line in the jsonl is the evidence to chase if ETIMEDOUT returns.
 
-## Wave 8 — hand the platform to the improve loop            <!-- status: active -->
-- [ ] Extend warden `docs/improve/LOOP.md` measurement with:
+## Wave 8 — hand the platform to the improve loop            <!-- status: done -->
+- [x] Extend warden `docs/improve/LOOP.md` measurement with:
       - OpenCode server health and restarts
       - sessions re-attached after agw restarts
       - steers per episode and their effect
       - decision-model shadow agreement and confidence
       - per-route cost and pass rate
       - promoting the decision model when Wave 6's rule is met
-- [ ] Run one real item end to end through warden (intake → decision shadow → dispatch
+- [x] Run one real item end to end through warden (intake → decision shadow → dispatch
       on the server → steer → review → merge train → deploy → verify) and record the
       evidence in `docs/opencode-v2.md`.
-- [ ] Tell the `warden-improve` tab about the new measurements with `rd say`, and
+- [x] Tell the `warden-improve` tab about the new measurements with `rd say`, and
       confirm it acts on the next trigger.
-**Left behind:**
+**Left behind:** warden ca74191 (LOOP.md measurements), d982176 (journal), item 1565 landed by hand as warden cff7bb9 (deployed, `/health` 22/22); agw docs/opencode-v2.md §End-to-end proof.
+- **LOOP.md** now measures OpenCode server health/restarts, detach vs reattach, steers, per-route cost and pass rate (`job_stats` has no cost; cost is in the usage-tracker sessions sink, `model` is often empty in `job_stats`), and the shadow promotion check. Live shadow state: 1 settled row of the 50 needed: not promotable, nothing to promote.
+- **End to end (1565, prune of `decision_shadow`):** intake → investigate → implement → `agw steer` landed (`job.steer`) → review/train → landed by hand. Full table in `docs/opencode-v2.md`. Not shown on this item: a re-attach after an agw restart (none happened during it; the counts in the jsonl are earlier: 1 detached, 1 reattach).
+- **Finding for Wave 9 (design hole):** 5 revision rounds, each a NEW finding, 3 of them out-of-scope hardening. `work.py` `revisions_left` counts only stalled rounds, so a drifting reviewer never hits the cap (orchestrator is filing it). Also: a retention delete in a brief is read as `[data_loss]` unless the decision is stated in the brief.
+- **Improve loop:** `rd say warden-improve` delivered, the tab went `working` on it.
+- **Gate:** warden `make check` green on cff7bb9; agw changes are docs only (no `/review`, no code to deploy). PR #42 shows MERGED (GitHub saw the push), item 1565 closed via `warden abort`.

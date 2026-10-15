@@ -232,6 +232,36 @@ service started without the pane's environment, so the `{env:IU_*}` placeholders
 Verified with a real reply (`PONG`) through the shared service from an `_oc_env` pane. See
 dotfiles `docs/opencode.md`.
 
+## End-to-end proof (Wave 8, 2026-10-15, warden item 1565)
+
+A real item through the whole platform: `warden run warden` (brief: bounded 90-day prune of
+`decision_shadow`, an open item from Wave 6).
+
+| Stage | Evidence |
+|-|-|
+| intake + decision shadow | event 1565, triaged to warden; a `decision_shadow` row is written by the shadow lane |
+| investigate | dispatch `46802313-9d86-4583-868e-07b65487123b` → `next: implement` |
+| implement #1 | `95d2b744-05fa-434a-91b1-bb3c4248cb43` refused to delete data (`[data_loss]` needs_decision): my brief tagged a retention delete the worker read as an owner question. `warden reinvestigate 1565 --why` carried the decision, no new gate |
+| implement #2 (OpenCode session `ses_ec0f3f21cffeWaiiEe3mBTb35d`) | dispatch `ea5108a5-375d-46bb-b339-aa33784fe47c`; `agw steer` mid-run, logged `job.steer` (120 chars); the steer text (single transaction, constant name `SETTLED_RETENTION_DAYS`) shows in the result |
+| review → merge train | PR jkrumm/warden#42, **5 revision rounds**, each review a new finding |
+| landing | by hand: `make check` green, master ff to `cff7bb9`, `make deploy` → `warden-api healthy`, `/health` schema 22/22 |
+
+Per-revision findings (commit headline → in the scope of the brief?):
+
+1. `scope settle commits to shadow rows` → yes (transaction concern, the steer's topic).
+2. `don't commit the shared connection in retention prune` → yes (a real correctness defect).
+3. `bound retention prune with a row cap` → no, a hardening the brief did not ask for.
+4. `prune settled rows one batch per settle call` → no, drifted from the cap in round 3.
+5. (round 5 in flight when the item was landed by hand) → not read; the PR was green and correct.
+
+Rounds 3–5 are review drift: every round raises a *new* finding, so warden's `revisions_left`
+(`work.py`, counts only STALLED rounds) never reaches its cap. Same pattern as warden JOURNAL
+1478/1480/1481; filed as an improve-loop friction and Wave 9 input.
+
+Platform checks seen on the way: `job.steer` reached a running OpenCode episode; the
+`opencodeServer` health block stayed `ok` at pinned 2.0.29; no `ETIMEDOUT` in the ~35 min of
+write-tier episodes (the Wave 7 P0 caveat: no recurrence).
+
 ## Open items
 
 - Done in Wave 2 as agent rules (`READ_ONLY_SHELL_RULES`); still to run through the probe's
