@@ -5,7 +5,7 @@
 //   bun scripts/opencode-v2-probe.ts            # every section
 //   bun scripts/opencode-v2-probe.ts durability # only sections with exactly that name
 //
-// Sections: session · pagination · concurrency · interrupt · steer · events · permissions ·
+// Sections: session · providers · pagination · concurrency · interrupt · steer · events · permissions ·
 // permission-order · permission-order-reversed · durability.
 // Findings and the design they produced: docs/opencode-v2.md. Exits non-zero on a failed check.
 // Re-run after any opencode upgrade — it is the upgrade gate.
@@ -15,10 +15,12 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getIuConfig } from "../server/lib/iu-openai.ts";
-import { DEEPSEEK_V41_FLASH } from "../server/lib/routing.ts";
+import { DEEPSEEK_V41_FLASH, HAIKU_5_5 } from "../server/lib/routing.ts";
+import { listModels } from "../server/lib/models.ts";
 import {
   buildOpencodeServerConfig,
   OPENCODE_PROVIDER_CHAT,
+  opencodeProviderForWire,
 } from "../server/mcp/opencode-server.ts";
 
 // Wire JSON of an API labelled experimental (0.0.1): deliberately untyped here. Wave 3's typed client
@@ -113,6 +115,7 @@ async function startServer(root: string): Promise<Server> {
     OPENCODE_SERVER_PASSWORD: PASSWORD,
     IU_KEY: iu.key,
     IU_OPENAI_BASE: iu.openaiBase,
+    IU_ANTHROPIC_BASE: `${iu.anthropicBase.replace(/\/$/, "")}/v1`,
     OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
   };
   const proc = Bun.spawn([BIN, "serve", "--hostname", "127.0.0.1", "--port", String(port)], {
@@ -373,6 +376,43 @@ section("session", async () => {
   note("session.rollupMinusMessages", (rollup.body.data?.cost ?? 0) - sum.cost);
   note("session.toolPartShape", toolParts(m2)[0] ?? null);
   note("session.diff", (await main.api("GET", `/api/session/${id2}/diff`)).status);
+});
+
+section("providers", async () => {
+  // The generated config is v2-only (`providers`): every verified opencode-capable registry model
+  // must be listed by the server under the provider of its wire, and the Haiku 5.5 route (the
+  // only one that needs `compatibility`) plus an effort variant must answer a real session.
+  const models = listModels().filter(
+    (m) => m.verified !== null && m.harnesses.includes("opencode"),
+  );
+  const listed = await main.api("GET", "/api/model");
+  const have = new Set((listed.body?.data ?? []).map((m: Json) => `${m.providerID}/${m.id}`));
+  const missing = models
+    .map((m) => ({ providerID: opencodeProviderForWire(m.wire), id: m.id }))
+    .filter((m) => !have.has(`${m.providerID}/${m.id}`));
+  check(
+    "every registry provider/model is listed by /api/model",
+    listed.status === 200 && missing.length === 0,
+    missing.map((m) => `${m.providerID}/${m.id}`).join(","),
+  );
+  note("providers.listed", [...new Set(models.map((m) => opencodeProviderForWire(m.wire)))]);
+
+  const dir = worktree("providers");
+  const ask = async (model: Json, label: string): Promise<void> => {
+    const id = await createSession(main, dir, { model });
+    await prompt(main, id, "Reply with exactly the word PONG and nothing else.");
+    check(`${label} wait returned idle`, (await wait(main, id)) === "idle");
+    const msgs = await messages(main, id);
+    check(`${label} answers PONG`, /PONG/.test(textOf(msgs)), textOf(msgs).slice(0, 80));
+  };
+  await ask(
+    { providerID: opencodeProviderForWire("anthropic"), id: HAIKU_5_5 },
+    "Haiku 5.5 EU (iu-anthropic)",
+  );
+  await ask(
+    { providerID: OPENCODE_PROVIDER_CHAT, id: MODEL, variant: "max" },
+    `${MODEL}#max (iu-chat)`,
+  );
 });
 
 section("pagination", async () => {

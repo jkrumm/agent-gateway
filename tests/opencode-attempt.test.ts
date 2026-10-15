@@ -13,6 +13,7 @@ import { getIuConfig } from "../server/lib/iu-openai.ts";
 import { routeFor } from "../server/lib/routing.ts";
 import { runOpencodeAttempt, type OpencodeAttemptDeps } from "../server/mcp/opencode-runner.ts";
 import {
+  OPENCODE_PINNED_VERSION,
   OPENCODE_SESSION_BLANKED_ENV,
   type OpencodeServerStatus,
 } from "../server/mcp/opencode-server.ts";
@@ -72,8 +73,8 @@ afterEach(() => {
 const serverOk = async (): Promise<OpencodeServerStatus> => ({
   ok: true,
   up: true,
-  version: "2.0.25",
-  pinned: "2.0.25",
+  version: OPENCODE_PINNED_VERSION,
+  pinned: OPENCODE_PINNED_VERSION,
   versionOk: true,
 });
 
@@ -374,16 +375,16 @@ describe("runOpencodeAttempt — refusals before a session exists", () => {
         serverStatus: async () => ({
           ok: false,
           up: true,
-          version: "2.0.30",
-          pinned: "2.0.25",
+          version: "9.9.9",
+          pinned: OPENCODE_PINNED_VERSION,
           versionOk: false,
-          error: "opencode server version 2.0.30 != pinned 2.0.25",
+          error: `opencode server version 9.9.9 != pinned ${OPENCODE_PINNED_VERSION}`,
         }),
       },
     );
     expect(result.ok).toBe(false);
     expect(result.error).toContain("opencode server unavailable before session");
-    expect(result.error).toContain("2.0.30");
+    expect(result.error).toContain("9.9.9");
     expect(isRetryableSessionError(result.error ?? "")).toBe(true);
     expect(classifyBreakerOutcome(result)).toBe("transport");
     expect(client.callLog).toEqual([]);

@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { __resetForTests } from "../server/jobs/store.ts";
 import { routeFor } from "../server/lib/routing.ts";
 import { OpencodeHttpError } from "../server/mcp/opencode-client.ts";
+import { OPENCODE_PINNED_VERSION } from "../server/mcp/opencode-server.ts";
 import { runOpencodeAttempt, type OpencodeAttemptDeps } from "../server/mcp/opencode-runner.ts";
 import {
   __resetActiveProcsForTests,
@@ -71,8 +72,8 @@ const okDeps = {
   serverStatus: async () => ({
     ok: true,
     up: true,
-    version: "2.0.25",
-    pinned: "2.0.25",
+    version: OPENCODE_PINNED_VERSION,
+    pinned: OPENCODE_PINNED_VERSION,
     versionOk: true,
   }),
   password: () => "pw",

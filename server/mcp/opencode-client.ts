@@ -29,6 +29,23 @@ import {
 const REQUEST_TIMEOUT_MS = 30_000;
 /** Tries for a timed-out GET (idempotent); other verbs are never repeated. */
 const GET_ATTEMPTS = 3;
+/** Ceiling of the pause before a GET's 2nd try; each further try multiplies it (250 ms, 1 s). */
+const GET_BACKOFF_BASE_MS = 250;
+const GET_BACKOFF_FACTOR = 4;
+
+/** Pause before retry number `retry` (1 = the 2nd try) of a timed-out GET: exponential with
+ *  equal jitter — half the ceiling fixed, half random — so parallel episodes that stalled on the
+ *  same slow server answer do not re-hit it in lockstep, and the pause is never ~0. Pure. */
+export function getRetryDelayMs(retry: number, random: () => number = Math.random): number {
+  const ceiling = GET_BACKOFF_BASE_MS * GET_BACKOFF_FACTOR ** (retry - 1);
+  return ceiling / 2 + (random() * ceiling) / 2;
+}
+
+/** Test seams for the client's retry pause — production passes nothing. */
+export interface OpencodeClientOptions {
+  sleep?: (ms: number) => Promise<void>;
+  random?: () => number;
+}
 /** v2 caps `limit` at 200 (400 above). */
 const PAGE_LIMIT = 200;
 
@@ -155,7 +172,10 @@ export class OpencodeHttpError extends Error {
   }
 }
 
-export function createOpencodeClient(fetchImpl: typeof fetch = fetch): OpencodeClient {
+export function createOpencodeClient(
+  fetchImpl: typeof fetch = fetch,
+  { sleep = Bun.sleep, random = Math.random }: OpencodeClientOptions = {},
+): OpencodeClient {
   const attempt = async (
     method: string,
     path: string,
@@ -186,8 +206,9 @@ export function createOpencodeClient(fetchImpl: typeof fetch = fetch): OpencodeC
     }
   };
 
-  /** A timed-out GET is idempotent: retry it before surfacing, so one slow server answer (the
-   *  2.0.25 stall) never fails a read that a second try would have served. */
+  /** A timed-out GET is idempotent: retry it (after a short jittered backoff) before surfacing,
+   *  so one slow server answer (the 2.0.25 stall) never fails a read that a second try would have
+   *  served. */
   const call = async (
     method: string,
     path: string,
@@ -199,6 +220,7 @@ export function createOpencodeClient(fetchImpl: typeof fetch = fetch): OpencodeC
         return await attempt(method, path, options);
       } catch (err) {
         if (!(err instanceof Error && /ETIMEDOUT/.test(err.message))) throw err;
+        await sleep(getRetryDelayMs(n, random));
       }
     }
     return attempt(method, path, options);

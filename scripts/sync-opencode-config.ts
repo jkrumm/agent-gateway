@@ -11,7 +11,8 @@
 // which `oc` exports without it.
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { listModels, type ModelEntry, type ModelWire } from "../server/lib/models.ts";
+import { listModels, type ModelWire } from "../server/lib/models.ts";
+import { opencodeV2ModelRow } from "../server/mcp/opencode-server.ts";
 
 const PROVIDERS: Record<ModelWire, { id: string; package: string; name: string; baseURL: string }> =
   {
@@ -35,34 +36,6 @@ const PROVIDERS: Record<ModelWire, { id: string; package: string; name: string; 
     },
   };
 
-function modelRow(m: ModelEntry) {
-  return {
-    // Without this OpenCode sends thinking.block_binding + a beta header IU's gateway answers
-    // with 503 not_found_error for the -eu id (agent-gateway opencode-server.ts, 2026-10-14).
-    ...(m.wire === "anthropic" ? { compatibility: { supportsThinkingBlockBinding: false } } : {}),
-    name: m.name,
-    limit: { context: m.limit.context, output: m.limit.output },
-    cost: {
-      input: m.rate.in,
-      output: m.rate.out,
-      ...(m.rate.cacheRead !== undefined
-        ? {
-            cache: {
-              read: m.rate.cacheRead,
-              ...(m.rate.cacheWrite !== undefined ? { write: m.rate.cacheWrite } : {}),
-            },
-          }
-        : {}),
-    },
-    ...(m.effort.length > 0
-      ? {
-          settings: { reasoningEffort: "high" },
-          variants: m.effort.map((e) => ({ id: e, settings: { reasoningEffort: e } })),
-        }
-      : {}),
-  };
-}
-
 const path = Bun.argv[2];
 if (!path) {
   console.error("usage: bun scripts/sync-opencode-config.ts <opencode.json>");
@@ -81,12 +54,11 @@ config.providers = Object.fromEntries(
         name: p.name,
         settings: { baseURL: p.baseURL, apiKey: "{env:IU_KEY}" },
         models: Object.fromEntries(
-          models.filter((m) => m.wire === wire).map((m) => [m.id, modelRow(m)]),
+          models.filter((m) => m.wire === wire).map((m) => [m.id, opencodeV2ModelRow(m)]),
         ),
       },
     ];
   }),
 );
-delete config.provider;
 writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
 console.log(`wrote ${models.length} models to ${path}`);

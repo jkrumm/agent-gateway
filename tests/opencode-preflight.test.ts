@@ -16,7 +16,10 @@ import {
   planNextAttempt,
 } from "../server/mcp/session-runner.ts";
 import { routeFor } from "../server/lib/routing.ts";
-import type { OpencodeServerStatus } from "../server/mcp/opencode-server.ts";
+import {
+  OPENCODE_PINNED_VERSION,
+  type OpencodeServerStatus,
+} from "../server/mcp/opencode-server.ts";
 import { FakeOpencodeClient, text } from "./helpers/fake-opencode-client.ts";
 
 const savedEnv = { key: process.env.IU_API_KEY, base: process.env.IU_BASE_URL };
@@ -40,8 +43,8 @@ afterEach(() => {
 const serverOk = async (): Promise<OpencodeServerStatus> => ({
   ok: true,
   up: true,
-  version: "2.0.25",
-  pinned: "2.0.25",
+  version: OPENCODE_PINNED_VERSION,
+  pinned: OPENCODE_PINNED_VERSION,
   versionOk: true,
 });
 const refusedPreflight: IuPreflight = async () => ({ ok: false, reason: "ECONNREFUSED" });
@@ -132,7 +135,7 @@ const down =
     ok: false,
     up: false,
     version: null,
-    pinned: "2.0.25",
+    pinned: OPENCODE_PINNED_VERSION,
     versionOk: false,
     error,
     ...over,
@@ -166,15 +169,15 @@ describe("runOpencodeAttempt — shared server check", () => {
 
   test("version mismatch: no session, and still connection-class so the ladder falls back", async () => {
     const { result, sessions } = await attemptAgainst(
-      down("opencode server version 2.0.30 != pinned 2.0.25", {
+      down(`opencode server version 9.9.9 != pinned ${OPENCODE_PINNED_VERSION}`, {
         up: true,
-        version: "2.0.30",
+        version: "9.9.9",
       }),
     );
     expect(sessions).toBe(0);
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error).toContain("2.0.30");
+    expect(result.error).toContain("9.9.9");
     expect(isRetryableSessionError(result.error ?? "")).toBe(true);
   });
 

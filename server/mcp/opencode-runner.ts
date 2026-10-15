@@ -45,10 +45,12 @@ import {
   unclassifiedOutputFailure,
   writeAttribution,
   writeSessionEnv,
+  type SessionLedger,
+  type SessionLedgerRow,
   type SessionOptions,
   type SessionProgress,
   type SessionResult,
-} from "./session-runner.ts";
+} from "./session-core.ts";
 import {
   createOpencodeClient,
   OpencodeHttpError,
@@ -633,36 +635,137 @@ export interface OpencodeAttemptDeps {
   idleTimeoutMs?: number;
 }
 
-/** One OpenCode session — the harness counterpart to `runSessionAttempt`'s claude path, called
- *  from there when `resolveHarness()` resolves `"opencode"`. Always the PRIMARY attempt: a forced
- *  (fallback) attempt is never opencode (`resolveHarness`'s doc comment), so `ctx.backend` here is
- *  always the route's own primary backend (`iu` for both AGENT_OC tiers). */
-export async function runOpencodeAttempt<T>(
-  opts: SessionOptions<T>,
-  turnsRef: { current: number },
-  ctx: OpencodeAttemptContext,
-  deps: OpencodeAttemptDeps = {},
-): Promise<SessionResult<T>> {
-  const {
-    cwd,
-    prompt,
-    jsonSchema,
-    readOnly = false,
-    extraEnv,
-    extraDisallowedTools,
-    settingSources,
-    mcpServers,
-    tool,
-    jobId,
-    isCancelled,
-    validate,
-    onActivity,
-    onProgress,
-    resumeSessionId,
-    onSessionId,
-  } = opts;
-  const { model, backend, variant } = ctx;
+/** What an attempt's attribution rows, logs and failure results all share. */
+interface AttemptBase {
+  cwd: string;
+  tool: string | undefined;
+  jobId: string | undefined;
+  model: string;
+  backend: Backend;
+  /** The agw-side id of this attempt in the attribution log (not the OpenCode session id). */
+  sessionUuid: string;
+  tsStart: string;
+  errCtx: {
+    tool: string | undefined;
+    model: string;
+    backend: Backend;
+    harness: "opencode";
+    jobId: string | undefined;
+  };
+}
 
+/** The session ledger entry an attempt reads and writes: present only for a multi-session job
+ *  (`SessionOptions.reattachKey`) whose server has a ledger installed. */
+interface AttemptLedger {
+  ledger: SessionLedger;
+  jobId: string;
+  key: string;
+}
+
+/** What the failure paths need to know about the attempt so far. Mutated as the attempt
+ *  advances (the catch around session start/drive reads it). */
+interface AttemptTrace {
+  sessionId: string | undefined;
+  /** Usage of a session an earlier attempt already attributed (a settled ledger row) is never
+   *  written twice. */
+  alreadyAttributed: boolean;
+}
+
+/** How a (possibly re-attached) session is driven: which prompt, and attach vs prompt. */
+interface SessionPlan {
+  sessionId: string;
+  attach: boolean;
+  promptResume: boolean;
+  baselineIdleId: string | undefined;
+  /** The prompt a re-attached session with history is sent (the continuation nudge); a fresh or
+   *  never-prompted session gets the full `prompt`. */
+  sendPrompt: string;
+}
+
+type Summary = ReturnType<typeof summarizeOpencodeMessages>;
+
+function attributionRow(
+  base: AttemptBase,
+  opencodeSessionId: string | undefined,
+  fields: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    sessionId: base.sessionUuid,
+    opencodeSessionId,
+    tool: base.tool ?? "unknown",
+    project: base.cwd,
+    model: base.model,
+    backend: base.backend,
+    harness: "opencode",
+    tsStart: base.tsStart,
+    tsEnd: new Date().toISOString(),
+    ...fields,
+  };
+}
+
+function attributeOnce(trace: AttemptTrace, row: Record<string, unknown>): void {
+  if (!trace.alreadyAttributed) writeAttribution(row);
+}
+
+/** A transport-class failure: connection-class text, so the retry ladder, the Max fallback and
+ *  the breaker read it as such (no `iuConfigError`). */
+function transportFailure<T>(
+  base: AttemptBase,
+  error: string,
+  extra: Partial<SessionResult<T>> = {},
+): SessionResult<T> {
+  return {
+    ok: false,
+    error,
+    classificationText: error,
+    hadApiRetry: false,
+    backend: base.backend,
+    model: base.model,
+    ...extra,
+  };
+}
+
+/** No session may be created: log, attribute and fail as a transport failure. */
+function refuseAttempt<T>(
+  base: AttemptBase,
+  reason: string,
+  error: string,
+  logMessage: string,
+): SessionResult<T> {
+  runnerLogger().error(
+    { event: `session.${reason}`, project: base.cwd, ...base.errCtx, error },
+    logMessage,
+  );
+  writeAttribution(attributionRow(base, undefined, { outcome: "error", reason }));
+  return transportFailure<T>(base, error);
+}
+
+function iuConfigFailure<T>(base: AttemptBase, err: unknown): SessionResult<T> {
+  const message = err instanceof Error ? err.message : String(err);
+  runnerLogger().error(
+    { event: "session.iu_config_error", project: base.cwd, ...base.errCtx, error: message },
+    "IU config unavailable (opencode)",
+  );
+  writeAttribution(
+    attributionRow(base, undefined, { outcome: "error", reason: "iu_config_error" }),
+  );
+  return {
+    ok: false,
+    error: message,
+    classificationText: message,
+    backend: base.backend,
+    model: base.model,
+    iuConfigError: true,
+  };
+}
+
+/** Options the claude CLI has and the OpenCode harness does not, and the registry check on the
+ *  model/variant. Returns the registry entry of the model. */
+function validateAttemptOptions(
+  opts: SessionOptions<unknown>,
+  ctx: OpencodeAttemptContext,
+): ModelEntry {
+  const { extraDisallowedTools, settingSources, mcpServers } = opts;
   // No caller passes this for a dispatch route — the permission profile (the `agw-*` agents,
   // opencode-server.ts) has no per-tool-name allow/deny surface to extend, unlike claude's
   // `--disallowedTools`. A caller that starts doing so needs this module updated, not a
@@ -693,108 +796,424 @@ export async function runOpencodeAttempt<T>(
   // unregistered/non-opencode model, and a variant the model's registry `effort` does not
   // list: opencode itself silently accepts an undeclared variant (falls back to the base
   // `options`), which would mask a typo'd override as "ran, just not the effort asked for".
-  const registryModel = opencodeModel(model);
-  if (variant !== undefined && !registryModel.effort.includes(variant)) {
+  const registryModel = opencodeModel(ctx.model);
+  if (ctx.variant !== undefined && !registryModel.effort.includes(ctx.variant)) {
     throw new Error(
-      `runOpencodeAttempt: unknown opencode variant "${variant}" for ${model} — declared variants are ` +
+      `runOpencodeAttempt: unknown opencode variant "${ctx.variant}" for ${ctx.model} — declared variants are ` +
         (registryModel.effort.join(", ") || "none"),
     );
   }
+  return registryModel;
+}
 
-  const sessionUuid = randomUUID();
-  const tsStart = new Date().toISOString();
-  const errCtx = { tool, model, backend, harness: "opencode" as const, jobId };
-
-  let iuKey: string;
-  let iuOpenaiBase: string;
-  try {
-    const cfg = await getIuConfig();
-    iuKey = cfg.key;
-    iuOpenaiBase = cfg.openaiBase;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    runnerLogger().error(
-      { event: "session.iu_config_error", project: cwd, ...errCtx, error: message },
-      "IU config unavailable (opencode)",
-    );
-    writeAttribution({
-      sessionId: sessionUuid,
-      tool: tool ?? "unknown",
-      project: cwd,
-      model,
-      backend,
-      harness: "opencode",
-      tsStart,
-      tsEnd: new Date().toISOString(),
-      outcome: "error",
-      reason: "iu_config_error",
-    });
-    return {
-      ok: false,
-      error: message,
-      classificationText: message,
-      backend,
-      model,
-      iuConfigError: true,
-    };
-  }
-
-  // Never start a session against a dead endpoint or server: the server retries a dead IU
-  // endpoint forever. Both are classified as transport failures (connection-class text, no
-  // `iuConfigError` — the breaker must count them), so the retry ladder and the Max fallback
-  // treat them as such.
-  const refuse = (reason: string, error: string, logMessage: string): SessionResult<T> => {
-    runnerLogger().error(
-      { event: `session.${reason}`, project: cwd, ...errCtx, error },
-      logMessage,
-    );
-    writeAttribution({
-      sessionId: sessionUuid,
-      tool: tool ?? "unknown",
-      project: cwd,
-      model,
-      backend,
-      harness: "opencode",
-      tsStart,
-      tsEnd: new Date().toISOString(),
-      outcome: "error",
-      reason,
-    });
-    return {
-      ok: false,
-      error,
-      classificationText: error,
-      hadApiRetry: false,
-      backend,
-      model,
-    };
-  };
-
+/** Never start a session against a cancelled job, a draining process, a dead endpoint or a
+ *  wrong-version server. Returns the refusal, or `null` when a session may start. Endpoint and
+ *  server failures are transport-class (connection-class text, no `iuConfigError` — the breaker
+ *  must count them), so a wrong-version server falls through to the Max fallback instead of
+ *  failing the episode outright. */
+async function refusalBeforeSession<T>(
+  opts: SessionOptions<T>,
+  base: AttemptBase,
+  deps: OpencodeAttemptDeps,
+  iuOpenaiBase: string,
+  detachable: boolean,
+): Promise<SessionResult<T> | null> {
+  const { jobId, isCancelled } = opts;
   if (jobId !== undefined && isCancelled?.(jobId)) throw new SessionCancelledError(jobId);
   // A drain has begun: nothing may start now. The job is requeued by the next boot, which starts
   // (or re-attaches) this session — never create one this process is about to abandon.
-  const detachable = canDetachSession(opts);
   if (detachable && isSessionDraining()) throw new SessionDetachedError(jobId);
   const probe = await (deps.preflight ?? preflightIuEndpoint)(iuOpenaiBase, preflightBudgetMs());
   if (!probe.ok) {
-    return refuse(
+    return refuseAttempt<T>(
+      base,
       "opencode_preflight_failed",
       `IU endpoint unreachable before opencode session: ${probe.reason}`,
       "IU endpoint unreachable — no opencode session created",
     );
   }
-
-  // The shared server must be up AND the pinned build; the text carries a connection-class
-  // token whatever the cause (down, wrong version, rejected password) so a wrong-version server
-  // falls through to the Max fallback instead of failing the episode outright.
   const server = await (deps.serverStatus ?? getOpencodeServerStatus)();
   if (!server.ok) {
-    return refuse(
+    return refuseAttempt<T>(
+      base,
       "opencode_server_unavailable",
       `opencode server unavailable before session (transport-class, fetch failed): ${server.error ?? "not ok"}`,
       "opencode server unavailable — no opencode session created",
     );
   }
+  return null;
+}
+
+/** A re-attach after a restart. The session lives on the server, so it is in one of three
+ *  states: running its turn (a detached drain — attach, never prompt: a second prompt would
+ *  steer a nudge into live work), already idle after a succeeded turn (finished while agw
+ *  was down — read the result), or cut off (a killed server — prompt `resume`).
+ *  `active` FIRST: a session that finishes between the two reads is then caught by the
+ *  messages read (finished) instead of falling through to a re-prompt of a done episode. */
+async function planReattach(
+  client: OpencodeClient,
+  sessionId: string,
+  opts: SessionOptions<unknown>,
+  base: AttemptBase,
+  fromLedger: boolean,
+): Promise<SessionPlan> {
+  const live = (await client.active()).includes(sessionId);
+  const [newest] = await client.recentMessages(sessionId, 1);
+  // Any idle that is not a failed/interrupted turn is a finished one (an absent outcome too).
+  const finishedOnItsOwn =
+    newest?.type === "idle" && newest.outcome !== "failed" && newest.outcome !== "interrupted";
+  const attach = live || finishedOnItsOwn;
+  // A session with no message at all was detached before its prompt went out: send the
+  // full prompt as a first one, not a resume of a turn that never started.
+  const promptResume = !attach && newest !== undefined;
+  let mode: "live" | "finished" | "resume" | "unprompted" = "unprompted";
+  if (live) mode = "live";
+  else if (finishedOnItsOwn) mode = "finished";
+  else if (newest) mode = "resume";
+  runnerLogger().info(
+    {
+      event: "session.opencode_reattach",
+      project: base.cwd,
+      ...base.errCtx,
+      sessionId,
+      mode,
+      fromLedger,
+    },
+    "opencode session re-attached after a restart",
+  );
+  return {
+    sessionId,
+    attach,
+    promptResume,
+    baselineIdleId: !finishedOnItsOwn && newest?.type === "idle" ? newest.id : undefined,
+    sendPrompt: promptResume && opts.resumePrompt ? opts.resumePrompt : opts.prompt,
+  };
+}
+
+interface AcquireInput {
+  opts: SessionOptions<unknown>;
+  base: AttemptBase;
+  registryModel: ModelEntry;
+  variant: string | undefined;
+  client: OpencodeClient;
+  detachable: boolean;
+  ledgerRef: AttemptLedger | null;
+  ledgerRow: SessionLedgerRow | undefined;
+  trace: AttemptTrace;
+}
+
+/** Re-attach to the session the caller or the ledger names, or create one. A ledger session the
+ *  server DEFINITELY no longer has (HTTP 404: state wiped, pruned) is not an error: forget it and
+ *  start the call over. Anything else — a refused connection, a timeout, a 5xx — says nothing
+ *  about the session and rethrows (transport class → the retry ladder), as does a caller-supplied
+ *  id. */
+async function acquireSession(a: AcquireInput): Promise<SessionPlan> {
+  const { opts, base, registryModel, client, detachable, ledgerRef, ledgerRow, trace } = a;
+  let plan: SessionPlan | undefined;
+  if (trace.sessionId) {
+    try {
+      plan = await planReattach(client, trace.sessionId, opts, base, ledgerRow !== undefined);
+    } catch (err) {
+      const notFound = err instanceof OpencodeHttpError && err.status === 404;
+      if (!notFound || !ledgerRow || !ledgerRef) throw err;
+      runnerLogger().warn(
+        {
+          event: "session.opencode_ledger_stale",
+          project: base.cwd,
+          ...base.errCtx,
+          sessionId: trace.sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+        "ledger session unreadable — creating a fresh session",
+      );
+      ledgerRef.ledger.drop(ledgerRef.jobId, ledgerRef.key);
+      trace.alreadyAttributed = false;
+      trace.sessionId = undefined;
+    }
+  }
+  if (plan) return plan;
+
+  // The preflight and the server-status read above await: a drain may have begun meanwhile.
+  // Nothing may be created once it has — the next boot starts this call.
+  if (detachable && isSessionDraining()) throw new SessionDetachedError(base.jobId);
+  const sessionId = await client.createSession({
+    directory: base.cwd,
+    model: {
+      providerID: opencodeProviderForWire(registryModel.wire),
+      id: base.model,
+      variant: a.variant,
+    },
+    agent: opts.readOnly ? OPENCODE_AGENT_READONLY : OPENCODE_AGENT_IMPLEMENT,
+    title: `agw ${base.tool ?? "episode"}`,
+    metadata: { agw: { jobId: base.jobId, tool: base.tool } },
+  });
+  trace.sessionId = sessionId;
+  if (ledgerRef) ledgerRef.ledger.put(ledgerRef.jobId, ledgerRef.key, sessionId);
+  return {
+    sessionId,
+    attach: false,
+    promptResume: false,
+    baselineIdleId: undefined,
+    sendPrompt: opts.prompt,
+  };
+}
+
+interface DriveInput extends AcquireInput {
+  deps: OpencodeAttemptDeps;
+  iuOpenaiBase: string;
+  sessionEnv: Record<string, string>;
+  turnsRef: { current: number };
+}
+
+/** Acquire the session, hand its id to the caller, set its shell env (a fresh session only) and
+ *  drive it to the end. */
+async function startAndDrive(a: DriveInput): Promise<OpencodeDriveResult> {
+  const { opts, base, deps, client } = a;
+  const plan = await acquireSession(a);
+  announceOpencodeSessionId(plan.sessionId, {
+    iuOpenaiBase: a.iuOpenaiBase,
+    model: base.model,
+    backend: base.backend,
+    tool: base.tool,
+    onSessionId: opts.onSessionId,
+  });
+  if (!plan.attach) await client.setEnvironment(plan.sessionId, a.sessionEnv);
+  return driveOpencodeSession(client, {
+    jobId: base.jobId,
+    cwd: base.cwd,
+    sessionId: plan.sessionId,
+    prompt: opts.jsonSchema
+      ? appendJsonSchemaInstruction(plan.sendPrompt, opts.jsonSchema)
+      : plan.sendPrompt,
+    resume: plan.promptResume,
+    attach: plan.attach,
+    reattachOnDrain: a.detachable,
+    baselineIdleId: plan.baselineIdleId,
+    logContext: base.errCtx,
+    onActivity: opts.onActivity,
+    onProgress: opts.onProgress,
+    turnsRef: a.turnsRef,
+    pollMs: deps.pollMs,
+    idleTimeoutMs: deps.idleTimeoutMs ?? opts.idleTimeoutMs,
+  });
+}
+
+interface FinishInput<T> {
+  opts: SessionOptions<T>;
+  base: AttemptBase;
+  deps: OpencodeAttemptDeps;
+  registryModel: ModelEntry;
+  drive: OpencodeDriveResult;
+  trace: AttemptTrace;
+  ledgerRef: AttemptLedger | null;
+  startMs: number;
+  iuKey: string;
+  password: string;
+  turnsRef: { current: number };
+}
+
+type EmitAttribution = (
+  outcome: "ok" | "error" | "timeout_idle",
+  extras?: Record<string, unknown>,
+) => void;
+
+/** Writes the attempt's one attribution row. A finished attempt settles its ledger row (a re-run
+ *  reads the result without a second usage row); a failed one drops it, so the re-run starts
+ *  that call over. */
+function attributionEmitter(
+  base: AttemptBase,
+  trace: AttemptTrace,
+  ledgerRef: AttemptLedger | null,
+  startMs: number,
+  summary: Summary,
+): EmitAttribution {
+  const durationMs = Math.round(performance.now() - startMs);
+  const costFields = {
+    costUsd: summary.costUsd,
+    inputTokens: summary.inputTokens,
+    outputTokens: summary.outputTokens,
+    // Named `thinkingTokens` here (not `reasoningTokens`) to match the claude path's own
+    // attribution field name (session-runner.ts's `costFields`) — one consistent column for
+    // usage-tracker regardless of which harness produced the row.
+    thinkingTokens: summary.reasoningTokens,
+    cacheReadTokens: summary.cacheReadTokens,
+    cacheWriteTokens: summary.cacheWriteTokens,
+  };
+  return (outcome, extras = {}) => {
+    if (ledgerRef) {
+      if (outcome === "ok") ledgerRef.ledger.settle(ledgerRef.jobId, ledgerRef.key);
+      else ledgerRef.ledger.drop(ledgerRef.jobId, ledgerRef.key);
+    }
+    attributeOnce(
+      trace,
+      attributionRow(base, trace.sessionId, {
+        outcome,
+        durationMs,
+        turns: summary.turns,
+        ...costFields,
+        ...extras,
+      }),
+    );
+  };
+}
+
+/** The session's own failure signals, in the order they are trusted: an `error` on the newest
+ *  assistant message or a failed/interrupted idle outcome (CLI/tool-sourced, same standing as
+ *  claude's `envelope.errors[]`, so safe to classify), then no final text, then a stream that
+ *  ended on a tool call. `noOutput: true` so `isSalvageable` (dispatch.ts) still gets one retry
+ *  out of a partial `lastAssistantText`. `null` = the run produced a usable final message. */
+function outputFailure<T>(
+  base: AttemptBase,
+  summary: Summary,
+  emit: EmitAttribution,
+): SessionResult<T> | null {
+  if (summary.errorMessage || summary.outcome === "failed" || summary.outcome === "interrupted") {
+    emit("error", { reason: summary.errorMessage ? "error_event" : "idle_outcome" });
+    return transportFailure<T>(
+      base,
+      `opencode error: ${summary.errorMessage ?? `session ended ${summary.outcome ?? "without an outcome"}`}`,
+      { noOutput: true, rawText: summary.lastAssistantText || undefined },
+    );
+  }
+  if (!summary.lastAssistantText) {
+    emit("error", { reason: "no_output" });
+    return transportFailure<T>(
+      base,
+      "opencode session produced no output (no final assistant text)",
+      { noOutput: true },
+    );
+  }
+  if (!summary.endedOnText) {
+    emit("error", { reason: "truncated_stream" });
+    return transportFailure<T>(
+      base,
+      "opencode session ended on a tool call, not a final assistant message",
+      { noOutput: true, rawText: summary.lastAssistantText },
+    );
+  }
+  return null;
+}
+
+/** Turn a finished drive into the attempt's `SessionResult`: detach/unreadable-messages
+ *  short-circuits, then usage attribution and the failure/parse/validate ladder. */
+function finishAttempt<T>(f: FinishInput<T>): SessionResult<T> {
+  const { opts, base, deps, registryModel, drive, trace, iuKey, password } = f;
+  const { backend, model } = base;
+  // A drain detached the session: it keeps running on the server and the next boot attaches to it.
+  // Its usage is NOT attributed here (the attaching attempt reads the whole turn), so nothing is
+  // billed twice.
+  if (drive.detached) {
+    runnerLogger().warn(
+      {
+        event: "session.opencode_detached",
+        project: base.cwd,
+        ...base.errCtx,
+        sessionId: trace.sessionId,
+      },
+      "opencode session left running for re-attach after the restart",
+    );
+    throw new SessionDetachedError(base.jobId);
+  }
+  // The run ended on its own but its messages could not be read: outcome and usage are unknown.
+  // Fail as a transport-class error (connection text) instead of collapsing into "no output".
+  if (drive.messagesError && drive.finished && !drive.stopped && !drive.killReason) {
+    const error = `opencode server unreachable reading messages after the run (fetch failed): ${redactSecret(redactSecret(drive.messagesError, iuKey), password)}`;
+    // Neither settled nor dropped: the session is intact, so a settled row keeps its result for the
+    // retry (which re-attaches and reads again) and an unsettled one stays to be attributed.
+    attributeOnce(
+      trace,
+      attributionRow(base, trace.sessionId, {
+        outcome: "error",
+        durationMs: Math.round(performance.now() - f.startMs),
+        reason: "messages_unreadable",
+      }),
+    );
+    return transportFailure<T>(base, error);
+  }
+
+  // The server's env held the IU key and password; the session blanks them, but a worker can still
+  // read the password FILE or be asked to echo anything — redact both out of everything that could
+  // echo them back BEFORE it is used to build an error message or parsed/returned as data.
+  const redact = (text: string): string => redactSecret(redactSecret(text, iuKey), password);
+  const summary = summarizeOpencodeMessages(drive.messages, registryModel);
+  summary.lastAssistantText = redact(summary.lastAssistantText);
+  if (summary.errorMessage) summary.errorMessage = redact(summary.errorMessage);
+  f.turnsRef.current = summary.turns;
+
+  const emit = attributionEmitter(base, trace, f.ledgerRef, f.startMs, summary);
+  if (drive.killReason) {
+    emit("timeout_idle", { killReason: drive.killReason, idleMsAtKill: drive.idleMsAtKill });
+    return transportFailure<T>(
+      base,
+      `Session timed out — idle ${drive.idleMsAtKill}ms with no new messages (budget ${deps.idleTimeoutMs ?? opts.idleTimeoutMs ?? IDLE_TIMEOUT_MS}ms)`,
+    );
+  }
+  if (drive.stopped) {
+    emit("error", { reason: "interrupted" });
+    return transportFailure<T>(
+      base,
+      "opencode session interrupted by request (cancel or drain)",
+      summary.lastAssistantText ? { noOutput: true, rawText: summary.lastAssistantText } : {},
+    );
+  }
+  const failure = outputFailure<T>(base, summary, emit);
+  if (failure) return failure;
+
+  const parsed = extractJson<T>(summary.lastAssistantText);
+  if (parsed === undefined) {
+    emit("error", { reason: "json_parse" });
+    return unclassifiedOutputFailure<T>(
+      `final message is not valid JSON: ${summary.lastAssistantText.slice(0, 500)}`,
+      summary.lastAssistantText,
+      false,
+      backend,
+      model,
+    );
+  }
+  const validated = opts.validate?.(parsed);
+  if (validated && !validated.ok) {
+    emit("error", { reason: "invalid_output" });
+    const asText = typeof parsed === "string" ? parsed : JSON.stringify(parsed, null, 2);
+    return unclassifiedOutputFailure<T>(validated.error, asText, false, backend, model);
+  }
+  emit("ok");
+  return { ok: true, data: validated ? validated.value : (parsed as T), backend, model };
+}
+
+/** One OpenCode session — the harness counterpart to `runSessionAttempt`'s claude path, called
+ *  from there when `resolveHarness()` resolves `"opencode"`. Always the PRIMARY attempt: a forced
+ *  (fallback) attempt is never opencode (`resolveHarness`'s doc comment), so `ctx.backend` here is
+ *  always the route's own primary backend (`iu` for both AGENT_OC tiers). */
+export async function runOpencodeAttempt<T>(
+  opts: SessionOptions<T>,
+  turnsRef: { current: number },
+  ctx: OpencodeAttemptContext,
+  deps: OpencodeAttemptDeps = {},
+): Promise<SessionResult<T>> {
+  const { cwd, jobId, isCancelled, resumeSessionId, readOnly = false } = opts;
+  const registryModel = validateAttemptOptions(opts, ctx);
+  const { model, backend, variant } = ctx;
+  const base: AttemptBase = {
+    cwd,
+    tool: opts.tool,
+    jobId,
+    model,
+    backend,
+    sessionUuid: randomUUID(),
+    tsStart: new Date().toISOString(),
+    errCtx: { tool: opts.tool, model, backend, harness: "opencode", jobId },
+  };
+
+  let iu: Awaited<ReturnType<typeof getIuConfig>>;
+  try {
+    iu = await getIuConfig();
+  } catch (err) {
+    return iuConfigFailure<T>(base, err);
+  }
+
+  const detachable = canDetachSession(opts);
+  const refusal = await refusalBeforeSession(opts, base, deps, iu.openaiBase, detachable);
+  if (refusal) return refusal;
   const password = (deps.password ?? readServerPassword)();
   const client = deps.client ?? createOpencodeClient();
 
@@ -802,7 +1221,7 @@ export async function runOpencodeAttempt<T>(
   // depth — the shell tool does not inherit the server env on 2.0.25) and the git credential deny
   // last, so a caller cannot loosen either.
   const sessionEnv: Record<string, string> = {
-    ...extraEnv,
+    ...opts.extraEnv,
     ...Object.fromEntries(OPENCODE_SESSION_BLANKED_ENV.map((name) => [name, ""])),
     ...GIT_DENY_CREDENTIALS_ENV,
   };
@@ -823,118 +1242,38 @@ export async function runOpencodeAttempt<T>(
   const startMs = performance.now();
   if (jobId !== undefined && isCancelled?.(jobId)) throw new SessionCancelledError(jobId);
 
-  // Usage of a session an earlier attempt already attributed (a settled ledger row) is never
-  // written twice. Declared before anything below can write a row.
-  let alreadyAttributed = false;
-  const attributeOnce = (row: Parameters<typeof writeAttribution>[0]): void => {
-    if (!alreadyAttributed) writeAttribution(row);
-  };
   // The session ledger (multi-session jobs, `SessionOptions.reattachKey`): a session an earlier
   // process recorded for this exact (job, key) is re-attached instead of created.
   const ledger = jobId !== undefined && opts.reattachKey ? getSessionLedger() : null;
-  const ledgerKey = opts.reattachKey;
+  const ledgerRef: AttemptLedger | null =
+    ledger && jobId !== undefined && opts.reattachKey
+      ? { ledger, jobId, key: opts.reattachKey }
+      : null;
   const ledgerRow =
-    ledger && jobId !== undefined && ledgerKey && resumeSessionId === undefined
-      ? ledger.get(jobId, ledgerKey)
+    ledgerRef && resumeSessionId === undefined
+      ? ledgerRef.ledger.get(ledgerRef.jobId, ledgerRef.key)
       : undefined;
-  alreadyAttributed = ledgerRow?.settled === true;
+  const trace: AttemptTrace = {
+    sessionId: resumeSessionId ?? ledgerRow?.sessionId,
+    alreadyAttributed: ledgerRow?.settled === true,
+  };
+
   let drive: OpencodeDriveResult;
-  let sessionId = resumeSessionId ?? ledgerRow?.sessionId;
   try {
-    let baselineIdleId: string | undefined;
-    let attach = false;
-    let promptResume = false;
-    // The prompt a re-attached session with history is sent (the continuation nudge); a fresh or
-    // never-prompted session gets the full `prompt`.
-    let sendPrompt = prompt;
-    if (sessionId) {
-      // A re-attach after a restart. The session lives on the server, so it is in one of three
-      // states: running its turn (a detached drain — attach, never prompt: a second prompt would
-      // steer a nudge into live work), already idle after a succeeded turn (finished while agw
-      // was down — read the result), or cut off (a killed server — prompt `resume`).
-      // `active` FIRST: a session that finishes between the two reads is then caught by the
-      // messages read (finished) instead of falling through to a re-prompt of a done episode.
-      try {
-        const live = (await client.active()).includes(sessionId);
-        const [newest] = await client.recentMessages(sessionId, 1);
-        // Any idle that is not a failed/interrupted turn is a finished one (an absent outcome too).
-        const finishedOnItsOwn =
-          newest?.type === "idle" &&
-          newest.outcome !== "failed" &&
-          newest.outcome !== "interrupted";
-        attach = live || finishedOnItsOwn;
-        baselineIdleId = !finishedOnItsOwn && newest?.type === "idle" ? newest.id : undefined;
-        // A session with no message at all was detached before its prompt went out: send the
-        // full prompt as a first one, not a resume of a turn that never started.
-        promptResume = !attach && newest !== undefined;
-        if (promptResume && opts.resumePrompt) sendPrompt = opts.resumePrompt;
-        let mode: "live" | "finished" | "resume" | "unprompted" = "unprompted";
-        if (live) mode = "live";
-        else if (finishedOnItsOwn) mode = "finished";
-        else if (newest) mode = "resume";
-        runnerLogger().info(
-          {
-            event: "session.opencode_reattach",
-            project: cwd,
-            ...errCtx,
-            sessionId,
-            mode,
-            fromLedger: ledgerRow !== undefined,
-          },
-          "opencode session re-attached after a restart",
-        );
-      } catch (err) {
-        // A ledger session the server DEFINITELY no longer has (HTTP 404: state wiped, pruned) is
-        // not an error: forget it and start the call over. Anything else — a refused connection,
-        // a timeout, a 5xx — says nothing about the session and rethrows (transport class → the
-        // retry ladder), as does a caller-supplied id.
-        const notFound = err instanceof OpencodeHttpError && err.status === 404;
-        if (!notFound || !ledgerRow || !ledger || jobId === undefined || !ledgerKey) throw err;
-        runnerLogger().warn(
-          {
-            event: "session.opencode_ledger_stale",
-            project: cwd,
-            ...errCtx,
-            sessionId,
-            error: err instanceof Error ? err.message : String(err),
-          },
-          "ledger session unreadable — creating a fresh session",
-        );
-        ledger.drop(jobId, ledgerKey);
-        alreadyAttributed = false;
-        sessionId = undefined;
-      }
-    }
-    if (!sessionId) {
-      // The preflight and the server-status read above await: a drain may have begun meanwhile.
-      // Nothing may be created once it has — the next boot starts this call.
-      if (detachable && isSessionDraining()) throw new SessionDetachedError(jobId);
-      sessionId = await client.createSession({
-        directory: cwd,
-        model: { providerID: opencodeProviderForWire(registryModel.wire), id: model, variant },
-        agent: readOnly ? OPENCODE_AGENT_READONLY : OPENCODE_AGENT_IMPLEMENT,
-        title: `agw ${tool ?? "episode"}`,
-        metadata: { agw: { jobId, tool } },
-      });
-      if (ledger && jobId !== undefined && ledgerKey) ledger.put(jobId, ledgerKey, sessionId);
-    }
-    announceOpencodeSessionId(sessionId, { iuOpenaiBase, model, backend, tool, onSessionId });
-    if (!attach) await client.setEnvironment(sessionId, sessionEnv);
-    drive = await driveOpencodeSession(client, {
-      jobId,
-      cwd,
-      sessionId,
-      prompt: jsonSchema ? appendJsonSchemaInstruction(sendPrompt, jsonSchema) : sendPrompt,
-      resume: promptResume,
-      attach,
-      reattachOnDrain: detachable,
-      baselineIdleId,
-      logContext: errCtx,
-      onActivity,
-      onProgress,
+    drive = await startAndDrive({
+      opts,
+      base,
+      registryModel,
+      variant,
+      client,
+      detachable,
+      ledgerRef,
+      ledgerRow,
+      trace,
+      deps,
+      iuOpenaiBase: iu.openaiBase,
+      sessionEnv,
       turnsRef,
-      pollMs: deps.pollMs,
-      idleTimeoutMs: deps.idleTimeoutMs ?? opts.idleTimeoutMs,
     });
   } catch (err) {
     if (err instanceof SessionDetachedError) throw err;
@@ -942,208 +1281,40 @@ export async function runOpencodeAttempt<T>(
     // carries a connection-class token for transport failures, so the retry ladder and the
     // breaker read it as such; the message never includes a response body.
     const error = redactSecret(
-      redactSecret(err instanceof Error ? err.message : String(err), iuKey),
+      redactSecret(err instanceof Error ? err.message : String(err), iu.key),
       password,
     );
     runnerLogger().error(
-      { event: "session.opencode_error", project: cwd, ...errCtx, sessionId, error },
+      {
+        event: "session.opencode_error",
+        project: cwd,
+        ...base.errCtx,
+        sessionId: trace.sessionId,
+        error,
+      },
       "opencode session failed",
     );
-    attributeOnce({
-      sessionId: sessionUuid,
-      tool: tool ?? "unknown",
-      project: cwd,
-      model,
-      backend,
-      harness: "opencode",
-      tsStart,
-      tsEnd: new Date().toISOString(),
-      outcome: "error",
-      durationMs: Math.round(performance.now() - startMs),
-      reason: "opencode_session_error",
-    });
-    return { ok: false, error, classificationText: error, hadApiRetry: false, backend, model };
-  }
-  // A drain detached the session: it keeps running on the server and the next boot attaches to it.
-  // Its usage is NOT attributed here (the attaching attempt reads the whole turn), so nothing is
-  // billed twice.
-  if (drive.detached) {
-    runnerLogger().warn(
-      { event: "session.opencode_detached", project: cwd, ...errCtx, sessionId },
-      "opencode session left running for re-attach after the restart",
+    attributeOnce(
+      trace,
+      attributionRow(base, undefined, {
+        outcome: "error",
+        durationMs: Math.round(performance.now() - startMs),
+        reason: "opencode_session_error",
+      }),
     );
-    throw new SessionDetachedError(jobId);
+    return transportFailure<T>(base, error);
   }
-  // The run ended on its own but its messages could not be read: outcome and usage are unknown.
-  // Fail as a transport-class error (connection text) instead of collapsing into "no output".
-  if (drive.messagesError && drive.finished && !drive.stopped && !drive.killReason) {
-    const error = `opencode server unreachable reading messages after the run (fetch failed): ${redactSecret(redactSecret(drive.messagesError, iuKey), password)}`;
-    // Neither settled nor dropped: the session is intact, so a settled row keeps its result for the
-    // retry (which re-attaches and reads again) and an unsettled one stays to be attributed.
-    attributeOnce({
-      sessionId: sessionUuid,
-      opencodeSessionId: sessionId,
-      tool: tool ?? "unknown",
-      project: cwd,
-      model,
-      backend,
-      harness: "opencode",
-      tsStart,
-      tsEnd: new Date().toISOString(),
-      outcome: "error",
-      durationMs: Math.round(performance.now() - startMs),
-      reason: "messages_unreadable",
-    });
-    return { ok: false, error, classificationText: error, hadApiRetry: false, backend, model };
-  }
-
-  // The server's env held the IU key and password; the session blanks them, but a worker can still
-  // read the password FILE or be asked to echo anything — redact both out of everything that could
-  // echo them back BEFORE it is used to build an error message or parsed/returned as data.
-  const redact = (text: string): string => redactSecret(redactSecret(text, iuKey), password);
-  const summary = summarizeOpencodeMessages(drive.messages, registryModel);
-  summary.lastAssistantText = redact(summary.lastAssistantText);
-  if (summary.errorMessage) summary.errorMessage = redact(summary.errorMessage);
-  turnsRef.current = summary.turns;
-
-  const durationMs = Math.round(performance.now() - startMs);
-  const costFields = {
-    costUsd: summary.costUsd,
-    inputTokens: summary.inputTokens,
-    outputTokens: summary.outputTokens,
-    // Named `thinkingTokens` here (not `reasoningTokens`) to match the claude path's own
-    // attribution field name (session-runner.ts's `costFields`) — one consistent column for
-    // usage-tracker regardless of which harness produced the row.
-    thinkingTokens: summary.reasoningTokens,
-    cacheReadTokens: summary.cacheReadTokens,
-    cacheWriteTokens: summary.cacheWriteTokens,
-  };
-  const emitAttribution = (
-    outcome: "ok" | "error" | "timeout_idle",
-    extras: Record<string, unknown> = {},
-  ) => {
-    // A finished attempt settles its ledger row (a re-run reads the result without a second
-    // usage row); a failed one drops it, so the re-run starts that call over.
-    if (ledger && jobId !== undefined && ledgerKey) {
-      if (outcome === "ok") ledger.settle(jobId, ledgerKey);
-      else ledger.drop(jobId, ledgerKey);
-    }
-    attributeOnce({
-      sessionId: sessionUuid,
-      opencodeSessionId: sessionId,
-      tool: tool ?? "unknown",
-      project: cwd,
-      model,
-      backend,
-      harness: "opencode",
-      tsStart,
-      tsEnd: new Date().toISOString(),
-      outcome,
-      durationMs,
-      turns: summary.turns,
-      ...costFields,
-      ...extras,
-    });
-  };
-
-  if (drive.killReason) {
-    emitAttribution("timeout_idle", {
-      killReason: drive.killReason,
-      idleMsAtKill: drive.idleMsAtKill,
-    });
-    const error = `Session timed out — idle ${drive.idleMsAtKill}ms with no new messages (budget ${deps.idleTimeoutMs ?? opts.idleTimeoutMs ?? IDLE_TIMEOUT_MS}ms)`;
-    return { ok: false, error, classificationText: error, hadApiRetry: false, backend, model };
-  }
-
-  const salvage = summary.lastAssistantText
-    ? { noOutput: true as const, rawText: summary.lastAssistantText }
-    : {};
-
-  if (drive.stopped) {
-    emitAttribution("error", { reason: "interrupted" });
-    const error = "opencode session interrupted by request (cancel or drain)";
-    return {
-      ok: false,
-      error,
-      classificationText: error,
-      hadApiRetry: false,
-      backend,
-      model,
-      ...salvage,
-    };
-  }
-
-  // An `error` on the newest assistant message, or a failed/interrupted idle outcome, is the
-  // failure signal — CLI/tool-sourced, same standing as claude's `envelope.errors[]`, so safe to
-  // classify. `noOutput: true` so `isSalvageable` (dispatch.ts) still gets one retry out of a
-  // partial `lastAssistantText`.
-  if (summary.errorMessage || summary.outcome === "failed" || summary.outcome === "interrupted") {
-    emitAttribution("error", { reason: summary.errorMessage ? "error_event" : "idle_outcome" });
-    const error = `opencode error: ${summary.errorMessage ?? `session ended ${summary.outcome ?? "without an outcome"}`}`;
-    return {
-      ok: false,
-      error,
-      classificationText: error,
-      hadApiRetry: false,
-      noOutput: true,
-      rawText: summary.lastAssistantText || undefined,
-      backend,
-      model,
-    };
-  }
-
-  if (!summary.lastAssistantText) {
-    emitAttribution("error", { reason: "no_output" });
-    const error = "opencode session produced no output (no final assistant text)";
-    return {
-      ok: false,
-      error,
-      classificationText: error,
-      hadApiRetry: false,
-      noOutput: true,
-      backend,
-      model,
-    };
-  }
-
-  if (!summary.endedOnText) {
-    emitAttribution("error", { reason: "truncated_stream" });
-    const error = "opencode session ended on a tool call, not a final assistant message";
-    return {
-      ok: false,
-      error,
-      classificationText: error,
-      hadApiRetry: false,
-      noOutput: true,
-      rawText: summary.lastAssistantText,
-      backend,
-      model,
-    };
-  }
-
-  const parsed = extractJson<T>(summary.lastAssistantText);
-  if (parsed === undefined) {
-    emitAttribution("error", { reason: "json_parse" });
-    return unclassifiedOutputFailure<T>(
-      `final message is not valid JSON: ${summary.lastAssistantText.slice(0, 500)}`,
-      summary.lastAssistantText,
-      false,
-      backend,
-      model,
-    );
-  }
-
-  if (validate) {
-    const v = validate(parsed);
-    if (!v.ok) {
-      emitAttribution("error", { reason: "invalid_output" });
-      const asText = typeof parsed === "string" ? parsed : JSON.stringify(parsed, null, 2);
-      return unclassifiedOutputFailure<T>(v.error, asText, false, backend, model);
-    }
-    emitAttribution("ok");
-    return { ok: true, data: v.value, backend, model };
-  }
-
-  emitAttribution("ok");
-  return { ok: true, data: parsed as T, backend, model };
+  return finishAttempt<T>({
+    opts,
+    base,
+    deps,
+    registryModel,
+    drive,
+    trace,
+    ledgerRef,
+    startMs,
+    iuKey: iu.key,
+    password,
+    turnsRef,
+  });
 }

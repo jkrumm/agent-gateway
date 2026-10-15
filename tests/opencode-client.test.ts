@@ -7,7 +7,11 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createOpencodeClient, OpencodeHttpError } from "../server/mcp/opencode-client.ts";
+import {
+  createOpencodeClient,
+  getRetryDelayMs,
+  OpencodeHttpError,
+} from "../server/mcp/opencode-client.ts";
 import {
   ensureServerState,
   opencodeServerUrl,
@@ -45,7 +49,12 @@ function stub(responder: (seen: Seen, index: number) => Response | Promise<Respo
     seen.push(entry);
     return responder(entry, seen.length - 1);
   }) as unknown as typeof fetch;
-  return { seen, client: createOpencodeClient(fetchImpl) };
+  // The retry pause is recorded, never slept: no test waits on a real backoff.
+  const delays: number[] = [];
+  const sleep = async (ms: number) => {
+    delays.push(ms);
+  };
+  return { seen, delays, client: createOpencodeClient(fetchImpl, { sleep, random: () => 0.5 }) };
 }
 
 const ok = (body: unknown = {}) => Response.json(body);
@@ -358,20 +367,23 @@ describe("timed-out requests", () => {
   const timeout = () => Object.assign(new Error("timed out"), { name: "TimeoutError" });
 
   test("a GET that times out is retried and the retry's answer is served", async () => {
-    const { seen, client } = stub((_s, i) => {
+    const { seen, delays, client } = stub((_s, i) => {
       if (i === 0) throw timeout();
       return ok({ data: {} });
     });
     expect(await client.active()).toEqual([]);
     expect(seen).toHaveLength(2);
+    expect(delays).toEqual([187.5]);
   });
 
   test("a GET that keeps timing out names the route and elapsed time, after 3 tries", async () => {
-    const { seen, client } = stub(() => {
+    const { seen, delays, client } = stub(() => {
       throw timeout();
     });
     const error = await client.active().catch((e: Error) => e);
     expect(seen).toHaveLength(3);
+    // One pause between each pair of tries, none after the last: 250 ms then 1 s ceilings.
+    expect(delays).toEqual([187.5, 750]);
     expect((error as Error).message).toMatch(
       /^opencode server unreachable: ETIMEDOUT .* \[GET \/api\/session\/active after \d+ms\]$/,
     );
@@ -379,10 +391,27 @@ describe("timed-out requests", () => {
   });
 
   test("a POST is never repeated", async () => {
-    const { seen, client } = stub(() => {
+    const { seen, delays, client } = stub(() => {
       throw timeout();
     });
     await client.prompt("ses_1", { text: "x" }).catch(() => undefined);
     expect(seen).toHaveLength(1);
+    expect(delays).toEqual([]);
+  });
+
+  test("a GET failing for another reason is not retried and does not pause", async () => {
+    const { seen, delays, client } = stub(() => {
+      throw new Error("ECONNREFUSED");
+    });
+    await client.active().catch(() => undefined);
+    expect(seen).toHaveLength(1);
+    expect(delays).toEqual([]);
+  });
+
+  test("backoff is 250 ms then 1 s ceilings with equal jitter: half fixed, half random", () => {
+    expect(getRetryDelayMs(1, () => 0)).toBe(125);
+    expect(getRetryDelayMs(1, () => 1)).toBe(250);
+    expect(getRetryDelayMs(2, () => 0)).toBe(500);
+    expect(getRetryDelayMs(2, () => 1)).toBe(1000);
   });
 });

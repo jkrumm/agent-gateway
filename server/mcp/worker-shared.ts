@@ -1,9 +1,8 @@
 // ── Shared worker plumbing — what both harnesses (and the IU SSE reader) do identically ──
 //
-// `session-runner.ts` (claude -p) and `opencode-runner.ts` (OpenCode sessions) import each other
-// (the runner dispatches into the harness; the harness reuses the runner's chassis), so
-// anything BOTH need verbatim lives here instead: this module imports nothing from either,
-// which keeps the extraction cycle-free. `session-runner.ts` re-exports `scrubSensitiveEnv`
+// `session-runner.ts` (claude -p) dispatches into `opencode-runner.ts` (OpenCode sessions), and
+// both build on `session-core.ts`; anything BOTH need verbatim lives here instead: this module
+// imports nothing from any of them. `session-runner.ts` re-exports `scrubSensitiveEnv`
 // and `usageLane` so existing importers keep resolving.
 
 /** Env var names that look like a credential. Matched case-insensitively against the

@@ -877,8 +877,583 @@ function inPlaceSnapshotOf(meta: Record<string, unknown> | undefined): InPlaceSn
   };
 }
 
+/** One dispatch run, validated and ready to touch the filesystem: the parsed request, the
+ *  policy's verdict, the progress relays and the forge identity. Immutable after `startRun`. */
+interface DispatchRun {
+  input: DispatchInput;
+  inPlace: boolean;
+  /** True for a boot-recovery resume — a worktree episode or, after a drain detached its session
+   *  and its snapshot was persisted, an in-place one. */
+  resuming: boolean;
+  /** The policy's own sensitivity call for this repo, ORed with whatever the caller still
+   *  declares — a caller MAY opt a repo the policy does not mark into the scan, but can never
+   *  opt one the policy does mark OUT of it by simply omitting the field. */
+  effectiveSensitive: boolean;
+  jobId: string | undefined;
+  /** The real job id (executor.ts passes `job.id`) when there is one, else a fresh id. It names
+   *  the worktree directory AND the branch, so a leftover the boot sweep finds after a SIGKILL
+   *  is already labeled with the job it belonged to — see `salvageWorktree` in dispatch-git.ts. */
+  jobKey: string;
+  isCancelled?: (jobId: string) => boolean;
+  resumeCtx?: DispatchResumeContext;
+  startMs: number;
+  prompt: string;
+  /** Tiers that produce an artifact need the forge identity (GitHub or GitLab, resolved by
+   *  the remote URL's host) before the session runs — an implement episode must not spend 30
+   *  minutes only to discover its remote is on neither, and the worktree has to be cut from
+   *  the authoritative default branch. In-place publishes nothing, so it needs no identity. */
+  identity: RepoIdentity | undefined;
+  note: (lastAction: string) => void;
+  relayProgress: ProgressSink | undefined;
+}
+
+/** What outlives a phase of one run: the resources the `catch`/`finally` of `runDispatch` must
+ *  tear down or preserve, and the episode bookkeeping the progress relays read. */
+interface DispatchState {
+  worktree: DispatchWorktree | undefined;
+  snapshot: InPlaceSnapshot | undefined;
+  /** True only when THIS invocation took the lease itself (a direct caller with no job store) —
+   *  the finally must release the lock it took, never a lock another job holds. A stored job
+   *  arrives with the lease already held under its own id (`store.ts`'s `promote()` takes it at
+   *  admission, and a busy repo keeps the job `pending` instead): that re-entry is `reentrant`
+   *  and the store releases it. */
+  lockHeld: boolean;
+  detachedForRestart: boolean;
+  /** Set when the session runner declined the reactive Max fallback for this write-tier episode
+   *  (it had already produced output on the primary route). Surfaced in the verdict + a field. */
+  fallbackWithheld: FallbackWithheld | undefined;
+  /** The retry is a second worker session, and runSession restarts its turn counter at 0 for
+   *  it. A caller watching `turns` fall from 60 to 0 mid-job reads that as a wedged or
+   *  restarted worker, so the retry's counts are offset instead of passed through raw. */
+  turnOffset: number;
+  /** Raw turn count last reported by the current episode — captured so a retry (a fresh
+   *  session, counting from 0 again) can offset from where the first episode actually left
+   *  off rather than from a fixed budget number. */
+  lastObservedTurns: number;
+}
+
+/** The session's working directory and the project settings stripped from it. */
+interface EpisodeWorkspace {
+  sessionCwd: string;
+  strippedSettings: string[];
+  prompt: string;
+}
+
+/** What the tier published (or declined to) after a usable verdict. */
+interface Published {
+  artifactUrl?: string;
+  branch?: string;
+  changedFiles?: string[];
+  artifactNote: string;
+  outcome: DispatchOutcome;
+  /** Set only by the in-place branch, when its CI-path/secret scan hit something. Same "wins
+   *  over the worker's own nextAction" treatment `checks_failed` already gets — nothing was
+   *  published for a red check to gate here either, but a flagged change set in a LIVE checkout
+   *  is exactly the kind of thing that must not be waved through as "no human needed" just
+   *  because the worker's own verdict said so. */
+  forceHumanInPlace: boolean;
+}
+
+/** Validate the request against the repo policy and the filesystem, build the fenced prompt and
+ *  resolve the forge identity. Nothing past the policy check costs anything until it passes. */
+async function startRun(
+  rawParams: Record<string, unknown>,
+  onProgress: ProgressSink | undefined,
+  jobId: string | undefined,
+  isCancelled: ((jobId: string) => boolean) | undefined,
+  resumeCtx: DispatchResumeContext | undefined,
+): Promise<{ run: DispatchRun; state: DispatchState }> {
+  const input = parseParams(DISPATCH_INPUT, rawParams);
+  const { cwd, brief, tier, context, sensitive, workspace } = input;
+  // Checked before the filesystem checks below — the repo policy (server/lib/dispatch-policy.ts)
+  // is the boundary on which repo and which tier this handler may run at all, so a refused
+  // combination costs nothing beyond validating the input and reveals nothing about the local
+  // tree. server/routes/jobs.ts runs the same check at submit; this copy stays because a
+  // direct call (the MCP client, a future submitter) must not be able to skip it.
+  const decision = resolveDispatchTarget({ cwd, tier });
+  if (!decision.ok) throw new Error(`dispatch refused: ${decision.reason}`);
+  const effectiveSensitive = decision.sensitive || sensitive;
+  if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
+  if (!existsSync(join(cwd, ".git"))) {
+    throw new Error(`Not a git repository (no .git): ${cwd}`);
+  }
+  // Checked before anything else — no worktree, no session, no GitHub identity lookup — so a
+  // refused combination costs nothing beyond validating the input. server/routes/jobs.ts runs
+  // the same checks at submit (`dispatchSubmitRefusal`); this copy stays for a direct caller.
+  assertDispatchRequestAllowed(input, effectiveSensitive);
+  const inPlace = tier === "implement" && workspace === "in-place";
+  const startMs = performance.now();
+  const skill = await loadSkillPrompt(tier);
+  const nonce = newFenceNonce();
+  const prompt = buildPrompt(skill, brief, context, nonce, inPlace ? IN_PLACE_ADDENDUM : undefined);
+
+  logger.info(
+    {
+      event: "dispatch.start",
+      tool: "dispatch",
+      project: cwd,
+      tier,
+      workspace,
+      briefChars: brief.length,
+    },
+    "dispatch episode start",
+  );
+
+  const state: DispatchState = {
+    worktree: undefined,
+    snapshot: undefined,
+    lockHeld: false,
+    detachedForRestart: false,
+    fallbackWithheld: undefined,
+    turnOffset: 0,
+    lastObservedTurns: 0,
+  };
+  // Same shape as review's shared `bump` across its parallel angle sessions.
+  const relayProgress: ProgressSink | undefined = onProgress
+    ? (p) => {
+        state.lastObservedTurns = p.turns;
+        onProgress({ ...p, turns: state.turnOffset + p.turns });
+      }
+    : undefined;
+  const note = (lastAction: string): void =>
+    onProgress?.({ turns: state.turnOffset, lastAction, lastActivityAt: Date.now() });
+
+  let identity: RepoIdentity | undefined;
+  if (tier !== "investigate" && !inPlace) {
+    assertNoGithubForSensitive(effectiveSensitive, "resolveRepoIdentity");
+    identity = await resolveRepoIdentity(cwd);
+  }
+
+  const run: DispatchRun = {
+    input,
+    inPlace,
+    resuming: resumeCtx?.resume !== undefined,
+    effectiveSensitive,
+    jobId,
+    jobKey: jobId ?? randomUUID(),
+    isCancelled,
+    resumeCtx,
+    startMs,
+    prompt,
+    identity,
+    note,
+    relayProgress,
+  };
+  return { run, state };
+}
+
+/** Take the per-repo lease (implement) and set up the tree the episode works in.
+ *
+ *  EVERY tier runs in its own worktree, not just the writing one. `readOnly: true` disables
+ *  Edit and Write but not Bash, and the brief is attacker-influenced text — anyone can open
+ *  an issue on a public repo, and its body reaches an episode's context. A read tier sitting
+ *  in the live checkout is one injected `sed -i` away from editing a repo other agents are
+ *  working in and that deploys on push. The read tiers get a throwaway copy of the repo's
+ *  default branch — HEAD only when the remote is unreachable, or when the caller asked for
+ *  the live checkout with `base: "head"` (see createReadWorktree); implement keeps its
+ *  branch cut from the authoritative default. It costs no capability — the difference is
+ *  which directory the session starts in.
+ *
+ *  The ONE exception is implement + workspace "in-place": the episode's whole point is to
+ *  edit the live checkout, deliberately, for the owner's own direct-to-master review flow.
+ *  It is gated on the lease (one per repo) and described by a snapshot, and it publishes
+ *  nothing — the trade-offs are in AGENTS.md's Dispatch section and docs/dispatch-security.md.
+ *
+ *  Runs INSIDE `runDispatch`'s try, so the finally owns teardown on every exit path. (A throw
+ *  from either constructor cleans up its own partial state — see dispatch-git.ts.) */
+async function acquireWorkspace(run: DispatchRun, state: DispatchState): Promise<void> {
+  const { cwd, tier, brief, base, revisionOf, branch: branchSlug } = run.input;
+  const { jobKey, resumeCtx, identity, note } = run;
+  if (tier === "implement") {
+    const lease = tryAcquireRepoLease(cwd, jobKey);
+    if (!lease.ok) throw new Error(repoLeaseRefusal(lease.holder));
+    state.lockHeld = !lease.reentrant;
+  }
+  if (run.inPlace) {
+    // The snapshot is the in-place run's only attribution baseline. It is persisted in the
+    // row's metadata marker (`onWorktreeReady`) so a drain-detached episode, re-attached
+    // after the restart, attributes its edits against the SAME baseline; a resume reads it
+    // back instead of taking a new one (a new one would swallow the edits made so far).
+    state.snapshot = run.resuming
+      ? inPlaceSnapshotOf(resumeCtx?.resume?.worktreeMeta)
+      : await snapshotInPlace(cwd);
+    note(
+      `${run.resuming ? "resuming in-place" : "in-place snapshot"} ${state.snapshot.headOid.slice(0, 12)}`,
+    );
+    return;
+  }
+  if (resumeCtx?.resume) {
+    // Reopen exactly what `dispatchRecoveryStatusFor` verified existed at `recover()` time —
+    // reconstructed from the persisted object, not re-derived: `base` in particular is a
+    // pinned OID (`DispatchWorktree.base`'s doc comment) that must survive unchanged, not be
+    // recomputed from the worktree's current state.
+    const worktree = reconstructWorktree(resumeCtx.resume.worktreeMeta);
+    state.worktree = worktree;
+    if (!existsSync(worktree.path)) {
+      throw new Error(
+        `dispatch resume refused: worktree ${worktree.path} no longer exists on disk`,
+      );
+    }
+    note(`resuming ${worktree.branch}`);
+    return;
+  }
+  if (tier === "implement" && identity) {
+    // The name was free at submit, but this job may have queued behind others since.
+    if (branchSlug !== undefined) {
+      const refusal = await branchCollisionRefusal(cwd, branchSlug);
+      if (refusal) throw new Error(refusal);
+    }
+    state.worktree = await createWorktree(
+      cwd,
+      jobKey,
+      autoBranchSlug(brief),
+      identity.defaultBranch,
+      revisionOf,
+      branchSlug,
+    );
+    note(`worktree ${state.worktree.branch}`);
+    return;
+  }
+  state.worktree = await createReadWorktree(cwd, jobKey, undefined, base);
+}
+
+/** Point the session at its tree and record it on the job row the instant it exists — well
+ *  before the worker session starts — so a process killed before the FIRST stream event still
+ *  leaves it there. A resume re-records the same value; store.ts's setter is a plain UPDATE. An
+ *  in-place run records a marker object instead: the store needs SOMETHING durable to
+ *  distinguish the row (it refuses to resume one without a snapshot), and no worktree metadata
+ *  could lie about a worktree that does not exist. */
+function enterWorkspace(run: DispatchRun, state: DispatchState): EpisodeWorkspace {
+  const { cwd, tier } = run.input;
+  const { worktree } = state;
+  let prompt = run.prompt;
+  let worktreeMeta: DispatchWorktreeMeta;
+  let sessionCwd: string;
+  let strippedSettings: string[];
+  if (run.inPlace) {
+    // In-place: session cwd IS the repo root the policy resolved. No strip/restore —
+    // deleting the repo's `.claude/settings.json` here would mutate a live tree other
+    // sessions use. The trade is explicit: `disableAllHooks` still holds (a `--settings`
+    // flag, not a file delete), but a project settings file's `env` block DOES apply inside
+    // the session — accepted because in-place is the owner opting their own audited repo
+    // into a writable episode, and the policy ceiling still decides which repos are
+    // reachable. Everything else (`GIT_DENY_CREDENTIALS_ENV`, the fence, the read-only
+    // profile) is unchanged.
+    worktreeMeta = { path: cwd, workspace: "in-place", snapshot: state.snapshot };
+    sessionCwd = cwd;
+    strippedSettings = [];
+  } else {
+    // Every acquire branch that is NOT in-place assigns `worktree`, so a plain tier reaching
+    // this point without one is an internal invariant violation, not a normal runtime
+    // condition — refused loudly instead of cast away.
+    if (!worktree) throw new Error("internal: worktree missing for a non-in-place tier");
+    worktreeMeta = worktree;
+    sessionCwd = worktree.path;
+    strippedSettings = stripProjectSettings(worktree);
+    // A resumed worktree was stripped by the invocation a restart interrupted, so the strip
+    // above finds nothing: restore from the base for EVERY settings path (restoreStrippedSettings
+    // skips the ones the base does not carry) or the push would read as deleting them.
+    if (run.resuming) strippedSettings = [...PROJECT_SETTINGS_FILES];
+    // A read-tier worker is told which tree it is actually reading: its worktree is cut
+    // from the remote default branch by default, not the live checkout's HEAD (see
+    // createReadWorktree), and `baseRef` would otherwise only be logged — a verdict that
+    // cannot say which commit it read is the failure this names. Handler-authored, so it is
+    // appended OUTSIDE the fenced brief. Implement's worktree is always a default branch and
+    // its own prompt already says so, so only the read tiers get the note.
+    if (tier !== "implement") prompt += readBaseNote(worktree);
+  }
+  run.resumeCtx?.onWorktreeReady?.(worktreeMeta);
+  if (strippedSettings.length > 0) run.note(`stripped ${strippedSettings.join(", ")}`);
+  return { sessionCwd, strippedSettings, prompt };
+}
+
+/** Run the worker session (a resume attaches to the existing transcript with a short
+ *  continuation nudge instead of re-sending the already-seen brief) and, if its output is
+ *  unusable but salvageable, ONE fresh JSON-only retry. Fails the job outright on anything not
+ *  salvageable. `firstRawText` is the first attempt's text: the retry is a fresh session, so a
+ *  retry that fails HARDER (no text at all) would otherwise discard a full investigation. */
+async function runEpisodes(
+  run: DispatchRun,
+  state: DispatchState,
+  ws: EpisodeWorkspace,
+): Promise<{ result: SessionResult<WorkerOutput>; firstRawText: string | undefined }> {
+  const { cwd, tier, kind, model } = run.input;
+  const profile = TIERS[tier];
+  const runEpisode = async (
+    p: string,
+    opts: { resumeSessionId?: string; resumePrompt?: string } = {},
+  ) => {
+    const r = await runSession<WorkerOutput>({
+      cwd: ws.sessionCwd,
+      prompt: p,
+      resumeSessionId: opts.resumeSessionId,
+      resumePrompt: opts.resumePrompt,
+      tool: "dispatch",
+      jobId: run.jobId,
+      isCancelled: run.isCancelled,
+      // implement gets its own default route — investigate/author stay on the AGENT one
+      // (both opencode by default); an editorial brief runs on the claude-harness
+      // `dispatch_editorial` route. See routing.ts.
+      route: routeFor(dispatchRouteKey(tier, kind)),
+      model,
+      jsonSchema: z.toJSONSchema(WORKER_OUTPUT[tier]),
+      readOnly: profile.readOnly,
+      // The whole premise is the repo's own Claude-shaped context, and the global rule
+      // hierarchy it inherits — unlike `check`, which deliberately keeps the prompt small.
+      settingSources: "user,project",
+      // Take git's credential helper away from the session. Applied to EVERY tier, not
+      // just the writing one: `~/.gitconfig` on this host wires the helper to the offline
+      // secrets cache, so any process running as this user can push — and a read-only
+      // session still has Bash. See GIT_DENY_CREDENTIALS_ENV for the full argument.
+      extraEnv: GIT_DENY_CREDENTIALS_ENV,
+      validate: workerValidator(tier),
+      onActivity: run.relayProgress,
+      // Every OpenCode session under a job is detached by a drain and re-attached by the next
+      // boot (recover() keeps session_id + worktree_meta — for in-place, the snapshot too).
+      onSessionId: run.resumeCtx?.onSessionId,
+    });
+    state.fallbackWithheld ??= fallbackWithheldOf(r);
+    return r;
+  };
+  const withheldNote = (): string => (state.fallbackWithheld ? FALLBACK_WITHHELD_NOTE : "");
+
+  let result = run.resuming
+    ? await runEpisode(ws.prompt, {
+        // The continuation nudge goes to a session that already has history; one detached
+        // before its first prompt (no message at all) is sent the full `prompt` instead.
+        resumePrompt: RESUME_CONTINUATION_PROMPT,
+        resumeSessionId: run.resumeCtx?.resume?.sessionId,
+      })
+    : await runEpisode(ws.prompt);
+  const firstRawText = result.rawText;
+
+  if (!result.ok || !result.data) {
+    // A withheld fallback means a write-tier session died on a transport error AFTER writing:
+    // a fresh JSON-only session would re-run the whole implementation over its half-applied
+    // edits, so an implement episode fails here with the withheld note instead.
+    if (!isSalvageable(result) || (tier === "implement" && state.fallbackWithheld)) {
+      // Fail the job outright. The store turns this into status:"failed" with the message,
+      // which is a truthful "the tool broke" the caller can act on — unlike a degraded
+      // verdict, which reads as "the investigation concluded and needs a human".
+      throw new Error(
+        `dispatch episode did not complete: ${result.error ?? "unknown session failure"}` +
+          withheldNote(),
+      );
+    }
+    logger.warn(
+      { event: "dispatch.retry", tool: "dispatch", project: cwd, tier, error: result.error },
+      "dispatch output unusable — retrying once",
+    );
+    state.turnOffset = state.lastObservedTurns;
+    run.note("retry (fresh session)");
+    // The retry is a FRESH session that has to re-read the repo, so it is told to go
+    // straight to the answer rather than re-investigating from scratch.
+    result = await runEpisode(ws.prompt + JSON_ONLY_RETRY);
+    if (!result.ok && !isSalvageable(result)) {
+      throw new Error(
+        `dispatch retry did not complete: ${result.error ?? "unknown session failure"}` +
+          withheldNote(),
+      );
+    }
+  }
+  return { result, firstRawText };
+}
+
+/** Publish what the tier produces: nothing (investigate), a filed issue (author), or a pushed
+ *  branch + draft PR / applied in-place edits (implement). A switch with an exhaustiveness
+ *  check, not a pair of ifs: TIERS and WORKER_OUTPUT are both `Record<DispatchTier, …>` and
+ *  force a compile error when a tier is added, and the artifact logic has to fail the same way. */
+async function publishArtifact(
+  run: DispatchRun,
+  state: DispatchState,
+  data: WorkerOutput,
+): Promise<Published> {
+  const { cwd, tier, prTitle: callerPrTitle } = run.input;
+  const { identity, note, jobId, isCancelled } = run;
+  // Default covers `investigate`, which sets nothing else — the switch below overwrites it
+  // for `author`/`implement`. Initialized rather than left to the switch's exhaustiveness
+  // check alone, so a future tier added to DispatchTier without a matching case here fails
+  // typecheck on the field, not on a "used before assigned" surprise.
+  const published: Published = {
+    artifactNote: "",
+    outcome: "verdict_only",
+    forceHumanInPlace: false,
+  };
+  switch (tier) {
+    case "investigate":
+      break;
+    case "author": {
+      const text = artifactText(data.issueTitle, data.issueBody);
+      if (!text) {
+        published.artifactNote =
+          " No issue was filed: the episode concluded there was nothing worth tracking.";
+        published.outcome = "issue_declined";
+        break;
+      }
+      // Re-asserted rather than assumed: `identity` is resolved for every non-investigate
+      // tier above, and if that ever stops being true the episode must fail loudly here
+      // instead of silently returning a verdict whose issue was never filed.
+      if (!identity) throw new Error("internal: repo identity missing for the author tier");
+      assertNoGithubForSensitive(run.effectiveSensitive, "openIssue");
+      note("filing issue");
+      try {
+        published.artifactUrl = await openIssue(identity, {
+          title: text.title,
+          body: text.body,
+        });
+        published.outcome = "issue_filed";
+      } catch (err) {
+        // A refused publish (secret scan) or a missing token permission must not turn a
+        // completed investigation into a failed job — the verdict is still worth having,
+        // and the reason belongs in it. Same treatment the PR path gets.
+        logger.error(
+          { event: "dispatch.issue_failed", project: cwd, error: String(err) },
+          "issue could not be filed",
+        );
+        published.artifactNote = ` No issue was filed: ${err instanceof Error ? err.message : String(err)}`;
+        published.outcome = "issue_failed";
+      }
+      break;
+    }
+    case "implement": {
+      if (run.inPlace) {
+        const applied = await finishInPlace(cwd, state.snapshot as InPlaceSnapshot, note, {
+          jobId,
+          isCancelled,
+        });
+        published.changedFiles = applied.changedFiles;
+        published.artifactNote = applied.note;
+        published.outcome = applied.outcome;
+        published.forceHumanInPlace = applied.forceHuman;
+        break;
+      }
+      const { worktree } = state;
+      if (!identity || !worktree) {
+        throw new Error("internal: repo identity or worktree missing for the implement tier");
+      }
+      assertNoGithubForSensitive(run.effectiveSensitive, "openPullRequest");
+      const deposit = await depositBranch(
+        worktree,
+        identity,
+        data,
+        note,
+        { jobId, isCancelled },
+        callerPrTitle,
+      );
+      published.artifactUrl = deposit.artifactUrl;
+      published.branch = deposit.branch;
+      published.artifactNote = deposit.note;
+      published.outcome = deposit.outcome;
+      break;
+    }
+    default:
+      tier satisfies never;
+  }
+  return published;
+}
+
+/** The verdict the caller reads: the worker's own, plus what was published and the notes that
+ *  must not be lost. */
+function buildVerdict(
+  run: DispatchRun,
+  state: DispatchState,
+  data: WorkerOutput,
+  published: Published,
+): DispatchOutput {
+  const { cwd, tier, workspace } = run.input;
+  const { artifactUrl, branch, changedFiles, artifactNote, outcome } = published;
+  const { fallbackWithheld } = state;
+  logger.info(
+    {
+      event: "dispatch.done",
+      tool: "dispatch",
+      project: cwd,
+      tier,
+      workspace,
+      outcome,
+      confidence: data.confidence,
+      nextAction: data.nextAction,
+      evidence: data.evidence.length,
+      artifactUrl,
+      branch,
+      changedFiles: changedFiles?.length,
+      durationMs: Math.round(performance.now() - run.startMs),
+    },
+    "dispatch done",
+  );
+  return {
+    ...data,
+    outcome,
+    schemaVersion: DISPATCH_SCHEMA_VERSION,
+    ...(artifactUrl ? { artifactUrl } : {}),
+    ...(branch ? { branch } : {}),
+    ...(changedFiles ? { changedFiles } : {}),
+    ...(fallbackWithheld ? { fallbackWithheld } : {}),
+    ...(artifactNote || fallbackWithheld
+      ? {
+          verdict: data.verdict + artifactNote + (fallbackWithheld ? FALLBACK_WITHHELD_NOTE : ""),
+        }
+      : {}),
+    // A red check is never a PR, and a consumer must not read this as the worker's own
+    // "no human needed" verdict — forced the same way `applySensitiveScan` forces it for
+    // `withheld`. `forceHumanInPlace` is the in-place equivalent: nothing was published
+    // that a red CHECK gates (edits sit uncommitted for a human either way), but a
+    // CI-path/secret hit in the change set is a different, standalone reason the worker's
+    // own "no human needed" verdict must not stand.
+    ...(outcome === "checks_failed" || published.forceHumanInPlace
+      ? { nextAction: "human" as const }
+      : {}),
+  };
+}
+
+/** A `human` verdict without the question/category a consumer needs is a worker slip worth a
+ *  log line, not a failure. */
+function warnIncompleteEscalation(run: DispatchRun, data: WorkerOutput): void {
+  if (data.nextAction !== "human") return;
+  for (const field of ["decisionQuestion", "escalationCategory"] as const) {
+    if (data[field]) continue;
+    logger.warn(
+      {
+        event: `dispatch.human_without_${field === "decisionQuestion" ? "question" : "category"}`,
+        tool: "dispatch",
+        project: run.input.cwd,
+        tier: run.input.tier,
+      },
+      `worker returned nextAction human without a ${field}`,
+    );
+  }
+}
+
+/** The error `runDispatch` rethrows once the episode threw. A drain detached the OpenCode
+ *  session: it is still working in this worktree and the next boot re-attaches it, so neither
+ *  salvage nor teardown may touch the tree. Otherwise a throw here (unlike a deliberate refusal
+ *  or a fully-salvaged serialization failure, neither of which throws) means the episode's fate
+ *  was never resolved — the same "died mid-work" shape a SIGKILL leaves for the boot sweep,
+ *  just synchronous. Salvage before the `finally` discards it, and surface the path in the
+ *  job's own error message so it doesn't have to be found by grepping the log. */
+async function failureToRethrow(
+  err: unknown,
+  run: DispatchRun,
+  state: DispatchState,
+): Promise<unknown> {
+  if (err instanceof SessionDetachedError) {
+    state.detachedForRestart = true;
+    return err;
+  }
+  const { worktree } = state;
+  if (!worktree) return err;
+  const salvaged = await salvageWorktree(run.input.cwd, worktree.path, worktree.branch);
+  if (!salvaged) return err;
+  const message = err instanceof Error ? err.message : String(err);
+  return new Error(`${message} (salvaged uncommitted work to ${salvaged.path})`, { cause: err });
+}
+
 /** Run one dispatch episode and return its verdict. Throws on failure — the store turns a
  *  throw into `status: "failed"`.
+ *
+ *  Phases: `startRun` (validate, prompt, identity) → `acquireWorkspace` (lease + tree) →
+ *  `enterWorkspace` → `runEpisodes` → salvage, or `publishArtifact` → `buildVerdict`; the
+ *  `finally` tears the tree down on every path.
  *
  *  Boot-recovery: a worktree episode resumes by reopening its worktree. An in-place episode has
  *  no worktree; its change-set attribution rests on the pre-episode snapshot, which is persisted
@@ -894,308 +1469,19 @@ export async function runDispatch(
   isCancelled?: (jobId: string) => boolean,
   resumeCtx?: DispatchResumeContext,
 ): Promise<DispatchOutput> {
-  const input = parseParams(DISPATCH_INPUT, rawParams);
-  const { cwd, brief, tier, context, model, sensitive, workspace, base, revisionOf } = input;
-  const { kind, branch: branchSlug, prTitle: callerPrTitle } = input;
-  // Checked before the filesystem checks below — the repo policy (server/lib/dispatch-policy.ts)
-  // is the boundary on which repo and which tier this handler may run at all, so a refused
-  // combination costs nothing beyond validating the input and reveals nothing about the local
-  // tree. server/routes/jobs.ts runs the same check at submit; this copy stays because a
-  // direct call (the MCP client, a future submitter) must not be able to skip it.
-  const decision = resolveDispatchTarget({ cwd, tier });
-  if (!decision.ok) throw new Error(`dispatch refused: ${decision.reason}`);
-  // The policy's own sensitivity call for this repo, ORed with whatever the caller still
-  // declares — a caller MAY opt a repo the policy does not mark into the scan, but can never
-  // opt one the policy does mark OUT of it by simply omitting the field.
-  const effectiveSensitive = decision.sensitive || sensitive;
-  if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
-  if (!existsSync(join(cwd, ".git"))) {
-    throw new Error(`Not a git repository (no .git): ${cwd}`);
-  }
-  // Checked before anything else — no worktree, no session, no GitHub identity lookup — so a
-  // refused combination costs nothing beyond validating the input. server/routes/jobs.ts runs
-  // the same checks at submit (`dispatchSubmitRefusal`); this copy stays for a direct caller.
-  assertDispatchRequestAllowed(input, effectiveSensitive);
-  const inPlace = tier === "implement" && workspace === "in-place";
-  // True for a boot-recovery resume — a worktree episode or, after a drain detached its session
-  // and its snapshot was persisted, an in-place one (`resumingWorktree` below is the former).
-  const resuming = resumeCtx?.resume !== undefined;
-  const jobKey = jobId ?? randomUUID();
-  const startMs = performance.now();
-  const profile = TIERS[tier];
-  const skill = await loadSkillPrompt(tier);
-  const nonce = newFenceNonce();
-  let prompt = buildPrompt(skill, brief, context, nonce, inPlace ? IN_PLACE_ADDENDUM : undefined);
-
-  logger.info(
-    {
-      event: "dispatch.start",
-      tool: "dispatch",
-      project: cwd,
-      tier,
-      workspace,
-      briefChars: brief.length,
-    },
-    "dispatch episode start",
-  );
-
-  // The retry is a second worker session, and runSession restarts its turn counter at 0 for
-  // it. A caller watching `turns` fall from 60 to 0 mid-job reads that as a wedged or
-  // restarted worker, so offset the retry's counts instead of passing them through raw.
-  // Same shape as review's shared `bump` across its parallel angle sessions.
-  let turnOffset = 0;
-  // Raw turn count last reported by the current episode — captured so a retry (a fresh
-  // session, counting from 0 again) can offset from where the first episode actually left
-  // off rather than from a fixed budget number.
-  let lastObservedTurns = 0;
-  const relayProgress: ProgressSink | undefined = onProgress
-    ? (p) => {
-        lastObservedTurns = p.turns;
-        onProgress({ ...p, turns: turnOffset + p.turns });
-      }
-    : undefined;
-  const note = (lastAction: string): void =>
-    onProgress?.({ turns: turnOffset, lastAction, lastActivityAt: Date.now() });
-
-  // Tiers that produce an artifact need the forge identity (GitHub or GitLab, resolved by
-  // the remote URL's host) before the session runs — an implement episode must not spend 30
-  // minutes only to discover its remote is on neither, and the worktree has to be cut from
-  // the authoritative default branch. In-place publishes nothing, so it needs no identity
-  // and no forge call at all.
-  let identity: RepoIdentity | undefined;
-  if (tier !== "investigate" && !inPlace) {
-    assertNoGithubForSensitive(effectiveSensitive, "resolveRepoIdentity");
-    identity = await resolveRepoIdentity(cwd);
-  }
-
-  // EVERY tier runs in its own worktree, not just the writing one. `readOnly: true` disables
-  // Edit and Write but not Bash, and the brief is attacker-influenced text — anyone can open
-  // an issue on a public repo, and its body reaches an episode's context. A read tier sitting
-  // in the live checkout is one injected `sed -i` away from editing a repo other agents are
-  // working in and that deploys on push. The read tiers get a throwaway copy of the repo's
-  // default branch — HEAD only when the remote is unreachable, or when the caller asked for
-  // the live checkout with `base: "head"` (see createReadWorktree); implement keeps its
-  // branch cut from the authoritative default. It costs no capability — the difference is
-  // which directory the session starts in.
-  //
-  // The ONE exception is implement + workspace "in-place": the episode's whole point is to
-  // edit the live checkout, deliberately, for the owner's own direct-to-master review flow.
-  // It is gated on the lock above (one per repo) and described by a snapshot (below), and it
-  // publishes nothing — the trade-offs are in AGENTS.md's Dispatch section and
-  // docs/dispatch-security.md.
-  //
-  // Created INSIDE the try, so the finally owns teardown on every exit path. (A throw from
-  // either constructor cleans up its own partial state — see dispatch-git.ts.)
-  // Prefer the real job id (executor.ts passes `job.id`) over a fresh one: it names the
-  // worktree directory AND the branch, so a leftover the boot sweep finds after a SIGKILL is
-  // already labeled with the job it belonged to — see `salvageWorktree` in dispatch-git.ts,
-  // which derives its salvage filename from this same branch name and needs no separate
-  // bookkeeping to recover it. Falls back to a fresh id for a direct call with no outer job
-  // (tests, or a future non-job caller).
-  const resumingWorktree = resuming && !inPlace;
-  let worktree: DispatchWorktree | undefined;
-  let snapshot: InPlaceSnapshot | undefined;
-  // True only when THIS invocation took the lease itself (a direct caller with no job store) —
-  // the finally must release the lock it took, never a lock another job holds. A stored job
-  // arrives with the lease already held under its own id (`store.ts`'s `promote()` takes it at
-  // admission, and a busy repo keeps the job `pending` instead): that re-entry is `reentrant`
-  // and the store releases it. Taken inside the try so a throw between acquiring it and setting
-  // this flag is impossible by construction: the two happen on the same line.
-  let lockHeld = false;
-  let detachedForRestart = false;
-  // Set when the session runner declined the reactive Max fallback for this write-tier episode
-  // (it had already produced output on the primary route). Surfaced in the verdict + a field.
-  let fallbackWithheld: FallbackWithheld | undefined;
+  const { run, state } = await startRun(rawParams, onProgress, jobId, isCancelled, resumeCtx);
+  const { cwd, tier, brief } = run.input;
+  const scan = { sensitive: run.effectiveSensitive, jobId: run.jobKey, project: cwd };
   try {
-    if (tier === "implement") {
-      const lease = tryAcquireRepoLease(cwd, jobKey);
-      if (!lease.ok) throw new Error(repoLeaseRefusal(lease.holder));
-      lockHeld = !lease.reentrant;
-    }
-    if (inPlace) {
-      // The snapshot is the in-place run's only attribution baseline. It is persisted in the
-      // row's metadata marker (`onWorktreeReady` below) so a drain-detached episode, re-attached
-      // after the restart, attributes its edits against the SAME baseline; a resume reads it
-      // back instead of taking a new one (a new one would swallow the edits made so far).
-      snapshot = resuming
-        ? inPlaceSnapshotOf((resumeCtx as DispatchResumeContext).resume?.worktreeMeta)
-        : await snapshotInPlace(cwd);
-      note(
-        `${resuming ? "resuming in-place" : "in-place snapshot"} ${snapshot.headOid.slice(0, 12)}`,
-      );
-    } else if (resumeCtx?.resume) {
-      // Reopen exactly what `dispatchRecoveryStatusFor` verified existed at `recover()` time —
-      // reconstructed from the persisted object, not re-derived: `base` in particular is a
-      // pinned OID (`DispatchWorktree.base`'s doc comment) that must survive unchanged, not be
-      // recomputed from the worktree's current state.
-      worktree = reconstructWorktree(resumeCtx.resume.worktreeMeta);
-      if (!existsSync(worktree.path)) {
-        throw new Error(
-          `dispatch resume refused: worktree ${worktree.path} no longer exists on disk`,
-        );
-      }
-      note(`resuming ${worktree.branch}`);
-    } else if (tier === "implement" && identity) {
-      // The name was free at submit, but this job may have queued behind others since.
-      if (branchSlug !== undefined) {
-        const refusal = await branchCollisionRefusal(cwd, branchSlug);
-        if (refusal) throw new Error(refusal);
-      }
-      worktree = await createWorktree(
-        cwd,
-        jobKey,
-        autoBranchSlug(brief),
-        identity.defaultBranch,
-        revisionOf,
-        branchSlug,
-      );
-      note(`worktree ${worktree.branch}`);
-    } else {
-      worktree = await createReadWorktree(cwd, jobKey, undefined, base);
-    }
-    // Recorded the instant the worktree exists — well before the worker session starts — so a
-    // process killed before the FIRST stream event still leaves this on the job row. A resume
-    // re-records the same value; store.ts's setter is a plain UPDATE, so this costs nothing.
-    // An in-place run records a marker object instead: the store needs SOMETHING durable to
-    // distinguish the row (it refuses to resume one), and no worktree metadata could lie
-    // about a worktree that does not exist.
-    //
-    // Narrowed once, here, rather than cast at each of the three read-tiers-only uses below:
-    // every branch above that is NOT `if (inPlace)` assigns `worktree`, so a plain tier
-    // (`!inPlace`) reaching this point with no worktree is an internal invariant violation,
-    // not a normal runtime condition — refused loudly with a runtime guard instead of three
-    // separate `as DispatchWorktree` casts papering over the same assumption.
-    let worktreeMeta: DispatchWorktreeMeta;
-    let sessionCwd: string;
-    let strippedSettings: string[];
-    if (inPlace) {
-      // In-place: session cwd IS the repo root the policy resolved. No strip/restore —
-      // deleting the repo's `.claude/settings.json` here would mutate a live tree other
-      // sessions use. The trade is explicit: `disableAllHooks` still holds (a `--settings`
-      // flag, not a file delete), but a project settings file's `env` block DOES apply inside
-      // the session — accepted because in-place is the owner opting their own audited repo
-      // into a writable episode, and the policy ceiling still decides which repos are
-      // reachable. Everything else (`GIT_DENY_CREDENTIALS_ENV`, the fence, the read-only
-      // profile) is unchanged.
-      worktreeMeta = { path: cwd, workspace: "in-place", snapshot };
-      sessionCwd = cwd;
-      strippedSettings = [];
-    } else {
-      if (!worktree) throw new Error("internal: worktree missing for a non-in-place tier");
-      worktreeMeta = worktree;
-      sessionCwd = worktree.path;
-      strippedSettings = stripProjectSettings(worktree);
-      // A resumed worktree was stripped by the invocation a restart interrupted, so the strip
-      // above finds nothing: restore from the base for EVERY settings path (restoreStrippedSettings
-      // skips the ones the base does not carry) or the push would read as deleting them.
-      if (resumingWorktree) strippedSettings = [...PROJECT_SETTINGS_FILES];
-      // A read-tier worker is told which tree it is actually reading: its worktree is cut
-      // from the remote default branch by default, not the live checkout's HEAD (see
-      // createReadWorktree), and `baseRef` would otherwise only be logged — a verdict that
-      // cannot say which commit it read is the failure this names. Handler-authored, so it is
-      // appended OUTSIDE the fenced brief. Implement's worktree is always a default branch and
-      // its own prompt already says so, so only the read tiers get the note.
-      if (tier !== "implement") prompt += readBaseNote(worktree);
-    }
-    // Recorded the instant the worktree exists — well before the worker session starts — so a
-    // process killed before the FIRST stream event still leaves this on the job row (see the
-    // comment above this block for the "in-place run records a marker instead" reasoning).
-    resumeCtx?.onWorktreeReady?.(worktreeMeta);
-    if (strippedSettings.length > 0) note(`stripped ${strippedSettings.join(", ")}`);
-    const spawnEpisode = (
-      p: string,
-      opts: { resumeSessionId?: string; resumePrompt?: string } = {},
-    ) =>
-      runSession<WorkerOutput>({
-        cwd: sessionCwd,
-        prompt: p,
-        resumeSessionId: opts.resumeSessionId,
-        resumePrompt: opts.resumePrompt,
-        tool: "dispatch",
-        jobId,
-        isCancelled,
-        // implement gets its own default route — investigate/author stay on the AGENT one
-        // (both opencode by default); an editorial brief runs on the claude-harness
-        // `dispatch_editorial` route. See routing.ts.
-        route: routeFor(dispatchRouteKey(tier, kind)),
-        model,
-        jsonSchema: z.toJSONSchema(WORKER_OUTPUT[tier]),
-        readOnly: profile.readOnly,
-        // The whole premise is the repo's own Claude-shaped context, and the global rule
-        // hierarchy it inherits — unlike `check`, which deliberately keeps the prompt small.
-        settingSources: "user,project",
-        // Take git's credential helper away from the session. Applied to EVERY tier, not
-        // just the writing one: `~/.gitconfig` on this host wires the helper to the offline
-        // secrets cache, so any process running as this user can push — and a read-only
-        // session still has Bash. See GIT_DENY_CREDENTIALS_ENV for the full argument.
-        extraEnv: GIT_DENY_CREDENTIALS_ENV,
-        validate: workerValidator(tier),
-        onActivity: relayProgress,
-        // Every OpenCode session under a job is detached by a drain and re-attached by the next
-        // boot (recover() keeps session_id + worktree_meta — for in-place, the snapshot too).
-        onSessionId: resumeCtx?.onSessionId,
-      });
-    const runEpisode = async (
-      p: string,
-      opts: { resumeSessionId?: string; resumePrompt?: string } = {},
-    ) => {
-      const r = await spawnEpisode(p, opts);
-      fallbackWithheld ??= fallbackWithheldOf(r);
-      return r;
-    };
-
-    // A resume attaches to the existing transcript with a short continuation nudge instead of
-    // re-sending the original (already-seen) brief prompt; everything past this first call —
-    // the schema-validation retry below — is unaffected and always a fresh session, resume or
-    // not, same as before this feature existed.
-    let result = resuming
-      ? await runEpisode(prompt, {
-          // The continuation nudge goes to a session that already has history; one detached
-          // before its first prompt (no message at all) is sent the full `prompt` instead.
-          resumePrompt: RESUME_CONTINUATION_PROMPT,
-          resumeSessionId: resumeCtx?.resume?.sessionId,
-        })
-      : await runEpisode(prompt);
-    // Hold the first attempt's text: the retry is a fresh session, so a retry that fails
-    // HARDER (no text at all) would otherwise discard a full investigation and salvage
-    // nothing. Whichever attempt actually produced text is what gets preserved.
-    const firstRawText = result.rawText;
-
-    if (!result.ok || !result.data) {
-      // A withheld fallback means a write-tier session died on a transport error AFTER writing:
-      // a fresh JSON-only session would re-run the whole implementation over its half-applied
-      // edits, so an implement episode fails here with the withheld note instead.
-      if (!isSalvageable(result) || (tier === "implement" && fallbackWithheld)) {
-        // Fail the job outright. The store turns this into status:"failed" with the message,
-        // which is a truthful "the tool broke" the caller can act on — unlike a degraded
-        // verdict, which reads as "the investigation concluded and needs a human".
-        throw new Error(
-          `dispatch episode did not complete: ${result.error ?? "unknown session failure"}` +
-            (fallbackWithheld ? FALLBACK_WITHHELD_NOTE : ""),
-        );
-      }
-      logger.warn(
-        { event: "dispatch.retry", tool: "dispatch", project: cwd, tier, error: result.error },
-        "dispatch output unusable — retrying once",
-      );
-      turnOffset = lastObservedTurns;
-      note("retry (fresh session)");
-      // The retry is a FRESH session that has to re-read the repo, so it is told to go
-      // straight to the answer rather than re-investigating from scratch.
-      result = await runEpisode(prompt + JSON_ONLY_RETRY);
-      if (!result.ok && !isSalvageable(result)) {
-        throw new Error(
-          `dispatch retry did not complete: ${result.error ?? "unknown session failure"}` +
-            (fallbackWithheld ? FALLBACK_WITHHELD_NOTE : ""),
-        );
-      }
-    }
+    await acquireWorkspace(run, state);
+    const ws = enterWorkspace(run, state);
+    const { result, firstRawText } = await runEpisodes(run, state, ws);
 
     // Both episodes are over, so the tree can be made whole again. Before `salvage` too — it
     // pushes whatever the session left behind, and a stripped settings file would otherwise
     // reach the branch as a deletion. In-place strips nothing and restores nothing.
-    if (!inPlace) {
-      await restoreStrippedSettings(worktree as DispatchWorktree, strippedSettings);
+    if (!run.inPlace) {
+      await restoreStrippedSettings(state.worktree as DispatchWorktree, ws.strippedSettings);
     }
 
     // Degrade rather than discard. The episode may have done minutes of real work; losing it
@@ -1212,186 +1498,20 @@ export async function runDispatch(
         await salvage(
           result,
           firstRawText,
-          { cwd, tier, brief, startMs, fallbackWithheld },
-          worktree,
-          identity,
-          note,
+          { cwd, tier, brief, startMs: run.startMs, fallbackWithheld: state.fallbackWithheld },
+          state.worktree,
+          run.identity,
+          run.note,
         ),
-        { sensitive: effectiveSensitive, jobId: jobKey, project: cwd },
+        scan,
       );
     }
 
-    const data = result.data;
-    if (data.nextAction === "human") {
-      for (const field of ["decisionQuestion", "escalationCategory"] as const) {
-        if (data[field]) continue;
-        logger.warn(
-          {
-            event: `dispatch.human_without_${field === "decisionQuestion" ? "question" : "category"}`,
-            tool: "dispatch",
-            project: cwd,
-            tier,
-          },
-          `worker returned nextAction human without a ${field}`,
-        );
-      }
-    }
-    let artifactUrl: string | undefined;
-    let branch: string | undefined;
-    let changedFiles: string[] | undefined;
-    let artifactNote = "";
-    // Default covers `investigate`, which sets nothing else — the switch below overwrites it
-    // for `author`/`implement`. Initialized rather than left to the switch's exhaustiveness
-    // check alone, so a future tier added to DispatchTier without a matching case here fails
-    // typecheck on the field, not on a "used before assigned" surprise.
-    let outcome: DispatchOutcome = "verdict_only";
-    // Set only by the in-place branch below, when its CI-path/secret scan hit something. Same
-    // "wins over the worker's own nextAction" treatment `checks_failed` already gets — nothing
-    // was published for a red check to gate here either, but a flagged change set in a LIVE
-    // checkout is exactly the kind of thing that must not be waved through as "no human
-    // needed" just because the worker's own verdict said so.
-    let forceHumanInPlace = false;
-
-    // A switch with an exhaustiveness check, not a pair of ifs: TIERS and WORKER_OUTPUT are
-    // both `Record<DispatchTier, …>` and force a compile error when a tier is added, and the
-    // artifact logic has to fail the same way. Two ifs would silently fall through for a
-    // fourth tier and return a bare verdict with no artifact and no error.
-    switch (tier) {
-      case "investigate":
-        break;
-      case "author": {
-        const text = artifactText(data.issueTitle, data.issueBody);
-        if (!text) {
-          artifactNote =
-            " No issue was filed: the episode concluded there was nothing worth tracking.";
-          outcome = "issue_declined";
-          break;
-        }
-        // Re-asserted rather than assumed: `identity` is resolved for every non-investigate
-        // tier above, and if that ever stops being true the episode must fail loudly here
-        // instead of silently returning a verdict whose issue was never filed.
-        if (!identity) throw new Error("internal: repo identity missing for the author tier");
-        assertNoGithubForSensitive(effectiveSensitive, "openIssue");
-        note("filing issue");
-        try {
-          artifactUrl = await openIssue(identity, {
-            title: text.title,
-            body: text.body,
-          });
-          outcome = "issue_filed";
-        } catch (err) {
-          // A refused publish (secret scan) or a missing token permission must not turn a
-          // completed investigation into a failed job — the verdict is still worth having,
-          // and the reason belongs in it. Same treatment the PR path gets.
-          logger.error(
-            { event: "dispatch.issue_failed", project: cwd, error: String(err) },
-            "issue could not be filed",
-          );
-          artifactNote = ` No issue was filed: ${err instanceof Error ? err.message : String(err)}`;
-          outcome = "issue_failed";
-        }
-        break;
-      }
-      case "implement": {
-        if (inPlace) {
-          const applied = await finishInPlace(cwd, snapshot as InPlaceSnapshot, note, {
-            jobId,
-            isCancelled,
-          });
-          changedFiles = applied.changedFiles;
-          artifactNote = applied.note;
-          outcome = applied.outcome;
-          forceHumanInPlace = applied.forceHuman;
-          break;
-        }
-        if (!identity || !worktree) {
-          throw new Error("internal: repo identity or worktree missing for the implement tier");
-        }
-        assertNoGithubForSensitive(effectiveSensitive, "openPullRequest");
-        const deposit = await depositBranch(
-          worktree,
-          identity,
-          data,
-          note,
-          { jobId, isCancelled },
-          callerPrTitle,
-        );
-        artifactUrl = deposit.artifactUrl;
-        branch = deposit.branch;
-        artifactNote = deposit.note;
-        outcome = deposit.outcome;
-        break;
-      }
-      default:
-        tier satisfies never;
-    }
-
-    logger.info(
-      {
-        event: "dispatch.done",
-        tool: "dispatch",
-        project: cwd,
-        tier,
-        workspace,
-        outcome,
-        confidence: data.confidence,
-        nextAction: data.nextAction,
-        evidence: data.evidence.length,
-        artifactUrl,
-        branch,
-        changedFiles: changedFiles?.length,
-        durationMs: Math.round(performance.now() - startMs),
-      },
-      "dispatch done",
-    );
-    const finalOutput: DispatchOutput = {
-      ...data,
-      outcome,
-      schemaVersion: DISPATCH_SCHEMA_VERSION,
-      ...(artifactUrl ? { artifactUrl } : {}),
-      ...(branch ? { branch } : {}),
-      ...(changedFiles ? { changedFiles } : {}),
-      ...(fallbackWithheld ? { fallbackWithheld } : {}),
-      ...(artifactNote || fallbackWithheld
-        ? {
-            verdict: data.verdict + artifactNote + (fallbackWithheld ? FALLBACK_WITHHELD_NOTE : ""),
-          }
-        : {}),
-      // A red check is never a PR, and a consumer must not read this as the worker's own
-      // "no human needed" verdict — forced the same way `applySensitiveScan` forces it for
-      // `withheld`. `forceHumanInPlace` is the in-place equivalent: nothing was published
-      // that a red CHECK gates (edits sit uncommitted for a human either way), but a
-      // CI-path/secret hit in the change set is a different, standalone reason the worker's
-      // own "no human needed" verdict must not stand.
-      ...(outcome === "checks_failed" || forceHumanInPlace ? { nextAction: "human" as const } : {}),
-    };
-    return applySensitiveScan(finalOutput, {
-      sensitive: effectiveSensitive,
-      jobId: jobKey,
-      project: cwd,
-    });
+    warnIncompleteEscalation(run, result.data);
+    const published = await publishArtifact(run, state, result.data);
+    return applySensitiveScan(buildVerdict(run, state, result.data, published), scan);
   } catch (err) {
-    // A drain detached the OpenCode session: it is still working in this worktree and the next
-    // boot re-attaches it, so neither salvage nor teardown may touch the tree.
-    if (err instanceof SessionDetachedError) {
-      detachedForRestart = true;
-      throw err;
-    }
-    // A throw here (unlike a deliberate refusal or a fully-salvaged serialization failure,
-    // neither of which throws) means the episode's fate was never resolved — the same "died
-    // mid-work" shape a SIGKILL leaves for the boot sweep, just synchronous. Salvage before
-    // the `finally` below discards it, and surface the path in the job's own error message so
-    // it doesn't have to be found by grepping the log.
-    if (worktree) {
-      const salvaged = await salvageWorktree(cwd, worktree.path, worktree.branch);
-      if (salvaged) {
-        const message = err instanceof Error ? err.message : String(err);
-        throw new Error(`${message} (salvaged uncommitted work to ${salvaged.path})`, {
-          cause: err,
-        });
-      }
-    }
-    throw err;
+    throw await failureToRethrow(err, run, state);
   } finally {
     // Always tear the worktree down, on every path including a throw. This is the
     // "a failed episode leaves the live checkout untouched" property: the checkout other
@@ -1401,8 +1521,8 @@ export async function runDispatch(
     // its whole admission rested on, but ONLY if this invocation is the one that actually
     // acquired it: a refused acquisition (another job already holds it) must never release
     // that other job's lock.
-    if (worktree && !detachedForRestart) await removeWorktree(cwd, worktree);
-    if (lockHeld) releaseRepoLease(cwd);
+    if (state.worktree && !state.detachedForRestart) await removeWorktree(cwd, state.worktree);
+    if (state.lockHeld) releaseRepoLease(cwd);
   }
 }
 

@@ -263,21 +263,38 @@ export function opencodeProviderForWire(wire: ModelWire): string {
   return wire === "anthropic" ? OPENCODE_PROVIDER_ANTHROPIC : OPENCODE_PROVIDER_CHAT;
 }
 
-function modelConfigEntry(entry: ModelEntry) {
+/** One v2 model entry (`providers.<id>.models.<id>`), generated from the registry. Shared with
+ *  scripts/sync-opencode-config.ts so the interactive config and the server's cannot drift. */
+export function opencodeV2ModelRow(entry: ModelEntry) {
   return {
+    // Without `supportsThinkingBlockBinding: false` OpenCode sends `thinking.block_binding` plus
+    // the `thinking-binding-controls` beta, which IU's gateway answers with a 503
+    // `not_found_error` for `claude-haiku-5-5-eu` (it falls through to an upstream that has no
+    // `-eu` id). Measured 2026-10-14; `thinking` is then omitted from the request (Haiku 5.5
+    // default). Only the v2 `providers` form carries `compatibility`.
+    ...(entry.wire === "anthropic"
+      ? { compatibility: { supportsThinkingBlockBinding: false } }
+      : {}),
     name: entry.name,
     limit: { context: entry.limit.context, output: entry.limit.output },
     cost: {
       input: entry.rate.in,
       output: entry.rate.out,
-      ...(entry.rate.cacheRead !== undefined ? { cache_read: entry.rate.cacheRead } : {}),
+      ...(entry.rate.cacheRead !== undefined
+        ? {
+            cache: {
+              read: entry.rate.cacheRead,
+              ...(entry.rate.cacheWrite !== undefined ? { write: entry.rate.cacheWrite } : {}),
+            },
+          }
+        : {}),
     },
     // A model that exposes effort levels runs at "high" by default; `#<variant>` on the model
     // ref (the runner's session create `variant`) picks another.
     ...(entry.effort.length > 0
       ? {
-          options: { reasoningEffort: "high" },
-          variants: Object.fromEntries(entry.effort.map((e) => [e, { reasoningEffort: e }])),
+          settings: { reasoningEffort: "high" },
+          variants: entry.effort.map((e) => ({ id: e, settings: { reasoningEffort: e } })),
         }
       : {}),
   };
@@ -285,70 +302,43 @@ function modelConfigEntry(entry: ModelEntry) {
 
 /** The config the server boots with (`OPENCODE_CONFIG_CONTENT` — it overrides a repo-local
  *  `opencode.json`, which a file-path config does not). Generated from the model registry, so a
- *  new verified model needs only a server restart. Provider/model entries keep the v1-shaped
- *  form opencode normalizes (measured working on 2.0.25, docs/opencode-v2.md § Config via env);
- *  `agents` and their `permissions` are v2-native. The key/base are `{env:…}` placeholders
- *  resolved from the server's own env (`opencodeServerEnv`) — never a literal here. */
+ *  new verified model needs only a server restart. v2-native throughout (`providers`, `agents`
+ *  with `permissions`) — the v1 `provider` form drops `compatibility` and is gone. The key/base
+ *  are `{env:…}` placeholders resolved from the server's own env (`opencodeServerEnv`) — never
+ *  a literal here. */
 export function buildOpencodeServerConfig(): Record<string, unknown> {
-  const providerOptions = { baseURL: "{env:IU_OPENAI_BASE}", apiKey: "{env:IU_KEY}" };
   const models = opencodeServerModels();
-  const modelsFor = (wire: ModelWire) =>
-    Object.fromEntries(
-      models.filter((m) => m.wire === wire).map((m) => [m.id, modelConfigEntry(m)]),
-    );
+  const provider = (pkg: string, name: string, baseEnv: string, wire: ModelWire) => ({
+    package: `aisdk:${pkg}`,
+    name,
+    settings: { baseURL: `{env:${baseEnv}}`, apiKey: "{env:IU_KEY}" },
+    models: Object.fromEntries(
+      models.filter((m) => m.wire === wire).map((m) => [m.id, opencodeV2ModelRow(m)]),
+    ),
+  });
   return {
     $schema: "https://opencode.ai/config.json",
     autoupdate: false,
     share: "disabled",
-    provider: {
-      [OPENCODE_PROVIDER_CHAT]: {
-        npm: "@ai-sdk/openai-compatible",
-        name: "IU unified endpoint (OpenAI route, Chat Completions)",
-        options: providerOptions,
-        models: modelsFor("chat"),
-      },
-      [OPENCODE_PROVIDER_RESPONSES]: {
-        npm: "@ai-sdk/openai",
-        name: "IU unified endpoint (OpenAI route, Responses)",
-        options: providerOptions,
-        models: modelsFor("responses"),
-      },
-    },
-    // v2-native shape, deliberately: the v1 `provider` form drops `compatibility`, and without
-    // `supportsThinkingBlockBinding: false` OpenCode sends `thinking.block_binding` plus the
-    // `thinking-binding-controls` beta, which IU's gateway answers with a 503 `not_found_error`
-    // for `claude-haiku-5-5-eu` (it falls through to an upstream that has no `-eu` id).
-    // Measured 2026-10-14; `thinking` is then omitted from the request (Haiku 5.5 default).
     providers: {
-      [OPENCODE_PROVIDER_ANTHROPIC]: {
-        package: "aisdk:@ai-sdk/anthropic",
-        name: "IU unified endpoint (native Anthropic route)",
-        settings: { baseURL: "{env:IU_ANTHROPIC_BASE}", apiKey: "{env:IU_KEY}" },
-        models: Object.fromEntries(
-          models
-            .filter((m) => m.wire === "anthropic")
-            .map((m) => [
-              m.id,
-              {
-                name: m.name,
-                limit: { context: m.limit.context, output: m.limit.output },
-                cost: {
-                  input: m.rate.in,
-                  output: m.rate.out,
-                  ...(m.rate.cacheRead !== undefined
-                    ? {
-                        cache: {
-                          read: m.rate.cacheRead,
-                          ...(m.rate.cacheWrite !== undefined ? { write: m.rate.cacheWrite } : {}),
-                        },
-                      }
-                    : {}),
-                },
-                compatibility: { supportsThinkingBlockBinding: false },
-              },
-            ]),
-        ),
-      },
+      [OPENCODE_PROVIDER_CHAT]: provider(
+        "@ai-sdk/openai-compatible",
+        "IU unified endpoint (OpenAI route, Chat Completions)",
+        "IU_OPENAI_BASE",
+        "chat",
+      ),
+      [OPENCODE_PROVIDER_RESPONSES]: provider(
+        "@ai-sdk/openai",
+        "IU unified endpoint (OpenAI route, Responses)",
+        "IU_OPENAI_BASE",
+        "responses",
+      ),
+      [OPENCODE_PROVIDER_ANTHROPIC]: provider(
+        "@ai-sdk/anthropic",
+        "IU unified endpoint (native Anthropic route)",
+        "IU_ANTHROPIC_BASE",
+        "anthropic",
+      ),
     },
     agents: {
       [OPENCODE_AGENT_READONLY]: {

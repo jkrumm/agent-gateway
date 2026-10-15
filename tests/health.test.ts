@@ -1,14 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { computeHealth } from "../server/lib/health.ts";
 import { jobsRoutes } from "../server/routes/jobs.ts";
-import type { OpencodeServerStatus } from "../server/mcp/opencode-server.ts";
+import {
+  OPENCODE_PINNED_VERSION,
+  type OpencodeServerStatus,
+} from "../server/mcp/opencode-server.ts";
 import { recordRouteOutcome } from "../server/mcp/session-runner.ts";
 
 const serverOk = async (): Promise<OpencodeServerStatus> => ({
   ok: true,
   up: true,
-  version: "2.0.25",
-  pinned: "2.0.25",
+  version: OPENCODE_PINNED_VERSION,
+  pinned: OPENCODE_PINNED_VERSION,
   versionOk: true,
 });
 const withServerOk = { opencodeStatus: serverOk };
@@ -59,7 +62,7 @@ describe("computeHealth", () => {
         ok: false,
         up: false,
         version: null,
-        pinned: "2.0.25",
+        pinned: OPENCODE_PINNED_VERSION,
         versionOk: false,
         error: "opencode server unreachable: ECONNREFUSED",
       }),
@@ -79,15 +82,15 @@ describe("computeHealth", () => {
       opencodeStatus: async () => ({
         ok: false,
         up: true,
-        version: "2.0.30",
-        pinned: "2.0.25",
+        version: "9.9.9",
+        pinned: OPENCODE_PINNED_VERSION,
         versionOk: false,
-        error: "opencode server version 2.0.30 != pinned 2.0.25",
+        error: `opencode server version 9.9.9 != pinned ${OPENCODE_PINNED_VERSION}`,
       }),
     });
     expect(h.ok).toBe(true);
     expect(h.pageable).toBe(true);
-    expect(h.pageReason).toContain("2.0.30");
+    expect(h.pageReason).toContain("9.9.9");
   });
 
   test("GET /api/jobs/health carries pageable/pageReason additively", async () => {

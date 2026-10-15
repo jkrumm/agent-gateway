@@ -414,7 +414,7 @@ OpenCode's anthropic package sends `thinking.block_binding` plus the `thinking-b
 beta, which IU's gateway answers with 503 `not_found_error` for the `-eu` id (it falls through to
 an upstream with no such id); `compatibility.supportsThinkingBlockBinding: false` in the v2-shaped
 provider entry removes both (the v1 `provider` form drops that key — `buildOpencodeServerConfig`
-emits this one provider under `providers`). With it, no `thinking` field is sent.
+emits every provider under `providers` now). With it, no `thinking` field is sent.
 
 **`check` on Haiku 5.5: rejected.** On `claude -p` (`scripts/bench-check.ts`, explicit
 format/lint/typecheck commands, 3 runs each) Haiku 4.5 took 60 s median, Haiku 5.5 EU 237 s with

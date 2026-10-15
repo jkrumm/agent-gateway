@@ -298,29 +298,28 @@ function readServerPasswordOrEmpty(): string {
 
 describe("buildOpencodeServerConfig", () => {
   const cfg = buildOpencodeServerConfig();
-  const providers = cfg.provider as Record<string, Record<string, unknown>>;
-  const v2Providers = cfg.providers as Record<string, Record<string, unknown>>;
+  const providers = cfg.providers as Record<string, Record<string, unknown>>;
   const modelsOf = (id: string) =>
-    ((providers[id] ?? v2Providers[id])?.models ?? {}) as Record<string, Record<string, unknown>>;
+    (providers[id]?.models ?? {}) as Record<string, Record<string, unknown>>;
 
-  test("emits the three providers, each referencing the env-injected key/base, never a literal", () => {
+  test("is v2-only: three `providers`, no v1 `provider`, each referencing the env-injected key/base, never a literal", () => {
+    expect(cfg).not.toHaveProperty("provider");
     expect(Object.keys(providers).toSorted()).toEqual(
-      [OPENCODE_PROVIDER_CHAT, OPENCODE_PROVIDER_RESPONSES].toSorted(),
+      [OPENCODE_PROVIDER_CHAT, OPENCODE_PROVIDER_RESPONSES, OPENCODE_PROVIDER_ANTHROPIC].toSorted(),
     );
-    expect(Object.keys(v2Providers)).toEqual([OPENCODE_PROVIDER_ANTHROPIC]);
-    for (const provider of Object.values(providers)) {
-      expect(provider.options).toEqual({
+    for (const id of [OPENCODE_PROVIDER_CHAT, OPENCODE_PROVIDER_RESPONSES]) {
+      expect(providers[id]?.settings).toEqual({
         baseURL: "{env:IU_OPENAI_BASE}",
         apiKey: "{env:IU_KEY}",
       });
     }
-    expect(v2Providers[OPENCODE_PROVIDER_ANTHROPIC]?.settings).toEqual({
+    expect(providers[OPENCODE_PROVIDER_ANTHROPIC]?.settings).toEqual({
       baseURL: "{env:IU_ANTHROPIC_BASE}",
       apiKey: "{env:IU_KEY}",
     });
-    expect(providers[OPENCODE_PROVIDER_CHAT]?.npm).toBe("@ai-sdk/openai-compatible");
-    expect(providers[OPENCODE_PROVIDER_RESPONSES]?.npm).toBe("@ai-sdk/openai");
-    expect(v2Providers[OPENCODE_PROVIDER_ANTHROPIC]?.package).toBe("aisdk:@ai-sdk/anthropic");
+    expect(providers[OPENCODE_PROVIDER_CHAT]?.package).toBe("aisdk:@ai-sdk/openai-compatible");
+    expect(providers[OPENCODE_PROVIDER_RESPONSES]?.package).toBe("aisdk:@ai-sdk/openai");
+    expect(providers[OPENCODE_PROVIDER_ANTHROPIC]?.package).toBe("aisdk:@ai-sdk/anthropic");
   });
 
   test("lists EVERY verified opencode-capable registry model under the provider of its wire — and no other", () => {
@@ -355,13 +354,13 @@ describe("buildOpencodeServerConfig", () => {
     expect(modelsOf(OPENCODE_PROVIDER_CHAT)["deepseek-v4.1-flash"]).toEqual({
       name: "DeepSeek V4.1 Flash",
       limit: { context: 850_000, output: 65_536 },
-      cost: { input: 0.15, output: 0.6, cache_read: 0.003 },
-      options: { reasoningEffort: "high" },
-      variants: {
-        high: { reasoningEffort: "high" },
-        max: { reasoningEffort: "max" },
-        none: { reasoningEffort: "none" },
-      },
+      cost: { input: 0.15, output: 0.6, cache: { read: 0.003 } },
+      settings: { reasoningEffort: "high" },
+      variants: [
+        { id: "high", settings: { reasoningEffort: "high" } },
+        { id: "max", settings: { reasoningEffort: "max" } },
+        { id: "none", settings: { reasoningEffort: "none" } },
+      ],
     });
   });
 
@@ -369,14 +368,18 @@ describe("buildOpencodeServerConfig", () => {
     expect(modelsOf(OPENCODE_PROVIDER_CHAT)["gpt-6.1-sol"]).toBeUndefined();
     const entry = modelsOf(OPENCODE_PROVIDER_RESPONSES)["gpt-6.1-sol"];
     expect(entry?.cost).toEqual({ input: 2, output: 10 });
-    expect(Object.keys((entry as { variants: object }).variants)).toEqual(["low", "high", "max"]);
+    expect((entry as { variants: Array<{ id: string }> }).variants.map((v) => v.id)).toEqual([
+      "low",
+      "high",
+      "max",
+    ]);
   });
 
-  test("a model with no effort levels gets no options/variants block", () => {
+  test("a model with no effort levels gets no settings/variants block", () => {
     const entry = modelsOf(OPENCODE_PROVIDER_CHAT)["gemini-3.5-flash"];
     expect(entry).toBeDefined();
     expect(entry).not.toHaveProperty("variants");
-    expect(entry).not.toHaveProperty("options");
+    expect(entry).not.toHaveProperty("settings");
   });
 
   test("defines exactly the two agents with the exported rule arrays; no top-level permission block", () => {
@@ -539,9 +542,11 @@ describe("port, url, state and password", () => {
 
 describe("normalizeOpencodeVersion", () => {
   test("strips the program name and a leading v", () => {
-    expect(normalizeOpencodeVersion("opencode v2.0.25\n")).toBe("2.0.25");
-    expect(normalizeOpencodeVersion("v2.0.25")).toBe("2.0.25");
-    expect(normalizeOpencodeVersion("2.0.25")).toBe("2.0.25");
+    expect(normalizeOpencodeVersion(`opencode v${OPENCODE_PINNED_VERSION}\n`)).toBe(
+      OPENCODE_PINNED_VERSION,
+    );
+    expect(normalizeOpencodeVersion(`v${OPENCODE_PINNED_VERSION}`)).toBe(OPENCODE_PINNED_VERSION);
+    expect(normalizeOpencodeVersion(OPENCODE_PINNED_VERSION)).toBe(OPENCODE_PINNED_VERSION);
   });
 });
 
@@ -632,13 +637,13 @@ describe("getOpencodeServerStatus", () => {
   });
 
   test("a different version is up but not ok, with the versions in the error", async () => {
-    fake(() => Response.json({ version: "2.0.30" }));
+    fake(() => Response.json({ version: "9.9.9" }));
     const status = await getOpencodeServerStatus();
     expect(status.up).toBe(true);
     expect(status.ok).toBe(false);
     expect(status.versionOk).toBe(false);
-    expect(status.version).toBe("2.0.30");
-    expect(status.error).toContain("2.0.30");
+    expect(status.version).toBe("9.9.9");
+    expect(status.error).toContain("9.9.9");
     expect(status.error).toContain(OPENCODE_PINNED_VERSION);
   });
 
