@@ -11,6 +11,7 @@ import { MCP_TOOLS, registerAllTools } from "../server/mcp/tools/index.ts";
 
 const EXPECTED_ORDER = [
   "check",
+  "decide",
   "dispatch",
   "excalidraw_diagram",
   "job_cancel",
@@ -72,6 +73,7 @@ describe("tools/list", () => {
     // Order of letters: readOnly, destructive, idempotent, openWorld.
     expect(hints).toEqual({
       check: "r---",
+      decide: "r---",
       dispatch: "-d-o",
       excalidraw_diagram: "-d--",
       job_cancel: "-di-",

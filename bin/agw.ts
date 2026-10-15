@@ -123,6 +123,13 @@ export interface TriageCommand {
   schemaFile: string;
 }
 
+export interface DecideCommand {
+  kind: "decide";
+  stateFile: string;
+  questionsFile: string;
+  model?: string;
+}
+
 export interface JobsCommand {
   kind: "jobs";
   running: boolean;
@@ -156,6 +163,7 @@ export type ParsedCommand =
   | ReviewCommand
   | UpdatePrCommand
   | TriageCommand
+  | DecideCommand
   | JobsCommand
   | JobRefCommand
   | SteerCommand
@@ -239,6 +247,8 @@ export function parseArgs(argv: string[]): Parsed {
       return { command: parseReview(rest.slice(1)), options };
     case "triage":
       return { command: parseTriage(rest.slice(1)), options };
+    case "decide":
+      return { command: parseDecide(rest.slice(1)), options };
     case "update-pr":
       return { command: parseUpdatePr(rest.slice(1)), options };
     case "jobs":
@@ -500,6 +510,22 @@ function parseTriage(args: string[]): TriageCommand {
   return { kind: "triage", promptFile, schemaFile };
 }
 
+function parseDecide(args: string[]): DecideCommand {
+  const { flags, positionals } = parseFlags(
+    args,
+    { "--state-file": "value", "--questions-file": "value", "--model": "value" },
+    "decide",
+  );
+  if (positionals.length > 0) throw new CliUsageError("agw decide takes no positional arguments");
+  const stateFile = flagValue(flags, "--state-file");
+  const questionsFile = flagValue(flags, "--questions-file");
+  if (stateFile === undefined || questionsFile === undefined) {
+    throw new CliUsageError("agw decide requires --state-file <file> and --questions-file <file>");
+  }
+  const model = flagValue(flags, "--model");
+  return { kind: "decide", stateFile, questionsFile, ...(model !== undefined && { model }) };
+}
+
 function parseJobs(args: string[]): JobsCommand {
   const { flags, positionals } = parseFlags(args, { "--running": "boolean" }, "jobs");
   if (positionals.length > 0) throw new CliUsageError("agw jobs takes no positional arguments");
@@ -511,7 +537,7 @@ function parseJobs(args: string[]): JobsCommand {
 export type JobCommand = DispatchCommand | CheckCommand | ReviewCommand | UpdatePrCommand;
 
 export interface RequestBody {
-  tool: "dispatch" | "check" | "review" | "triage" | "update_pr";
+  tool: "dispatch" | "check" | "review" | "triage" | "decide" | "update_pr";
   params: Record<string, unknown>;
 }
 
@@ -576,6 +602,34 @@ export function triageRequestBody(
     throw new CliUsageError(`--schema-file ${command.schemaFile} is not valid JSON`);
   }
   return { tool: "triage", params: { prompt, schema } };
+}
+
+/** The POST /api/jobs body for `decide`: the state file's text and the questions file's parsed
+ *  object (shape validated by the server). Needs no cwd. */
+export function decideRequestBody(
+  command: DecideCommand,
+  read: (path: string) => string,
+): RequestBody {
+  const readFile = (path: string, flag: string): string => {
+    try {
+      return read(path);
+    } catch (err) {
+      throw new CliUsageError(
+        `could not read ${flag} file ${path}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+  const state = readFile(command.stateFile, "--state-file");
+  let questions: unknown;
+  try {
+    questions = JSON.parse(readFile(command.questionsFile, "--questions-file"));
+  } catch (err) {
+    if (err instanceof CliUsageError) throw err;
+    throw new CliUsageError(`--questions-file ${command.questionsFile} is not valid JSON`);
+  }
+  const params: Record<string, unknown> = { state, questions };
+  if (command.model !== undefined) params.model = command.model;
+  return { tool: "decide", params };
 }
 
 export interface RepoResolution {
@@ -910,10 +964,13 @@ async function execute(
     case "check":
     case "review":
     case "update-pr":
-    case "triage": {
+    case "triage":
+    case "decide": {
       let body: RequestBody;
       if (command.kind === "triage") {
         body = triageRequestBody(command, (p) => readFileSync(p, "utf8"));
+      } else if (command.kind === "decide") {
+        body = decideRequestBody(command, (p) => readFileSync(p, "utf8"));
       } else {
         const cwd = await resolveCwd(ctx, base, command);
         const contextText =
@@ -1172,6 +1229,7 @@ Usage:
   agw review [--repo R] [--scope S | --pr N | --branch B]   multi-angle review
   agw update-pr [--repo R] --pr N        rebase a dispatch/* PR onto the latest base, re-check, push
   agw triage --prompt-file F --schema-file F   one tool-less model call → JSON
+  agw decide --state-file F --questions-file F [--model M]   one decision-model call → typed answers
   agw jobs [--running]                   list recent jobs
   agw status <jobId>                     one-shot job state
   agw wait <jobId>                       block until a job reaches a terminal state
@@ -1183,7 +1241,7 @@ Usage:
 
 Global flags (any subcommand):
   --json          emit only JSON on stdout, nothing else
-  --no-wait       submit and print the jobId, exit 0 (dispatch/check/review/update-pr/triage)
+  --no-wait       submit and print the jobId, exit 0 (dispatch/check/review/update-pr/triage/decide)
   --quiet         suppress the progress lines on stderr
   --timeout <s>   stop waiting after N seconds (default: no ceiling)
   -h, --help      show help
@@ -1204,7 +1262,7 @@ Flags:
                         refused if the name is taken; not with --revision-of)
   --pr-title <title>    implement only: the PR/MR title and commit subject (the body stays the worker's)
   --kind <kind>         code | editorial (default code). editorial = AGENTS.md/docs/README/prose:
-                        runs on the Claude harness (route dispatch_editorial), never auto-detected
+                        runs on route dispatch_editorial (see agw routing), never auto-detected
   --model <id>          model override (e.g. claude-opus-5[1m])
   --context <text|@file>  raw supporting material, passed as data (leading @ reads a file)
   --sensitive           mark the repo secret-bearing; the server refuses this outside the
@@ -1237,11 +1295,23 @@ const TRIAGE_HELP = `agw triage --prompt-file <file> --schema-file <file>
   \`.result\` is the validated answer.
 `;
 
+const DECIDE_HELP = `agw decide --state-file <file> --questions-file <file> [--model <id>]
+
+  --state-file      plain text: the model's whole world (it cannot look anything up)
+  --questions-file  a JSON object { "<id>": question }; a question is
+                    { "type": "choice", "instructions": "...", "options": { "<id>": "<description>", ... } }
+                    (at least two options) or { "type": "boolean", "instructions": "..." }
+  --model           a known decision model (default: the server's AGENT_GATEWAY_DECISION_MODEL)
+  The job's result is { answers, model, latencyMs, usage, truncatedChars } — with --json,
+  \`.answers\` maps each question id to its typed answer with a calibrated confidence.
+`;
+
 function helpText(topic: string | undefined): string {
   if (topic === "dispatch") return DISPATCH_HELP;
   if (topic === "check") return CHECK_HELP;
   if (topic === "review") return REVIEW_HELP;
   if (topic === "triage") return TRIAGE_HELP;
+  if (topic === "decide") return DECIDE_HELP;
   if (topic === "update-pr") return UPDATE_PR_HELP;
   return USAGE;
 }

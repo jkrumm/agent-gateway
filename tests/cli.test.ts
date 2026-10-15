@@ -14,6 +14,7 @@ import {
   renderCheckResult,
   renderVerdictResult,
   requestBody,
+  decideRequestBody,
   triageRequestBody,
   resolveContext,
   resolveRepoSpec,
@@ -828,6 +829,98 @@ describe("triage command", () => {
     expect(missing.code).toBe(2);
     const bad = await runWith(
       ["triage", "--prompt-file", promptFile, "--schema-file", badSchemaFile],
+      {},
+    );
+    expect(bad.code).toBe(2);
+    expect(bad.err).toContain("not valid JSON");
+  });
+});
+
+// ── decide: no repo, state + questions files in, typed answers out ─────────────────
+
+describe("decide command", () => {
+  const dir = mkdtempSync(join(tmpdir(), "agent-gateway-cli-decide-"));
+  const stateFile = join(dir, "state.txt");
+  const questionsFile = join(dir, "questions.json");
+  const badQuestionsFile = join(dir, "bad.json");
+  const questions = {
+    route: {
+      type: "choice",
+      instructions: "where does this go?",
+      options: { a: "attach", b: "new" },
+    },
+  };
+  writeFileSync(stateFile, "an event happened");
+  writeFileSync(questionsFile, JSON.stringify(questions));
+  writeFileSync(badQuestionsFile, "{not json");
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("parses the flags; a missing file flag or a positional is a usage error", () => {
+    expect(
+      parseArgs(["decide", "--state-file", "s", "--questions-file", "q", "--model", "clef"])
+        .command,
+    ).toEqual({ kind: "decide", stateFile: "s", questionsFile: "q", model: "clef" });
+    expect(parseArgs(["decide", "--state-file", "s", "--questions-file", "q"]).command).toEqual({
+      kind: "decide",
+      stateFile: "s",
+      questionsFile: "q",
+    });
+    expect(() => parseArgs(["decide", "--state-file", "s"])).toThrow(/--questions-file/);
+    expect(() => parseArgs(["decide", "stray"])).toThrow(/no positional/);
+  });
+
+  test("decideRequestBody reads the state text, parses the questions, carries --model", () => {
+    const { command } = parseArgs([
+      "decide",
+      "--state-file",
+      "s",
+      "--questions-file",
+      "q",
+      "--model",
+      "clef",
+    ]);
+    const body = decideRequestBody(command as never, (path) =>
+      path === "s" ? "the state" : '{"ok":{"type":"boolean","instructions":"?"}}',
+    );
+    expect(body).toEqual({
+      tool: "decide",
+      params: {
+        state: "the state",
+        questions: { ok: { type: "boolean", instructions: "?" } },
+        model: "clef",
+      },
+    });
+  });
+
+  test("round trip: submits without a repo, --json prints only the job result, exit 0", async () => {
+    let posted: string | undefined;
+    const result = { answers: { route: { type: "choice", choice: "a", confidence: 0.9 } } };
+    const { code, out } = await runWith(
+      ["decide", "--state-file", stateFile, "--questions-file", questionsFile, "--json"],
+      {
+        "POST /api/jobs": (init) => {
+          posted = init?.body as string;
+          return { body: { ok: true, job: { id: "j1" } } };
+        },
+        "GET /api/jobs/j1": () => ({ body: { ok: true, job: { ...DONE_JOB, result } } }),
+      },
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual(result);
+    expect(JSON.parse(posted ?? "")).toEqual({
+      tool: "decide",
+      params: { state: "an event happened", questions },
+    });
+  });
+
+  test("an unreadable state file or an invalid questions file exits 2", async () => {
+    const missing = await runWith(
+      ["decide", "--state-file", join(dir, "nope"), "--questions-file", questionsFile],
+      {},
+    );
+    expect(missing.code).toBe(2);
+    const bad = await runWith(
+      ["decide", "--state-file", stateFile, "--questions-file", badQuestionsFile],
       {},
     );
     expect(bad.code).toBe(2);

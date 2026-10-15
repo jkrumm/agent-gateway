@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerCheckTool } from "./check.ts";
+import { registerDecideTool } from "./decide.ts";
 import { registerDispatchTool } from "./dispatch.ts";
 import { registerExcalidrawDiagramTool } from "./excalidraw-diagram.ts";
 import {
@@ -23,6 +24,7 @@ import { registerUpdatePrTool } from "./update-pr.ts";
 // in its sorted position (tests/mcp-tools-list.test.ts fails on a wrong order or a missing hint).
 export const MCP_TOOLS: ReadonlyArray<{ name: string; register: (server: McpServer) => void }> = [
   { name: "check", register: registerCheckTool },
+  { name: "decide", register: registerDecideTool },
   { name: "dispatch", register: registerDispatchTool },
   { name: "excalidraw_diagram", register: registerExcalidrawDiagramTool },
   { name: "job_cancel", register: registerJobCancelTool },
