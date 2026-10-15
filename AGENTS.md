@@ -122,7 +122,7 @@ Full forensic story (why BTM denies this specific label/executable):
 
 ## MCP Server
 
-agent-gateway exposes workflow tools (`check`, `review`, `dispatch`, `update_pr`, `overview`,
+agent-gateway exposes workflow tools (`check`, `review`, `dispatch`, `update_pr`, `decide`, `overview`,
 `narrative`, `triage`, `otel`) plus the synchronous multimodal tools (`read_image`,
 `read_drawing`, `excalidraw_diagram`) plus the job-polling tools
 (`job_status`, `job_wait`, `job_steer`, `job_cancel`) as an MCP server — a **separate process** from the
@@ -169,7 +169,7 @@ MCP door — the CLI adds no capability, only reach.
 
 ### Async job model (durable, off the MCP transport)
 
-The long tools (`check`/`review`/`dispatch`/`overview`/`narrative`/`triage`) do
+The long tools (`check`/`review`/`dispatch`/`overview`/`narrative`/`triage`/`decide`) do
 **not** block the MCP call. A 13-minute worker run held open as a single MCP
 request destabilizes the stdio transport (and the SDK's 60s client timeout).
 Instead:
@@ -197,7 +197,7 @@ Instead:
 While a job runs, `job_status`/`job_wait` also expose live worker progress
 derived from the worker's stream-json output: `turns`, `lastAction` (e.g.
 `"Edit store.ts"`), and **`idleMs`** — ms since the last worker event. A
-*large and still-growing* `idleMs` means the session may be stuck — peek at
+_large and still-growing_ `idleMs` means the session may be stuck — peek at
 `git status` rather than waiting indefinitely.
 
 Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on
@@ -207,8 +207,8 @@ re-queues an interrupted `check`/`overview`/`narrative`/`review`/`triage` **once
 (all read-only and idempotent) and marks everything else `interrupted`
 (`dispatch` is never auto re-run — an `implement` episode may already have
 pushed). A job whose OpenCode session(s) a drain **detached** is not a crash and is
-requeued whatever its attempts say — see *Durable and steerable OpenCode
-episodes* below. `make reload` refuses while jobs it cannot detach are running
+requeued whatever its attempts say — see _Durable and steerable OpenCode
+episodes_ below. `make reload` refuses while jobs it cannot detach are running
 (`reloadRefusals`: `claude -p` sessions, check steps — OpenCode-only runs never
 refuse; the drain also waits for short single-shot jobs, which are not a reason to refuse) unless `FORCE=1` (which asks for the same forced abort as always — never
 SIGKILL, which isn't catchable and would skip `terminateActiveSessions()`
@@ -351,7 +351,7 @@ while one is in flight (`draining: true`); the same backlog also gets a
 `recoveredFromDrain` is true — i.e. the previous process ran its shutdown
 path to the **end** (a persisted marker written by `markDrainCompleted()` when
 the drain finishes, read and cleared once on the next boot), not merely
-`sinceBootMs` being small. Written at the drain's *start* it would also survive
+`sinceBootMs` being small. Written at the drain's _start_ it would also survive
 a mid-drain SIGKILL and hand the grace to the very crash loop it exposes. A
 raw crash never sets that marker, so a
 crash-looping process gets no grace — the backlog stays visible on every
@@ -376,8 +376,9 @@ mechanics: `docs/agent-overview-internals.md`.
 The `overview` job enriches that snapshot with **one LLM recommendation per
 agent** (`answer`/`continue`/`ship`/`review`/`merge`/`close`/`stale`/`watch`,
 each with `standing`/`blocker`/`confidence`) — one batched, prompt-only call
-(`readOnly: true`, no repo tools), model/backend from `routeFor("overview")`
-(the cheap IU model, a small Claude model on Max — see `GET /api/routing`). `GET /api/overview[.txt]` never runs the
+(`readOnly: true` + `toolless: true`, no repo tools — the `agw-toolless` OpenCode profile),
+model/backend from `routeFor("overview")` (Haiku 5.5 EU on OpenCode, Sonnet on Max as the reverse
+lane — see `GET /api/routing`). `GET /api/overview[.txt]` never runs the
 LLM inline — it merges the latest **completed** job result onto a fresh
 snapshot, and marks a recommendation `recommendationStale: true` if the agent
 has been active since. Full reconciliation/fencing detail:
@@ -386,9 +387,9 @@ has been active since. Full reconciliation/fencing detail:
 The `narrative` job writes/revises one project's Obsidian vault page from
 git log + session transcripts + `voice.md` — business terms, never a
 changelog; `changed: false` with no page is a correct default answer, not a
-failure. Model/backend from `routeFor("narrative")` (a Claude model on
-Max first, IU as the reverse fallback — editorial judgment, not
-classification, so no cheap tier). Caps
+failure. Model/backend from `routeFor("narrative")` (Haiku 5.5 EU on OpenCode,
+tool-less, Sonnet on Max as the reverse lane — measured equal to the Sonnet seat in
+Wave 10, `docs/routing-and-quota.md`). Caps
 enforced in code (`clampSections`), never trusted from the model. Full input/
 output contract and gathering rules: `docs/agent-overview-internals.md`.
 
@@ -431,14 +432,15 @@ reactive fallback, why the proactive quota-ceiling pre-check was removed
 ignored by the Requesty hop, so `MAX_THINKING_TOKENS` (mapped by the CLI onto
 Anthropic's `thinking.budget_tokens`) is the only control that reaches
 the gateway models there. Unset means the model's own `max`
-default, its worst setting. The CLASSIFY tier (check, overview)
-runs at 2048 (`triage` and review's router are single-shot, no budget — below); AGENT (dispatch's investigate/author) and
-AGENT_IMPLEMENT (implement) at 8192 —
+default, its worst setting. The retired
+`claude -p` AGENT/CLASSIFY tiers ran at 2048 / 8192 (`triage` and review's router are single-shot,
+no budget — below); every OpenCode route (check, overview, narrative, excalidraw, dispatch,
+dispatch_editorial) controls depth with `variant` instead, and Haiku 5.5 has none —
 `server/lib/routing.ts`'s dated comments carry the ccbench/POC evidence.
 No route runs on GLM (retired 2026-09-23). `session-runner.ts`'s `buildWorkerEnv` exports `MAX_THINKING_TOKENS`
 only for non-Claude models — a Claude route's `thinkingTokens` (currently none
 set) would be a no-op there anyway, since thinking on Claude is controlled a
-different way. JUDGE/PROSE (review, otel, narrative, excalidraw) carry no
+different way. JUDGE (otel, the frontend angle) carries no
 `thinkingTokens` — they stay on Claude.
 
 **`dispatch`/`dispatch_implement` run on a second harness, OpenCode, not
@@ -488,7 +490,7 @@ zod-typed `fetch` adapter; tests inject an in-memory fake of the same interface)
 `server/mcp/opencode-server.ts` owns the server itself: the pinned version
 (`OPENCODE_PINNED_VERSION`), the generated config, the permission rule arrays,
 `getOpencodeServerStatus()`, `interruptOpencodeSession`. What a session sets (measured on 2.0.25, re-probed green on 2.0.29):
-(1) **permissions live in two v2 agents** in the server config (`OPENCODE_CONFIG_CONTENT`, set on
+(1) **permissions live in three v2 agents** in the server config (`OPENCODE_CONFIG_CONTENT`, set on
 the server process — it overrides a repo-local `opencode.json`; never the `OPENCODE_CONFIG` file
 path, which a repo file overrides), selected with `agent` on session create: ordered
 `{action,resource,effect}` rules, LAST match wins, only `allow`/`deny` (an unmatched action
@@ -498,7 +500,7 @@ denied). `agw-readonly` allow-lists `shell` commands (`READ_ONLY_SHELL_RULES`, r
 the allows, then trailing denies for command text naming `OPENCODE_SERVER_PASSWORD`, `IU_KEY`,
 `IU_OPENAI_BASE`, the server port or `/api/session` — a cost-raising deny list, not a boundary,
 see `docs/opencode-v2.md`; `edit: deny` alone does not stop a shell redirect) and denies
-`subagent` (a subagent runs under its own, broader permissions). (2) **The shell env is the
+`subagent` (a subagent runs under its own, broader permissions). `agw-check` (a `readOnly` session that passes `runsChecks`, i.e. the `check` worker) is `agw-readonly` plus the build/test runners (`make`, `bun`, `uv`, `pytest`, `ruff`, `tsc`, …, a repo's `.venv/bin`/`node_modules/.bin`), with the server-self-access denies re-applied last; interpreters (`sh`, `bash`, `python -c`) stay denied and edits stay denied. (2) **The shell env is the
 session's** — the shell tool starts from a sanitized base (the server's env does not reach it) plus
 `PUT /api/session/{id}/environment`: the runner sends `extraEnv` (research-gateway credentials
 included, so research validation works on OpenCode review angles), then `GIT_DENY_CREDENTIALS_ENV`
@@ -532,7 +534,7 @@ drain reach a session through `trackExternalSession` (`terminateSessionsForJob` 
 `terminateActiveSessions` call its `stop`, which `POST …/interrupt`s it); any exit that did not
 end idle on its own is interrupted too (a session keeps running tools otherwise — measured), and
 `session.opencode_interrupt` is logged. `bun scripts/opencode-live-probe.ts` proves the whole path
-against the real server. The pinned build is an npm install under `~/.local/share/agent-gateway/opencode-bin/<version>` (Homebrew's bottle lags); never swap it without the gate in `docs/opencode-v2.md`;
+against the real server. The pinned build is an npm install under `~/.local/share/agent-gateway/opencode-bin/<version>` (Homebrew's bottle lags, and is uninstalled: `scripts/opencode`, linked by `make install-cli`, puts this one build on PATH for `oc`, `rd … --kind opencode` and every pane); never swap it without the gate in `docs/opencode-v2.md`;
 a server restart (`make install-opencode-agent`, refuses while jobs run) kills the episodes
 running on it. There is no `database is locked` retry — the server owns the db.
 
@@ -555,6 +557,7 @@ bare `op`, hangs headless); `readOnly: true` plus mutating tool names in
 `extraDisallowedTools` keep it query-only.
 
 Two constraints carried over regardless of backend:
+
 - **No `WebSearch`/`WebFetch`** — workers shell out via Bash instead
   (`review` angle workers `curl` the research-gateway, async submit + poll).
 - **Read-only tools must opt in** (`readOnly: true` →
@@ -576,7 +579,7 @@ registry says the model supports it and `max_completion_tokens` ≥
 max(16000, registry `minOutput`). The caller supplies `{ prompt, schema }` where
 `schema` is a JSON Schema (top level `type: "object"`), compiled with zod's
 `z.fromJSONSchema` (zod 4, "semi-experimental"); the answer is parsed (a
-```` ```json ```` fence is tolerated) and validated, re-asked ONCE with the
+` ```json ` fence is tolerated) and validated, re-asked ONCE with the
 rejection reason appended, then the job fails. Result: `{ result, model,
 latencyMs, usage?, attempts }`. The caller's prompt is the task itself, so it is
 NOT fenced as DATA (`prompt-fence.ts` would tell the model to ignore it); the
@@ -599,11 +602,12 @@ with `job_steer` / `agw steer` (a running OpenCode episode only); anything beyon
 redirecting the whole task — is an `rd wave` tab + `rd say`, not this.
 
 **Tiers.** `investigate` (read-only → verdict), `author` (read-only → verdict
-+ issue), `implement` (write → verdict + branch + **draft** PR). The artifact
-follows the origin: a `github.com` remote gets the GitHub API path, a
-`gitlab.com` remote gets `glab` (draft MR = "Draft: " title prefix, issues via
-`glab api`); any other host is refused ~25 ms into the episode, before a
-worktree exists.
+
+- issue), `implement` (write → verdict + branch + **draft** PR). The artifact
+  follows the origin: a `github.com` remote gets the GitHub API path, a
+  `gitlab.com` remote gets `glab` (draft MR = "Draft: " title prefix, issues via
+  `glab api`); any other host is refused ~25 ms into the episode, before a
+  worktree exists.
 
 **Workspace** (implement only): `worktree` (default) = the isolated-worktree
 path above. `in-place` = the episode edits the repo's **live checkout**
@@ -661,6 +665,7 @@ boundary for a sensitive episode, not the permission profile.
 
 **Invariants** (full rationale + the mutation-verified test suite in
 `docs/dispatch-security.md`):
+
 - **Repo policy** (`server/lib/dispatch-policy.ts`, `GET /api/dispatch-policy`)
   gates every submission before it costs anything: `cwd` must resolve to a
   repo directly under a configured root, at or under that repo's tier
@@ -679,7 +684,7 @@ boundary for a sensitive episode, not the permission profile.
   copy of HEAD when the origin is absent or unreachable (`base: "head"` opts
   into the live checkout explicitly).
 - Read tiers also materialize untracked/gitignored files (bounded, symlinks
-  never followed) — the read exposure was never about copying files *in*.
+  never followed) — the read exposure was never about copying files _in_.
 - Boot sweeps every stale worktree/branch left by a SIGKILL.
 - The artifact (issue/branch/PR, on the origin's forge) is created by the
   **handler**, never by the worker session — the session holds no forge
@@ -704,7 +709,7 @@ boundary for a sensitive episode, not the permission profile.
   after the data block.
 - A per-job `model` that is not a verified registry model is refused at
   `POST /api/jobs` with 400 `dispatch refused: model <id> is not a verified
-  registry model` (`withModel` alone would silently keep the default).
+registry model` (`withModel` alone would silently keep the default).
 - Salvage retries only a serialization failure (fresh session, no `--resume`)
   and marks it `degraded: true`; a real failure throws.
 
@@ -722,8 +727,9 @@ generates no text and cannot search or read anything: **the caller's `state` is 
 so context quality is the caller's job (warden builds it, `lifecycle/shadow.py`). `DECISION_MODELS`
 (decision.ts) holds each known model's rate and a conservative `maxStateChars` cap; the state is
 cut to it and `truncatedChars` says how much. Cost is computed from the rate (the provider drops
-IU's own `usage.cost`) and recorded to the `agent-gateway-iu` sink as tool `decide`. HTTP-only
-(`POST /api/jobs {tool:"decide"}`): no MCP tool or CLI verb yet, so no `/mcp` reconnect. Boot recovery
+IU's own `usage.cost`) and recorded to the `agent-gateway-iu` sink as tool `decide`. Reach:
+MCP tool `decide` (a new tool: `/mcp` reconnect), CLI `agw decide --state-file F --questions-file F
+[--model M]`, or `POST /api/jobs {tool:"decide"}`. Boot recovery
 re-queues it once, like `triage`. The single request has a 30 min hang guard (agent-limits rule),
 no retry here — the caller owns retries.
 
@@ -737,12 +743,12 @@ is wrong on this direct-to-master repo for an already-pushed scope) → angle re
 frontend/backend/typescript/QA, plus router-picked content angles
 security/performance/concurrency/data-migration/api-contract/resilience
 against an ISO 25010 checklist, plus a non-agentic adversary
-critic) → synthesis (a Claude model, classifies into
+critic) → synthesis (the `review` route's model — Haiku 5.5 EU on OpenCode by default, Sonnet on Max as fallback; classifies into
 `blocking`/`improvements`/`discussions`/`testGaps`). `outcome`: `"clean"` /
 `"actionable"` / `"needs-human"`. Each angle session gets **one pipeline-level
 retry** on failure (`ANGLE_MAX_ATTEMPTS = 2`), because `session-runner` retries
-only transport-class errors — an idle-watchdog kill on the claude/Max review
-route would otherwise be final and force the whole review to
+only transport-class errors — an idle-watchdog kill on a session route
+would otherwise be final and force the whole review to
 `needs-human`/`blocker` on a single flaky attempt; only a second failure stands
 (logged `review.angle_retry`). Full pipeline docs, angle tables and cost
 profile: `server/skills/review/README.md`.
@@ -834,6 +840,6 @@ Never create feature branches or PRs for this repo.
 Project-specific skills live in `.claude/skills/` (tracked in git, unlike most repos).
 Settings files (`.claude/settings.json`, `.claude/settings.local.json`) remain gitignored.
 
-| Skill | Purpose |
-|-|-|
+| Skill        | Purpose                                                             |
+| ------------ | ------------------------------------------------------------------- |
 | `claude-cli` | Reference for spawning `claude -p` subprocesses from Bun/TypeScript |

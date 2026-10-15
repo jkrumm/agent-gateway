@@ -12,12 +12,12 @@
 //
 // Harness: `claude` (spawns `claude -p`, `session-runner.ts`) or `opencode` (a session on the
 // shared OpenCode server over HTTP, `server/mcp/opencode-runner.ts`) — ONLY `dispatch`,
-// `dispatch_implement` and `dispatch_implement_escalation` (the AGENT_OC/
-// AGENT_OC_IMPLEMENT/AGENT_OC_ESCALATION tiers below) plus the measured review angles
-// (ANGLE_OC) run on `opencode` — every other tool stays on `claude`. The dispatch family
+// `dispatch_implement`, `dispatch_editorial` and `dispatch_implement_escalation` (the AGENT_OC/
+// AGENT_OC_IMPLEMENT/AGENT_OC_ESCALATION tiers below), the measured review angles (ANGLE_OC) and,
+// since Wave 10, the CLASSIFY tier (check, overview, narrative, excalidraw) run on `opencode` —
+// review's synthesis/frontend angle and otel stay on `claude`. The dispatch family
 // defaults to `opencode`; the `claude` harness is an explicit opt-in there, reachable ONLY via
-// `AGENT_GATEWAY_HARNESS_DISPATCH=claude` (paired with a Claude `AGENT_GATEWAY_MODEL_DISPATCH`),
-// the caller-selected `dispatch_editorial` route (a dispatch param `kind: "editorial"`, below),
+// `AGENT_GATEWAY_HARNESS_DISPATCH=claude` (paired with a Claude `AGENT_GATEWAY_MODEL_DISPATCH`)
 // or the reactive `iu`→`max` reverse fallback after an IU failure — the one AUTOMATIC Claude
 // path a dispatch episode has. A route's
 // `variant` (opencode's reasoning-effort knob, the `provider/model#variant` suffix) is only meaningful when
@@ -143,7 +143,7 @@ export interface ToolRoute {
   /** A gateway model's reasoning budget on the IU leg — `session-runner.ts`'s
    *  `buildWorkerEnv` exports this as `MAX_THINKING_TOKENS` for any non-Claude model, the
    *  only control that reaches DeepSeek-V4-Flash's or DeepSeek-V4-Pro's thinking depth on
-   *  the Requesty hop. Absent on Claude routes (JUDGE, PROSE), which control thinking a
+   *  the Requesty hop. Absent on Claude routes (JUDGE), which control thinking a
    *  different way, and on the `iu-openai` transport routes (VISION, adversary), which
    *  never reach `buildWorkerEnv` at all. Meaningless on an `opencode`-harness route —
    *  opencode has no equivalent env control, only `variant` (below). */
@@ -163,7 +163,8 @@ export interface ToolRoute {
 export const SONNET = "claude-sonnet-5[1m]";
 export const HAIKU = "claude-haiku-4-5";
 /** Haiku 5.5 on IU's Bedrock EU leg — OpenCode-harness only in routing (`iu-anthropic` provider).
- *  `check` stays on HAIKU: on `claude -p` this id ran 4x slower (237 s vs 60 s median). */
+ *  On `claude -p` this id ran 4x slower than Haiku 4.5 (237 s vs 60 s median, Wave 5), which is
+ *  why it only ever serves the OpenCode harness. */
 export const HAIKU_5_5 = "claude-haiku-5-5-eu";
 /** Retired from every route 2026-09-23 (see CLASSIFY below); kept as a named id the
  *  registry documents but, being unverified there, refuses on any route. */
@@ -182,9 +183,12 @@ export const DEEPSEEK_PRO = "DeepSeek-V4-Pro";
 // touches one line instead of hunting down every duplicate. One-line "why" per tier; the
 // dated evidence behind each lives in docs/routing-and-quota.md § Route history. ──────────
 //
-// CLASSIFY: cheap mechanical work (check, overview) — Haiku over IU, thinking capped so cheap
-//   work stays cheap, Haiku on Max as the reverse lane. (DeepSeek-V4-Flash over `claude -p` was
-//   rejected by IU from 2026-10-04: unrecognized_model; opencode's read-only bash cannot run make.)
+// CLASSIFY: cheap mechanical, structured-output or short-prose work (check, overview, excalidraw, narrative) — Haiku 5.5 EU
+//   on the OpenCode harness (Wave 10 bench, docs/routing-and-quota.md § Wave 10), Sonnet on Max as
+//   the reverse lane. Before: Haiku 4.5 over `claude -p` (check 45-718 s per run and one wrong
+//   verdict, overview 170-180 s, ~20x the cost). (DeepSeek-V4-Flash over `claude -p` was rejected by
+//   IU from 2026-10-04: unrecognized_model.) check needs the `agw-check` profile, overview/narrative
+//   the tool-less one (opencode-server.ts); both are selected by the handler, not the route.
 // AGENT_OC / AGENT_OC_IMPLEMENT / ANGLE_OC moved from deepseek-v4.1-flash to Haiku 5.5 EU on
 //   2026-10-14 (Wave 5 bench, docs/routing-and-quota.md § Wave 5): 12/12 vs 10/12 implement + investigate
 //   passes, ~6x faster, lower cost, 100% cache reads. Haiku bills 5x above 100K prompt tokens PER
@@ -232,34 +236,30 @@ const ANGLE_OC: ToolRoute = {
   transport: "session",
   harness: "opencode",
 };
-// JUDGE: judgment-heavy work that stays on Max (review's synthesis/router, the frontend angle,
-//   otel) — a cheap model was measured failing on review's synthesis, and a non-Claude model
-//   would drop the Max fallback. The three ANGLE_OC angles moved off it 2026-10-05 on measured
-//   A/B recall; do not move the rest without new measured evidence.
-// PROSE: editorial/generative work (narrative, excalidraw, and `dispatch_editorial` — a dispatch
-//   episode whose caller passed `kind: "editorial"` for AGENTS.md/docs/README/prose briefs, never
-//   auto-detected from the brief) — Claude on Max (flat fee), IU as the reverse fallback. Same
-//   shape as JUDGE; kept as its own name because the reason it stays on Claude is prose quality.
+// JUDGE: work that stays on Claude/Max — the `frontend` review angle (its A/B has not cleared the
+//   adoption rule; Wave 11 re-measures it on real findings) and `otel` (needs a per-session MCP
+//   server, which OpenCode v2 has only at server scope — docs/routing-and-quota.md § Wave 10).
+//   review's synthesis and keyless angles (architect, backend, content angles) moved to CLASSIFY in
+//   Wave 10: on two real ranges Haiku 5.5 EU found the same top blocking findings as Sonnet in
+//   ~0.5-0.65x the wall time (298 s vs 585 s, 473 s vs 705 s); flash did not (1 blocking, 521 s).
+//   The 2026-09-11 "cheap model fails on synthesis" measurement was GLM looping on a large diff.
+// dispatch_editorial shares AGENT_OC_IMPLEMENT: Haiku 5.5 EU matched Sonnet on two editorial briefs
+//   (Wave 10: README fold-in 1 of 2 complete on both, a numbered-checklist rewrite 3 of 3 on both, at
+//   ~14 s vs ~30 s and ~$0.003 vs ~$0.13), so prose briefs no longer need a Claude route; the key
+//   stays so `AGENT_GATEWAY_MODEL_DISPATCH_EDITORIAL` can still pin one (docs/routing-and-quota.md
+//   § Wave 10).
 // VISION: the IU OpenAI vision transport (read_image, read_drawing) — no runSession, no fallback.
 // SINGLE_SHOT: `triage` and review's angle router — one tool-less JSON completion over the
 //   iu-openai transport, no session overhead, no Max lane, `harness` inert.
 // adversary sits alone: its own model, same iu-openai transport as VISION.
 const CLASSIFY: ToolRoute = {
-  model: HAIKU,
+  model: HAIKU_5_5,
   backend: "iu",
-  fallback: { backend: "max", model: HAIKU },
+  fallback: { backend: "max", model: SONNET },
   transport: "session",
-  thinkingTokens: 2048,
-  harness: "claude",
+  harness: "opencode",
 };
 const JUDGE: ToolRoute = {
-  model: SONNET,
-  backend: "max",
-  fallback: { backend: "iu" },
-  transport: "session",
-  harness: "claude",
-};
-const PROSE: ToolRoute = {
   model: SONNET,
   backend: "max",
   fallback: { backend: "iu" },
@@ -287,8 +287,8 @@ const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
   overview: CLASSIFY,
   triage: SINGLE_SHOT,
   review_router: SINGLE_SHOT,
-  narrative: PROSE,
-  review: JUDGE,
+  narrative: CLASSIFY,
+  review: CLASSIFY,
   review_angle_senior_dev: ANGLE_OC,
   review_angle_typescript: ANGLE_OC,
   review_angle_frontend: JUDGE,
@@ -312,9 +312,9 @@ const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
   dispatch: AGENT_OC,
   dispatch_implement: AGENT_OC_IMPLEMENT,
   dispatch_implement_escalation: AGENT_OC_ESCALATION,
-  dispatch_editorial: PROSE,
+  dispatch_editorial: AGENT_OC_IMPLEMENT,
   otel: JUDGE,
-  excalidraw: PROSE,
+  excalidraw: CLASSIFY,
   read_image: VISION,
   read_drawing: VISION,
 };

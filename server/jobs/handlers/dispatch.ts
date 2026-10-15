@@ -72,8 +72,8 @@ import {
 
 // A dispatch is a bounded episode: an automated observer (today: Hermes) found something it
 // cannot handle without reading a repo, and hands it to a worker session (an OpenCode one by
-// default; the Claude harness only via `kind: "editorial"`, an explicit env override, or the
-// reactive Max fallback after an IU failure) that has that repo's AGENTS.md / CLAUDE.md / rules
+// default; the Claude harness only via an explicit env override or the reactive Max fallback
+// after an IU failure) that has that repo's AGENTS.md / CLAUDE.md / rules
 // / skills. One episode, one verdict, no steering.
 //
 // Three tiers, one pipeline, one record. They differ only in the session's permission
@@ -98,8 +98,9 @@ const MAX_CONTEXT_CHARS = 16000;
 const MAX_PR_TITLE_CHARS = 200;
 
 /** What the episode's output is: `code` (default) runs on the route the tier selects; `editorial`
- *  (AGENTS.md, docs, README, prose) runs on the `dispatch_editorial` route — a Claude model on the
- *  claude harness. Chosen by the CALLER; never detected from the brief text. */
+ *  (AGENTS.md, docs, README, prose) runs on the `dispatch_editorial` route (today the same OpenCode
+ *  Haiku route as implement, separately overridable). Chosen by the CALLER; never detected from the
+ *  brief text. */
 const DISPATCH_KINDS = ["code", "editorial"] as const;
 export type DispatchKind = (typeof DISPATCH_KINDS)[number];
 
@@ -209,10 +210,10 @@ export const DISPATCH_INPUT = z.object({
     .default("code")
     .describe(
       "What the episode produces. 'code' (default) = the tier's normal route (the cheap " +
-        "OpenCode worker). 'editorial' = AGENTS.md, docs, README or other prose: routes the " +
-        "episode to the Claude harness on a Claude model (route dispatch_editorial, " +
-        "Sonnet on Max with the IU reverse fallback — see GET /api/routing). Chosen by you; " +
-        "never inferred from the brief. A per-job `model` still overrides.",
+        "OpenCode worker). 'editorial' = AGENTS.md, docs, README or other prose: runs on the " +
+        "dispatch_editorial route (see GET /api/routing; measured equal to a Sonnet seat on " +
+        "prose briefs, so today the same cheap OpenCode worker). Chosen by you; never inferred " +
+        "from the brief. A per-job `model` still overrides.",
     ),
   base: z
     .enum(["default", "head"])
@@ -1192,7 +1193,7 @@ async function runEpisodes(
       jobId: run.jobId,
       isCancelled: run.isCancelled,
       // implement gets its own default route — investigate/author stay on the AGENT one
-      // (both opencode by default); an editorial brief runs on the claude-harness
+      // (both opencode by default); an editorial brief runs on its own
       // `dispatch_editorial` route. See routing.ts.
       route: routeFor(dispatchRouteKey(tier, kind)),
       model,

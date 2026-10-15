@@ -81,9 +81,19 @@ describe("static refusals are synchronous 400s with no job row", () => {
     await expectRefused(impl({ workspace: "in-place" }), /dispatch refused:.*\.opencode/);
   });
 
-  test("...but an editorial in-place episode (claude harness) is accepted in that repo", async () => {
+  test("...an editorial in-place episode is refused the same way (dispatch_editorial is on opencode too)", async () => {
     fx.write(".opencode/plugin.js", "module.exports = () => {}\n");
-    const { status, body } = await post(impl({ workspace: "in-place", kind: "editorial" }));
+    await expectRefused(
+      impl({ workspace: "in-place", kind: "editorial" }),
+      /dispatch refused:.*\.opencode/,
+    );
+  });
+
+  test("...but an in-place episode pinned to a Claude model (claude harness) is accepted in that repo", async () => {
+    fx.write(".opencode/plugin.js", "module.exports = () => {}\n");
+    const { status, body } = await post(
+      impl({ workspace: "in-place", kind: "editorial", model: "claude-sonnet-5[1m]" }),
+    );
     expect(status).toBe(200);
     expect(body.ok).toBe(true);
   });

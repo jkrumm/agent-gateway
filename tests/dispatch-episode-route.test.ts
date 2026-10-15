@@ -48,7 +48,7 @@ describe("runDispatch route selection", () => {
   test("an editorial episode runs on dispatch_editorial, at the read tiers too", async () => {
     await runDispatch({ cwd: fx.repo, brief: "reword", tier: "investigate", kind: "editorial" });
     expect(routes).toEqual([routeFor("dispatch_editorial")]);
-    expect(routes[0]?.harness).toBe("claude");
+    expect(routes[0]?.harness).toBe("opencode");
   });
 });
 

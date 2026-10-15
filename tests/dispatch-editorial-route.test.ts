@@ -1,7 +1,8 @@
-// `kind: "editorial"` routes a dispatch episode to the Claude harness via the
-// `dispatch_editorial` route key (server/lib/routing.ts), and the claude harness stays an
-// explicit opt-in for every other dispatch route. Table-level checks use buildRoutingTable({})
-// so a local .env override cannot leak into the expectation.
+// `kind: "editorial"` routes a dispatch episode to the `dispatch_editorial` route key
+// (server/lib/routing.ts) — today the same OpenCode Haiku route as implement, separately
+// overridable — and the claude harness stays an explicit opt-in for every dispatch route.
+// Table-level checks use buildRoutingTable({}) so a local .env override cannot leak into the
+// expectation.
 
 import { describe, expect, test } from "bun:test";
 import {
@@ -9,6 +10,7 @@ import {
   DEEPSEEK_V41_FLASH,
   describeRoute,
   HAIKU,
+  HAIKU_5_5,
   ROUTED_TOOLS,
   SONNET,
   withModel,
@@ -25,18 +27,18 @@ import { makeFixture } from "./git-fixture.ts";
 const { routes } = buildRoutingTable({});
 
 describe("dispatch_editorial route", () => {
-  test("is a routed tool, Sonnet on Max with the IU reverse fallback on the claude harness", () => {
+  test("is a routed tool, Haiku 5.5 EU via opencode on iu with the Sonnet-on-max fallback", () => {
     expect(ROUTED_TOOLS).toContain("dispatch_editorial");
     expect(routes.dispatch_editorial).toEqual({
-      model: SONNET,
-      backend: "max",
-      fallback: { backend: "iu" },
+      model: HAIKU_5_5,
+      backend: "iu",
+      fallback: { backend: "max", model: SONNET },
       transport: "session",
-      harness: "claude",
+      harness: "opencode",
       variant: undefined,
     });
     expect(describeRoute(routes.dispatch_editorial)).toBe(
-      `${SONNET} on max (fallback ${SONNET} on iu)`,
+      `${HAIKU_5_5} on iu via opencode (fallback ${SONNET} on max)`,
     );
   });
 
@@ -47,19 +49,28 @@ describe("dispatch_editorial route", () => {
     });
     expect(overridden.routes.dispatch_editorial.model).toBe(HAIKU);
     expect(overridden.routes.dispatch_editorial.backend).toBe("iu");
+    // A Claude id on an opencode route (Haiku 4.5 here) pulls the harness onto claude, implied.
+    expect(overridden.routes.dispatch_editorial.harness).toBe("claude");
     expect(overridden.overrides.filter((o) => o.tool === "dispatch_editorial")).toEqual([
       { tool: "dispatch_editorial", field: "model", value: HAIKU },
       { tool: "dispatch_editorial", field: "backend", value: "iu" },
+      {
+        tool: "dispatch_editorial",
+        field: "harness",
+        value: "claude",
+        implied: expect.stringContaining("it can only run on the claude harness"),
+      },
     ]);
   });
 
-  test("a non-Claude model override on it is normalized off Max and cannot strand an opencode id on claude", () => {
+  test("an opencode-only model paired with the claude harness is refused back to the editorial default — it cannot strand an opencode id on claude", () => {
     const { routes: r, overrides } = buildRoutingTable({
       AGENT_GATEWAY_MODEL_DISPATCH_EDITORIAL: DEEPSEEK_V41_FLASH,
+      AGENT_GATEWAY_HARNESS_DISPATCH_EDITORIAL: "claude",
     });
     // deepseek-v4.1-flash is opencode-only: refused back to the editorial default.
-    expect(r.dispatch_editorial.model).toBe(SONNET);
-    expect(r.dispatch_editorial.harness).toBe("claude");
+    expect(r.dispatch_editorial.model).toBe(HAIKU_5_5);
+    expect(r.dispatch_editorial.harness).toBe("opencode");
     expect(overrides.some((o) => o.tool === "dispatch_editorial" && o.refused)).toBe(true);
   });
 
@@ -76,6 +87,7 @@ describe("the claude harness is an explicit opt-in for dispatch", () => {
       "dispatch",
       "dispatch_implement",
       "dispatch_implement_escalation",
+      "dispatch_editorial",
     ] as const) {
       expect(routes[key].harness).toBe("opencode");
     }
@@ -110,22 +122,26 @@ describe("`kind` param", () => {
     expect(withModel(routes.dispatch_implement, SONNET).harness).toBe("claude");
   });
 
-  test("an editorial in-place episode is allowed in a repo with its own opencode config; a code one is not", async () => {
+  test("an in-place episode in a repo with its own opencode config is refused on opencode (code or editorial), allowed once a Claude model forces the claude harness", async () => {
     const fx = await makeFixture();
     try {
       fx.write(".opencode/plugin.js", "module.exports = () => {}\n");
-      const input = (kind: "code" | "editorial") =>
+      const input = (kind: "code" | "editorial", model?: string) =>
         DISPATCH_INPUT.parse({
           cwd: fx.repo,
           brief: "b",
           tier: "implement",
           workspace: "in-place",
           kind,
+          model,
         });
-      expect(() => assertDispatchRequestAllowed(input("editorial"), false)).not.toThrow();
       expect(() => assertDispatchRequestAllowed(input("code"), false)).toThrow(
         /dispatch refused:.*\.opencode/,
       );
+      expect(() => assertDispatchRequestAllowed(input("editorial"), false)).toThrow(
+        /dispatch refused:.*\.opencode/,
+      );
+      expect(() => assertDispatchRequestAllowed(input("editorial", SONNET), false)).not.toThrow();
     } finally {
       fx.cleanup();
     }

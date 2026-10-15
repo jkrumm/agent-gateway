@@ -80,8 +80,11 @@ describe("runReview — a drain detaches an angle session", () => {
       runReview({ cwd: fx.repo, scope: "uncommitted", angles: ["senior-dev"] }, undefined, "job-1"),
     ).rejects.toBeInstanceOf(sessionRunner.SessionDetachedError);
 
-    // ANGLE_MAX_ATTEMPTS is 2: a detach must not look like a failed first attempt.
-    expect(opencodeAngles()).toHaveLength(1);
+    // ANGLE_MAX_ATTEMPTS is 2: a detach must not look like a failed first attempt, so no
+    // angle (senior-dev, plus the floor's architect on the same route) is started twice.
+    const keys = opencodeAngles().map((s) => s.reattachKey);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys).toContain("angle:senior-dev");
     expect(seen.some((s) => s.tool === "review:synthesis")).toBe(false);
   });
 
@@ -93,14 +96,14 @@ describe("runReview — a drain detaches an angle session", () => {
       if (opts.tool === "review:angle" && harness === "opencode") {
         throw new sessionRunner.SessionDetachedError(opts.jobId);
       }
-      // The claude angle (the floor's architect) keeps working for a while.
+      // The claude angle (frontend, still JUDGE) keeps working for a while.
       await Bun.sleep(150);
       finished.push(opts.tool ?? "");
       return { ok: true, data: { findings: [] } };
     }) as unknown as typeof sessionRunner.runSession);
 
     await expect(
-      runReview({ cwd: fx.repo, scope: "uncommitted", angles: ["senior-dev", "architect"] }),
+      runReview({ cwd: fx.repo, scope: "uncommitted", angles: ["senior-dev", "frontend"] }),
     ).rejects.toBeInstanceOf(sessionRunner.SessionDetachedError);
 
     // By the time the review rejects, the sibling has settled — nothing runs on unobserved.

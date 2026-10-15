@@ -110,7 +110,7 @@ latched so the fallback attempt itself is never switched again:
   429/502/503/504, connection errors) is first retried once on `iu` — a
   single 503 is the common case and must not spend Max quota — and if that
   fails the same way the next attempt runs on `max`, on `fallback.model` when
-  the route fixes one (`check`/`overview` → Haiku, `dispatch` → Sonnet, since
+  the route fixes one (every OpenCode route → Sonnet on Max, since
   a gateway id cannot run on Max) or the same model (`backend.fallback`, reason
   `iu-unavailable`). Missing IU credentials (`iuConfigError`) and a **timeout
   with zero worker events** skip the same-backend retry and go straight to
@@ -125,9 +125,8 @@ latched so the fallback attempt itself is never switched again:
   the Requesty hop for every gateway id alike, so the only lever that reaches
   one on the `claude` harness is `MAX_THINKING_TOKENS` (the CLI's env var for
   Anthropic's `thinking.budget_tokens`), exported by `buildWorkerEnv` for any
-  non-Claude route. CLASSIFY (check/overview, Haiku 4.5 over IU;
-  GLM retired 2026-09-23) runs at 2048; JUDGE/
-  PROSE stay on Claude and carry no `thinkingTokens`. `dispatch`/
+  non-Claude route. The retired `claude -p` CLASSIFY tier (check/overview, Haiku 4.5 over IU;
+  GLM retired 2026-09-23) ran at 2048; JUDGE stays on Claude and carries no `thinkingTokens`. `dispatch`/
   `dispatch_implement` carry none either — AGENT/AGENT_IMPLEMENT (this
   `thinkingTokens` mechanism, DeepSeek-V4-Flash/-Pro over the IU native
   Anthropic transport) were retired 2026-09-24 for AGENT_OC/AGENT_OC_IMPLEMENT
@@ -278,6 +277,8 @@ SINGLE_SHOT) match the constants in that file.
 
 ### CLASSIFY
 
+*Wave 10 (2026-10-15): the tier is now Haiku 5.5 EU on OpenCode and also carries excalidraw and narrative — § Wave 10 below. What follows is the history of the `claude -p` tier it replaced.*
+
 CLASSIFY: cheap mechanical work (check, overview) —
 Haiku 4.5 over IU (the live id is in `GET /api/routing`; DeepSeek-V4-Flash until Wave 5), thinking capped at 2048
 tokens (`thinkingTokens` — see the module-header comment on `MAX_THINKING_TOKENS`; unset
@@ -385,7 +386,7 @@ AGENT_IMPLEMENT's IU-native-Anthropic primary.
 moved from `deepseek-v4.1-flash` to `claude-haiku-5-5-eu`, served by the `iu-anthropic`
 OpenCode provider (`@ai-sdk/anthropic` on IU's native `/anthropic` leg, so `cache_control` is
 injected). `dispatch_implement_escalation` stays on `DeepSeek-V4-Pro`; `triage`, `review_router`
-and `review_ocr` stay on `deepseek-v4.1-flash`; `check` stays on `claude-haiku-4-5`.
+and `review_ocr` stay on `deepseek-v4.1-flash`; `check` stayed on `claude-haiku-4-5` until Wave 10 (§ Wave 10).
 
 **Method.** `scripts/bench-routes.ts` drives `runSession` against the shared OpenCode server, one
 fresh history-less tree per cell, 2 reps, three arms (flash at variant max/high, Haiku 5.5, Pro at
@@ -416,15 +417,81 @@ an upstream with no such id); `compatibility.supportsThinkingBlockBinding: false
 provider entry removes both (the v1 `provider` form drops that key — `buildOpencodeServerConfig`
 emits every provider under `providers` now). With it, no `thinking` field is sent.
 
-**`check` on Haiku 5.5: rejected.** On `claude -p` (`scripts/bench-check.ts`, explicit
+**`check` on Haiku 5.5 over `claude -p`: rejected (superseded by Wave 10, where it runs on OpenCode).** On `claude -p` (`scripts/bench-check.ts`, explicit
 format/lint/typecheck commands, 3 runs each) Haiku 4.5 took 60 s median, Haiku 5.5 EU 237 s with
 one turn and no usage row — the `claude` harness sends enabled-budget thinking, which the `-eu`
 id's gateway leg handles slowly. The model is only in the loop for explicit `commands` or a repo
 without a `make check` target anyway; the repo-contract `make check` path is deterministic.
 
+### Wave 10 — the claude-harness routes move to OpenCode (2026-10-15)
+
+`check`, `overview`, `narrative`, `excalidraw` and `dispatch_editorial` moved to
+`claude-haiku-5-5-eu` on the OpenCode harness (Sonnet on Max stays the reverse lane). `otel` stays
+on Claude, as does the `frontend` review angle; `review` (synthesis and every angle without its own
+route key) moved too — § `review` below. The CLASSIFY tier now carries no `thinkingTokens`
+(opencode has none).
+
+**Method.** One fixed real input per tool through the production handler, route chosen by env
+(`scripts/bench-check.ts`, `scripts/bench-tool.ts`; raw output and per-rep JSON under
+`~/.local/share/agent-gateway/bench/wave10/`). Candidates: the old route, Haiku 5.5 EU and
+`deepseek-v4.1-flash`, both on OpenCode. Cost is the runner's own number (notional for Max rows).
+
+| tool | old route | Haiku 5.5 EU on OpenCode | flash on OpenCode |
+|-|-|-|-|
+| check (3 repos x clean/broken x2) | Haiku 4.5 `claude -p`: 3/4 correct, median 64 s, one 718 s run that reported a false typecheck failure, $0.10 per cell | 12/12 correct, median 5.3 s, $0.0018 per cell | 12/12 correct, median 8.1 s, $0.0016 |
+| overview (46 agents, 2 reps) | 170-180 s, $0.11-0.23 | 33-35 s, $0.006 | 84-113 s, $0.012-0.016 |
+| excalidraw (same brief, 2 reps) | Sonnet/Max 111-121 s, $0.13 | 23-30 s, $0.003-0.005 | 1 of 2 hydrate timeouts, 113 s |
+| narrative (agent-gateway bootstrap page, 2 reps) | Sonnet/Max 48-59 s, $0.24-0.26 | 22 s, $0.006 | 35-40 s, $0.008 |
+| dispatch editorial, README fold-in (2 reps) | Sonnet/Max 43 s / 99 s, 1 of 2 complete | 117 s / 90 s, 1 of 2 complete | 57 s / 60 s, 0 of 2 complete |
+| dispatch editorial, numbered-checklist rewrite (3 reps, mechanically graded) | Sonnet/Max 3/3, 27-38 s | 3/3, 14-15 s, $0.003 | not run |
+
+**Reading.** `overview`: recommendation agreement with the old route was 35-36 of 44 (80%); the old
+route agrees with itself 37 of 45 (82%), Haiku 5.5 with itself 43 of 46 (93%). `excalidraw`:
+8 boxes, 7-8 bound arrows, no overlaps and the requested re-attach arrow, against Sonnet's 7-11
+boxes; read from geometry, not a render. `narrative`: both pages are well formed and within the
+caps; Sonnet's is a little more precise on specifics, Haiku's reads more in business terms and
+carried one transcript-stale claim ("server not restarted") — judged equal, n=2 pages, revert is
+`AGENT_GATEWAY_MODEL_NARRATIVE=claude-sonnet-5[1m] AGENT_GATEWAY_HARNESS_NARRATIVE=claude
+AGENT_GATEWAY_BACKEND_NARRATIVE=max`. Editorial: both models left the paragraph the brief asked to
+fold in on one of two runs of the first brief — a tie — and tied on the second.
+
+**What made OpenCode able to carry them.** (1) `check`: the claude prompt makes the worker define a
+`run_step` shell function (mktemp/eval/kill) as its idle watchdog; no such command is on the
+read-only allowlist, so the first OpenCode run was "Permission denied" on every step. The OpenCode
+prompt now says "run each command directly, the host watches the session", and a new `agw-check`
+permission profile (read-only plus `make`/`bun`/`uv`/`pytest`/`ruff`/`tsc`/…, a repo's
+`.venv/bin`/`node_modules/.bin`; interpreters and edits stay denied, the server-self-access denies
+are re-applied last) is selected by `runsChecks: true`. (2) overview/narrative asked claude for
+`extraDisallowedTools: [Bash, Read, …]`, which the OpenCode runner refuses; they now also pass
+`toolless: true`, selecting an `agw-toolless` profile (catch-all deny). (3) The stale-config guard
+(`getOpencodeServerStatus`) now compares the running server's `/api/agent` profiles with the
+config, so a profile added in code is `make verify`-red until `make install-opencode-agent` loads it.
+
+**Stays on Claude, with the measured reason.** `otel`: it needs the bearer-authed HyperDX MCP server
+in its session; OpenCode v2 has MCP only at server scope (`/api/mcp`, no field on `POST
+/api/session` — the session body is `id, parentID, title, agent, model, location, metadata,
+permissions`), so moving it would put the HyperDX key in the shared server every dispatch and
+review worker attaches to.
+
+**`review` moved to Haiku 5.5 EU on OpenCode (synthesis and the keyless angles).** `review`'s
+synthesis session and every angle without its own route key (architect, backend, the router-picked
+content angles) now take CLASSIFY: `claude-haiku-5-5-eu` on `iu`, the OpenCode harness, Sonnet on
+Max as the reverse lane. `review_angle_frontend` stays JUDGE (Sonnet on Max, claude harness), as
+does `otel`. Two real ranges through the production handler, one run per route:
+
+| range | Sonnet on Max | Haiku 5.5 EU on OpenCode | flash on OpenCode |
+|-|-|-|-|
+| run 1 (HEAD~2) | 585 s, 2 blocking / 16 improvements / 4 test gaps | 298 s, 3 blocking / 12 / 4 (same top two blockers plus one more) | 521 s, 1 blocking / 19 / 6 |
+| run 2 (HEAD~4) | 705 s, 2 blocking / 14 / 5 | 473 s, 3 blocking / 31 / 2 (the shared in-place-lease blocker found by both; the others differ) | not run |
+
+n=2 ranges and no ground truth: the counts say Haiku 5.5 is not obviously worse and clearly faster,
+not that it is better. Wave 11's real-findings A/B is the follow-up. Revert:
+`AGENT_GATEWAY_MODEL_REVIEW=claude-sonnet-5[1m] AGENT_GATEWAY_HARNESS_REVIEW=claude
+AGENT_GATEWAY_BACKEND_REVIEW=max`.
+
 ### dispatch_editorial
 
-dispatch_editorial — 2026-10-10. `kind: "editorial"` on a dispatch routes the episode to the Claude harness on Sonnet (Max, IU reverse fallback), the PROSE shape: AGENTS.md, docs and prose briefs are editorial judgment a cheap model was not measured on. Claude on `dispatch` itself is otherwise opt-in only (`AGENT_GATEWAY_HARNESS_DISPATCH=claude` plus a Claude `AGENT_GATEWAY_MODEL_DISPATCH`).
+*Wave 10: now the same OpenCode Haiku 5.5 route as `dispatch_implement` (§ Wave 10).* dispatch_editorial — 2026-10-10. `kind: "editorial"` on a dispatch routes the episode to the Claude harness on Sonnet (Max, IU reverse fallback), the PROSE shape: AGENTS.md, docs and prose briefs are editorial judgment a cheap model was not measured on. Claude on `dispatch` itself is otherwise opt-in only (`AGENT_GATEWAY_HARNESS_DISPATCH=claude` plus a Claude `AGENT_GATEWAY_MODEL_DISPATCH`).
 
 ### escalation
 
@@ -439,6 +506,8 @@ $0.32/$0.39; the deepseek-v4.1-flash baseline passed both at 31 s/97 s, $0.011/$
 gpt-6.1-sol stays verified for chat/Responses only (2026-10-02) — rates/limits unchanged.
 
 ### JUDGE
+
+*Wave 10 (2026-10-15): review's synthesis and keyless angles moved to CLASSIFY (Haiku 5.5 EU on OpenCode, § Wave 10); only the `frontend` angle and `otel` remain on JUDGE. What follows is the history of the tier as it stood before.*
 
 JUDGE: judgment-heavy work that stays on Max — review's synthesis/router, the `frontend`
 angle, and otel. The `senior-dev`, `typescript` and `qa` angles moved off JUDGE onto
@@ -462,6 +531,8 @@ reasons, both dated 2026-09-11:
   Do not "fix" this inconsistency with AGENT without new measured evidence.
 
 ### PROSE
+
+*Wave 10 (2026-10-15): no default route uses PROSE any more — narrative, excalidraw and dispatch_editorial moved to OpenCode Haiku 5.5 (§ Wave 10).*
 
 PROSE: editorial/generative work (narrative, excalidraw) — re-tiered 2026-09-11 the
 other way: same model (claude-sonnet-5[1m]), but anchored on Max (a flat fee) instead

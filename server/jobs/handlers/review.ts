@@ -159,11 +159,10 @@ export const REVIEW_INPUT = z.object({
     .optional()
     .describe(
       "Optional model override for the angle and synthesis sessions only (never the router or " +
-        "the adversary critic), e.g. 'claude-opus-5[1m]'. Defaults to the measured-good review " +
-        "route; overriding onto a non-Claude model also drops the Max fallback entirely — Max " +
+        "the adversary critic), e.g. 'claude-opus-5[1m]'. Defaults to the measured review route " +
+        "(see GET /api/routing); overriding onto a non-Claude model drops the Max fallback — Max " +
         "only ever serves Claude model ids — so a failing review on an overridden model has " +
-        "nowhere to fall back to (see the JUDGE block comment in server/lib/routing.ts for the " +
-        "measurement behind why review stays pinned by default).",
+        "nowhere to fall back to.",
     ),
 });
 
@@ -1240,7 +1239,7 @@ export async function runReview(
         prompt += researchBlock;
 
         // Scope mode + a repo-local opencode config: refuse this angle's opencode route and
-        // run it on the claude review route instead — never delete the caller's own files.
+        // run it on the claude (frontend-angle) route instead — never delete the caller's own files.
         // Mirrors dispatch's `assertInPlaceOpencodeConfigAllowed`, but per-angle (a fallback,
         // not a refusal of the whole review).
         let angleRoute = routeForReviewAngle(agent.angle);
@@ -1255,7 +1254,9 @@ export async function runReview(
             },
             "refusing an opencode-harness angle in a live checkout carrying its own opencode config — using the claude route",
           );
-          angleRoute = routeFor("review");
+          // `review_angle_frontend` is the claude-harness (JUDGE) seat; `review` itself is an
+          // opencode route since Wave 10.
+          angleRoute = routeFor("review_angle_frontend");
         }
 
         // Retry a failed angle once — session-runner does not retry a non-transport failure,

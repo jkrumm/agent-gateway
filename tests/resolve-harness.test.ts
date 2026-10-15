@@ -14,8 +14,8 @@ describe("resolveHarness", () => {
     expect(resolveHarness(routeFor("dispatch"))).toBe("opencode");
   });
 
-  test("a primary attempt on a claude-harness route (review) runs claude", () => {
-    expect(resolveHarness(routeFor("review"))).toBe("claude");
+  test("a primary attempt on a claude-harness route (review_angle_frontend) runs claude", () => {
+    expect(resolveHarness(routeFor("review_angle_frontend"))).toBe("claude");
   });
 
   test("a forced fallback attempt off an opencode-harness route STILL runs claude", () => {
@@ -30,7 +30,7 @@ describe("resolveHarness", () => {
 
   test("a forced fallback attempt off an already-claude route also runs claude", () => {
     expect(
-      resolveHarness(routeFor("review"), {
+      resolveHarness(routeFor("review_angle_frontend"), {
         backend: "iu",
         model: "claude-sonnet-5[1m]",
         reason: "rate-limited",

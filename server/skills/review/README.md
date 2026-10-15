@@ -44,7 +44,7 @@ Phase 3 — Synthesis (single session on the `review` route's model, ~15s)
 
 Each Phase 2 angle session is **retried once** on failure (`ANGLE_MAX_ATTEMPTS = 2`).
 `session-runner`'s own ladder retries only transport-class errors, so a non-transport
-failure — an idle-watchdog kill on the claude/Max route, a malformed final message — is
+failure — an idle-watchdog kill on a session route, a malformed final message — is
 returned as final and would otherwise force the whole review to `needs-human`/`blocker`
 on a single flaky attempt; the retry is logged as `review.angle_retry`. A **second**
 failure stands: the angle is recorded as failed and the post-synthesis safety net
@@ -162,9 +162,10 @@ Each agent loads project context via `--setting-sources user,project`:
 ## Cost Profile
 
 Angle sessions resolve their route per angle (`routeForReviewAngle`): `senior-dev`,
-`typescript` and `qa` default to the cheap OpenCode route, `frontend` and the synthesis to the
-`review` route over the **Max** backend, falling back to IU per-token only when a Max session
-dies with a quota error. The router runs as one single-shot call
+`typescript` and `qa` default to the cheap OpenCode route, and so do the synthesis and the angles
+without their own route key (architect, backend, content angles) via the `review` route (Haiku 5.5 EU
+on OpenCode over IU per-token, Max as the reverse fallback); `frontend` stays on the Sonnet
+**Max** route, falling back to IU per-token only when a Max session dies with a quota error. The router runs as one single-shot call
 (the cheap triage model over the IU OpenAI transport), and the adversary critic uses the **IU OpenAI transport**
 (the `adversary` route's model) directly — IU per-token, zero Max, and a different model family
 so its bias profile is uncorrelated with the Claude reviewers. The live

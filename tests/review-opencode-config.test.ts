@@ -3,7 +3,7 @@
 //   - `opencodeRepoConfigPresent` (dispatch-git.ts): which of opencode.json / opencode.jsonc /
 //     .opencode exist directly under a repo root. Read-only; the caller decides what it means.
 //   - scope mode (runReview in the caller's LIVE checkout): never stripped — an opencode-harness
-//     angle is instead refused and falls back to the claude `review` route when the repo carries
+//     angle is instead refused and falls back to the claude `review_angle_frontend` route when the repo carries
 //     its own opencode config.
 //   - ref mode (runReview with `branch`): the angle runs inside a throwaway read worktree, from
 //     which `stripProjectSettings` has already removed opencode.json / opencode.jsonc /
@@ -84,6 +84,7 @@ interface SeenSession {
   tool: string;
   cwd: string;
   harness: string;
+  reattachKey: string | undefined;
   /** Which opencode config paths existed under the session's cwd at call time. */
   configAtCall: string[];
 }
@@ -114,12 +115,13 @@ function installSessionStub(): void {
       tool: opts.tool ?? "",
       cwd: opts.cwd,
       harness: opts.route.harness ?? "claude",
+      reattachKey: opts.reattachKey,
       configAtCall: opencodeRepoConfigPresent(opts.cwd),
     });
     if (opts.tool === "review:synthesis") return { ok: true, data: structuredClone(SYNTHESIS) };
-    // The floor always includes architect (claude route); script only the opencode-route
-    // angle (senior-dev), so the response queue cannot be consumed by architect.
-    if (opts.tool === "review:angle" && (opts.route.harness ?? "claude") === "opencode") {
+    // The floor always includes architect (also opencode since Wave 10); script only the
+    // senior-dev angle, so the response queue cannot be consumed by architect.
+    if (opts.tool === "review:angle" && opts.reattachKey === "angle:senior-dev") {
       const scripted = angleResponses.shift();
       if (scripted && !scripted.ok) return { ok: false, error: scripted.error };
     }
@@ -151,10 +153,10 @@ function angleSessions(): SeenSession[] {
   return seen.filter((s) => s.tool === "review:angle");
 }
 
-/** The opencode-route angle (senior-dev) — the one the retry tests script. The floor's
- *  architect angle always runs too, on the claude route. */
+/** The senior-dev angle sessions — the ones the retry tests script. The floor's architect
+ *  angle always runs too, on the same opencode route. */
 function opencodeAngleSessions(): SeenSession[] {
-  return angleSessions().filter((s) => s.harness === "opencode");
+  return angleSessions().filter((s) => s.reattachKey === "angle:senior-dev");
 }
 
 describe("runReview scope mode — live checkout is never stripped", () => {
@@ -163,8 +165,10 @@ describe("runReview scope mode — live checkout is never stripped", () => {
 
     await runReview({ cwd: fx.repo, scope: "uncommitted", angles: ["senior-dev"] });
 
-    // Guards the premise of the tests below: this angle's default route IS opencode.
-    expect(routeFor("review").harness ?? "claude").toBe("claude");
+    // Guards the premise of the tests below: this angle's default route IS opencode, and the
+    // route review.ts swaps in for a live opencode config (the frontend angle's) is claude.
+    expect(routeFor("review_angle_senior_dev").harness).toBe("opencode");
+    expect(routeFor("review_angle_frontend").harness).toBe("claude");
     const harnesses = angleSessions().map((s) => s.harness);
     expect(harnesses).toContain("opencode");
   });
