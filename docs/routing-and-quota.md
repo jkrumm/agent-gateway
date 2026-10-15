@@ -125,14 +125,14 @@ latched so the fallback attempt itself is never switched again:
   the Requesty hop for every gateway id alike, so the only lever that reaches
   one on the `claude` harness is `MAX_THINKING_TOKENS` (the CLI's env var for
   Anthropic's `thinking.budget_tokens`), exported by `buildWorkerEnv` for any
-  non-Claude route. CLASSIFY (check/overview, DeepSeek-V4-Flash
-  since 2026-09-23 — GLM is retired from every route) runs at 2048; JUDGE/
+  non-Claude route. CLASSIFY (check/overview, Haiku 4.5 over IU;
+  GLM retired 2026-09-23) runs at 2048; JUDGE/
   PROSE stay on Claude and carry no `thinkingTokens`. `dispatch`/
   `dispatch_implement` carry none either — AGENT/AGENT_IMPLEMENT (this
   `thinkingTokens` mechanism, DeepSeek-V4-Flash/-Pro over the IU native
   Anthropic transport) were retired 2026-09-24 for AGENT_OC/AGENT_OC_IMPLEMENT
-  (`harness: "opencode"`, `deepseek-v4.1-flash` over IU's OpenAI-compatible
-  route) — opencode has no `MAX_THINKING_TOKENS` equivalent, only the
+  (`harness: "opencode"`; `deepseek-v4.1-flash` then, `claude-haiku-5-5-eu` over the native
+  Anthropic leg since Wave 5 — see § Wave 5) — opencode has no `MAX_THINKING_TOKENS` equivalent, only the
   reasoning-effort variant (`provider/model#variant`; `"high"` investigate/author,
   `"max"` implement, same reasoning tier split
   AGENT_IMPLEMENT used to encode). Overridable per tool via
@@ -162,8 +162,8 @@ The worker angle sessions in `review` resolve their route through
 (`review_angle_senior_dev`, `review_angle_typescript`, `review_angle_frontend`,
 `review_angle_qa`); every other angle (architect, backend, security, …) and the
 synthesis keep using `review`. `senior-dev`, `typescript` and `qa` default to the
-cheap OpenCode route (`ANGLE_OC` in `routing.ts`: deepseek-v4.1-flash on `iu` via
-the opencode harness, `variant: "high"`, with the `review` route's Sonnet on Max
+cheap OpenCode route (`ANGLE_OC` in `routing.ts`: `claude-haiku-5-5-eu` on `iu` via
+the opencode harness, no variant since Wave 5 (flash `"high"` before), with the `review` route's Sonnet on Max
 as the reverse lane). `frontend` and every angle without a key of its own stay
 on the `review` route. The env names follow the usual rule (route key
 upper-cased): `AGENT_GATEWAY_MODEL_REVIEW_ANGLE_TYPESCRIPT`,
@@ -279,7 +279,7 @@ SINGLE_SHOT) match the constants in that file.
 ### CLASSIFY
 
 CLASSIFY: cheap mechanical work (check, overview) —
-DeepSeek-V4-Flash over IU with Haiku-on-Max as the reverse lane, thinking capped at 2048
+Haiku 4.5 over IU (the live id is in `GET /api/routing`; DeepSeek-V4-Flash until Wave 5), thinking capped at 2048
 tokens (`thinkingTokens` — see the module-header comment on `MAX_THINKING_TOKENS`; unset
 would run the gateway model's `max` reasoning default, its worst setting, on work that is
 meant to be cheap).
@@ -351,6 +351,8 @@ history text here; the `DEEPSEEK_PRO` constant itself was removed 2026-09-24 (un
 once this tier retired — nothing else in the codebase referenced it).
 
 ### AGENT_OC / AGENT_OC_IMPLEMENT
+
+_Superseded by § Wave 5 for the model: dispatch and the OC review angles run `claude-haiku-5-5-eu`; the decision record below is the 2026-09-24 flash move._
 
 AGENT_OC / AGENT_OC_IMPLEMENT — dispatch (investigate/author) and dispatch_implement,
 2026-09-24. Owner decision, moving dispatch off `claude -p` entirely onto the OpenCode

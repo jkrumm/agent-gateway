@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <!-- The shared OpenCode v2 server agent-gateway's dispatch episodes attach to
-       (`opencode run --server`). A SEPARATE LaunchAgent from com.jkrumm.agent-gateway on
+       (driven over its HTTP API). A SEPARATE LaunchAgent from com.jkrumm.agent-gateway on
        purpose: an agw `make reload` must not kill in-flight episodes, and a crash here restarts
        without agw involvement (docs/opencode-v2.md § Design). Not the per-user service that
        interactive `oc` uses — own port, own state root, own config.

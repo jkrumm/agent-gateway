@@ -434,7 +434,7 @@ There is no `opencode run` child process and no CLI fallback path: `runOpencodeA
 zod-typed `fetch` adapter; tests inject an in-memory fake of the same interface).
 `server/mcp/opencode-server.ts` owns the server itself: the pinned version
 (`OPENCODE_PINNED_VERSION`), the generated config, the permission rule arrays,
-`getOpencodeServerStatus()`, `interruptOpencodeSession`. What a session sets (measured on 2.0.25):
+`getOpencodeServerStatus()`, `interruptOpencodeSession`. What a session sets (measured on 2.0.25, re-probed green on 2.0.29):
 (1) **permissions live in two v2 agents** in the server config (`OPENCODE_CONFIG_CONTENT`, set on
 the server process — it overrides a repo-local `opencode.json`; never the `OPENCODE_CONFIG` file
 path, which a repo file overrides), selected with `agent` on session create: ordered
@@ -479,7 +479,7 @@ drain reach a session through `trackExternalSession` (`terminateSessionsForJob` 
 `terminateActiveSessions` call its `stop`, which `POST …/interrupt`s it); any exit that did not
 end idle on its own is interrupted too (a session keeps running tools otherwise — measured), and
 `session.opencode_interrupt` is logged. `bun scripts/opencode-live-probe.ts` proves the whole path
-against the real server. Never `brew upgrade opencode` without the gate in `docs/opencode-v2.md`;
+against the real server. The pinned build is an npm install under `~/.local/share/agent-gateway/opencode-bin/<version>` (Homebrew's bottle lags); never swap it without the gate in `docs/opencode-v2.md`;
 a server restart (`make install-opencode-agent`, refuses while jobs run) kills the episodes
 running on it. There is no `database is locked` retry — the server owns the db.
 

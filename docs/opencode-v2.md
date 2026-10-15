@@ -2,7 +2,7 @@
 
 Spec order for this migration: `docs/waves/PLAN.md` > this file > dotfiles
 `docs/agent-platform.md` > older docs. Everything under **Measured** was observed on
-**opencode 2.0.25** (Homebrew) with `scripts/opencode-v2-probe.ts` on 2026-10-14; the probe is
+**opencode 2.0.25** (Homebrew; re-probed on 2.0.29 on 2026-10-15) with `scripts/opencode-v2-probe.ts` on 2026-10-14; the probe is
 the executable form of this page and the upgrade gate (below).
 
 **Status: Wave 4 shipped (2026-10-14).** An episode is a session on one agw-owned OpenCode v2
@@ -186,18 +186,26 @@ lease, `assertInPlaceOpencodeConfigAllowed`, the IU endpoint preflight.
 The 2026-10-11 `brew upgrade` changed behaviour under a running agw and broke every dispatch
 (warden JOURNAL). So:
 
-- `opencode` is **pinned in Homebrew** (`brew pin opencode`, 2026-10-14) at 2.0.25.
-- The pin is mini-local Homebrew state (`brew list --pinned`); no tracked Brewfile captures it, so
-  a reprovisioned machine installs unpinned until `brew pin opencode` is run again.
-- An upgrade is a deliberate act, gated on the probe:
+- agw's server runs an **npm install of `@opencode/cli`** at the pinned version, under
+  `~/.local/share/agent-gateway/opencode-bin/<version>/` (`npm i @opencode/cli@<version>`).
+  Homebrew's bottle stays at 2.0.25 (2026-10-15) and serves only interactive `oc`; the wrapper
+  prefers the npm build matching `OPENCODE_PINNED_VERSION` and falls back to PATH.
+- The pin lives in `OPENCODE_PINNED_VERSION` (`server/mcp/opencode-server.ts`); the install
+  directory is mini-local state, so a reprovisioned machine needs the `npm i` step again (the
+  wrapper then refuses to start with the fix in its message).
+- An upgrade is a deliberate act, gated on the probes:
   ```bash
-  agw jobs --running                      # step 0: nothing running — an upgrade under a live episode is the 2026-10-11 incident
-  brew unpin opencode && brew upgrade opencode
-  bun scripts/opencode-v2-probe.ts        # all sections; a few cents of IU tokens
-  # then bump OPENCODE_PINNED_VERSION (server/mcp/opencode-server.ts), make install-opencode-agent
-  # green → keep, update the version noted in this file, brew pin opencode
-  # red   → brew uninstall opencode && brew install opencode@<old> (or the cached bottle), pin
+  agw jobs --running                      # step 0: nothing running — a restart kills attached episodes
+  D=~/.local/share/agent-gateway/opencode-bin/<new>; mkdir -p $D && (cd $D && npm init -y && npm i @opencode/cli@<new>)
+  OPENCODE_BIN=$D/node_modules/@opencode/cli-darwin-arm64/bin/opencode bun scripts/opencode-v2-probe.ts
+  # green → bump OPENCODE_PINNED_VERSION, make install-opencode-agent, then
+  #         env -u CLAUDECODE bun scripts/opencode-live-probe.ts, make deploy
+  # red   → leave the pin; the old install directory keeps serving
   ```
+- **2.0.25 → 2.0.29 (2026-10-15).** Probe 55/55 against 2.0.29; one 2.0.25 quirk went away
+  (config-defined providers are now listed by `/api/provider|/api/model`, recorded as the fact
+  `providers.configDefinedListed`). Reason: the P0 request-timeout failures, and the changelog's
+  "faster, safer session snapshots" (the server snapshots each worktree with its own git repo).
 - Wave 2 (shipped): the running-server version is in `/api/jobs/health` (`opencodeServer`) and
   `make verify`, the wrapper refuses to start a binary that is not the pinned one, and
   episodes refuse to start against a server whose version differs from it.

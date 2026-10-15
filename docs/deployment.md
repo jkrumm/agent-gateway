@@ -289,7 +289,7 @@ restarts it without agent-gateway involvement.
   label is new, so confirm it after the first install with the `effectiveItemDisposition` check
   above, against `agent-gateway-opencode.plist`.
 - **The wrapper guards three things.** It refuses to start unless `opencode --version` is the
-  pinned build (`OPENCODE_PINNED_VERSION`, `brew pin opencode`); it launches under `env -i` with
+  pinned build (`OPENCODE_PINNED_VERSION`, the build is an npm install under `~/.local/share/agent-gateway/opencode-bin/<version>`, since Homebrew's bottle lags); it launches under `env -i` with
   only `PATH`/`HOME`/`TMPDIR`/`LANG` plus `scripts/opencode-server-env.ts`'s output (the config,
   the IU key, the state-root `XDG_*`/`OPENCODE_DB`, the Basic-auth password, the git credential
   deny env — no research-gateway credential, deliberately) — every worker shell inherits

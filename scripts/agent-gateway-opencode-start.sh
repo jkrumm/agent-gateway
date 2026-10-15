@@ -25,7 +25,10 @@ server_env="$(/opt/homebrew/bin/bun scripts/opencode-server-env.ts)"
 eval "$server_env"
 unset server_env
 
-bin="$(command -v opencode || true)"
+# Homebrew's bottle lags the npm releases (2.0.25 vs 2.0.29), so the pinned build is an npm install
+# under the state tree (docs/opencode-v2.md § Version pin); fall back to whatever is on PATH.
+bin="$HOME/.local/share/agent-gateway/opencode-bin/$AGW_OPENCODE_PINNED_VERSION/node_modules/.bin/opencode"
+[ -x "$bin" ] || bin="$(command -v opencode || true)"
 if [ -z "$bin" ]; then
   echo "agent-gateway-opencode: opencode not found on PATH ($PATH)" >&2
   exit 1
@@ -34,7 +37,7 @@ raw_version="$("$bin" --version 2>/dev/null || true)"
 version="${raw_version##* }"
 version="${version#v}"
 if [ "$version" != "$AGW_OPENCODE_PINNED_VERSION" ]; then
-  echo "agent-gateway-opencode: refusing to start: $bin is '${raw_version:-unknown}', pinned is $AGW_OPENCODE_PINNED_VERSION (brew pin opencode; upgrade gate in docs/opencode-v2.md)" >&2
+  echo "agent-gateway-opencode: refusing to start: $bin is '${raw_version:-unknown}', pinned is $AGW_OPENCODE_PINNED_VERSION (npm install under opencode-bin/<version>; upgrade gate in docs/opencode-v2.md)" >&2
   exit 1
 fi
 

@@ -311,13 +311,14 @@ section("session", async () => {
   });
   check("no Authorization header -> 401", noAuth.status === 401, `${noAuth.status}`);
   check("wrong password -> 401", badAuth.status === 401, `${badAuth.status}`);
-  // Config-defined providers are usable by sessions but invisible to the listing endpoints.
+  // 2.0.25 listed no config-defined provider here; 2.0.29 does. Sessions use it either way, and
+  // getOpencodeServerStatus reads /api/model for the stale-config guard, so record, don't assert.
   const provs = await main.api("GET", "/api/provider");
   const models = await main.api("GET", "/api/model");
-  check(
-    "config-defined iu-chat is not listed by /api/provider or /api/model",
-    !JSON.stringify(provs.body).includes(MODEL_REF.providerID) &&
-      !JSON.stringify(models.body).includes(MODEL_REF.providerID),
+  note(
+    "providers.configDefinedListed",
+    JSON.stringify(provs.body).includes(MODEL_REF.providerID) ||
+      JSON.stringify(models.body).includes(MODEL_REF.providerID),
   );
 
   const p = await prompt(main, id, "Reply with exactly the word PONG and nothing else.");
