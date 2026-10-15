@@ -379,6 +379,18 @@ const delay = (ms: number): { promise: Promise<null>; cancel: () => void } => {
   return { promise, cancel: () => clearTimeout(timer) };
 };
 
+/** A request that did not answer in time: the adapter's per-request budget (`TimeoutError`, or its
+ *  `ETIMEDOUT (no answer within the request budget)` rewrite) or an abort that was not ours. While
+ *  a heavy tool runs the server can answer a short request late; that is a slow poll, not a dead
+ *  server. A refused connection (`ECONNREFUSED`, `fetch failed`) or an HTTP/schema error is NOT
+ *  this class: it still fails the attempt at once, so the retry ladder and the Max fallback see a
+ *  dead server immediately instead of after the idle limit. */
+function isSlowRequest(err: unknown): boolean {
+  if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError"))
+    return true;
+  return /ETIMEDOUT/i.test(err instanceof Error ? err.message : String(err));
+}
+
 /** Prompts one session and holds it to completion. Guarantees, however it returns or throws:
  *  - the session is registered for cancel/drain (`trackExternalSession`) for its whole life, and
  *    a stop interrupts it on the server;
@@ -386,8 +398,10 @@ const delay = (ms: number): { promise: Promise<null>; cancel: () => void } => {
  *    executing tools otherwise (measured 2.0.25);
  *  - the heartbeat timer is cleared and the in-flight `wait` is aborted.
  *  The idle watchdog is driven by the message stream (`opencodeActivityFingerprint`), not by
- *  stdout: no visible change for `IDLE_TIMEOUT_MS` means wedged. A transport failure mid-run
- *  propagates as a thrown error for the caller to classify. */
+ *  stdout: no visible change for `IDLE_TIMEOUT_MS` means wedged. A request in the loop (activity
+ *  poll, finish check, `wait`) that merely times out is tolerated — logged, retried next tick —
+ *  because the idle watchdog is the only thing that ends a busy or silent session; any other
+ *  failure mid-run propagates as a thrown error for the caller to classify. */
 export async function driveOpencodeSession(
   client: OpencodeClient,
   input: OpencodeDriveInput,
@@ -451,6 +465,25 @@ export async function driveOpencodeSession(
     return newest?.type === "idle" && newest.id !== input.baselineIdleId;
   };
 
+  /** In-loop requests that timed out back to back; any answered activity poll resets it. */
+  let slowRequests = 0;
+  const tolerateSlowRequest = (err: unknown, request: string): void => {
+    if (!isSlowRequest(err)) throw err;
+    slowRequests++;
+    runnerLogger().warn(
+      {
+        event: "session.opencode_poll_slow",
+        project: input.cwd,
+        ...input.logContext,
+        sessionId,
+        request,
+        consecutive: slowRequests,
+        error: err instanceof Error ? err.message : String(err),
+      },
+      "opencode request in the drive loop timed out — retrying; only the idle watchdog ends the session",
+    );
+  };
+
   let lastActivityAt = Date.now();
   let lastFingerprint = "";
   const finishedTurns = new Set<string>();
@@ -469,22 +502,38 @@ export async function driveOpencodeSession(
       tick.cancel();
       if (stopped) break;
       if (settled) {
-        if (settled.error) throw settled.error;
-        if (settled.idle && (await isFinished())) {
+        let isDone = false;
+        if (settled.error) {
+          tolerateSlowRequest(settled.error, "wait");
+        } else if (settled.idle) {
+          try {
+            isDone = await isFinished();
+          } catch (err) {
+            tolerateSlowRequest(err, "finish_check");
+          }
+        }
+        if (isDone) {
           finished = true;
           break;
         }
-        // Not finished: `wait` answered without the session being idle (a 5xx/503), or before the
-        // admitted prompt started. Back off, re-arm, and FALL THROUGH so the activity poll and the
-        // idle watchdog still run — never a tight request loop that starves them.
+        // Not finished: `wait` answered without the session being idle (a 5xx/503), before the
+        // admitted prompt started, or a request timed out. Back off, re-arm, and FALL THROUGH so
+        // the activity poll and the idle watchdog still run — never a tight request loop that
+        // starves them.
         await Bun.sleep(settled.idle ? NOT_FINISHED_RECHECK_MS : pollMs);
         if (stopped) break;
         waiting = startWait();
       }
 
-      const recent = await client.recentMessages(sessionId, ACTIVITY_WINDOW);
-      const fingerprint = opencodeActivityFingerprint(recent);
-      if (fingerprint !== lastFingerprint) {
+      let recent: OpencodeMessage[] | undefined;
+      try {
+        recent = await client.recentMessages(sessionId, ACTIVITY_WINDOW);
+        slowRequests = 0;
+      } catch (err) {
+        tolerateSlowRequest(err, "activity_poll");
+      }
+      const fingerprint = recent ? opencodeActivityFingerprint(recent) : lastFingerprint;
+      if (recent && fingerprint !== lastFingerprint) {
         lastFingerprint = fingerprint;
         lastActivityAt = Date.now();
         for (const m of recent) if (m.type === "assistant" && m.tokens) finishedTurns.add(m.id);

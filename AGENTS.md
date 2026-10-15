@@ -474,7 +474,7 @@ page silently loses a long episode); every turn has its own message, so there is
 and `usageIncomplete` is gone (the runner sets a `title` on create, which removes the background
 title call that otherwise bills the session ~0.00009 USD without a message). The idle watchdog (`IDLE_TIMEOUT_MS`, 5 min) keys off
 a fingerprint of the newest messages (`opencodeActivityFingerprint`; a provider retry is NOT
-progress) polled every 3 s while a `wait` long-poll is open; the SSE stream is not used. Cancel and
+progress) polled every 3 s while a `wait` long-poll is open; the SSE stream is not used. An in-loop poll, finish check or `wait` that only times out is tolerated (`session.opencode_poll_slow`, retried next tick): the idle watchdog is the only kill. Cancel and
 drain reach a session through `trackExternalSession` (`terminateSessionsForJob` /
 `terminateActiveSessions` call its `stop`, which `POST …/interrupt`s it); any exit that did not
 end idle on its own is interrupted too (a session keeps running tools otherwise — measured), and

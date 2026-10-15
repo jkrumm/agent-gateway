@@ -3,12 +3,15 @@
 // adapter of the `OpencodeClient` port). Time is driven through the `pollMs`/`idleTimeoutMs`
 // seams (a few ms), never real seconds.
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   driveOpencodeSession,
   type OpencodeDriveInput,
   type OpencodeDriveResult,
 } from "../server/mcp/opencode-runner.ts";
+import { OpencodeHttpError } from "../server/mcp/opencode-client.ts";
+import { appLogger } from "../server/logger.ts";
+import { logger as mcpLogger } from "../server/mcp/logger.ts";
 import {
   __resetActiveProcsForTests,
   activeSessionCount,
@@ -276,6 +279,131 @@ describe("driveOpencodeSession — transport failure mid-run", () => {
     await expect(drive()).rejects.toThrow("HTTP 500");
     expect(client.interrupts).toEqual([SESSION]);
     expect(activeSessionCount()).toBe(0);
+  });
+});
+
+describe("driveOpencodeSession — a slow request in the loop does not end the episode", () => {
+  const timeout = (): Error => new DOMException("The operation timed out.", "TimeoutError");
+  // What the real adapter throws for a timed-out request (opencode-client.ts `call`).
+  const budgetExceeded = (): Error =>
+    new Error("opencode server unreachable: ETIMEDOUT (no answer within the request budget)");
+
+  /** runnerLogger() picks the app or the mcp logger by process kind: watch both. */
+  function watchWarnings() {
+    const calls: Array<Record<string, unknown>> = [];
+    const spies = [appLogger, mcpLogger].map((l) =>
+      spyOn(l, "warn").mockImplementation(((obj: Record<string, unknown>) => {
+        calls.push(obj);
+      }) as never),
+    );
+    return {
+      slow: () => calls.filter((c) => c.event === "session.opencode_poll_slow"),
+      restore: () => spies.forEach((s) => s.mockRestore()),
+    };
+  }
+
+  test("activity polls that time out twice are logged, then the episode carries on and finishes", async () => {
+    const { client, drive } = setup();
+    const warnings = watchWarnings();
+    try {
+      client.script({
+        hang: true,
+        visibleNow: [{ content: [shellTool("make check", "running")] }],
+      });
+      client.recentMessagesFault = (limit, call) =>
+        limit > 1 && call < 2 ? (call === 0 ? timeout() : budgetExceeded()) : undefined;
+      client.onActivityPoll = (session, poll) => {
+        // The poll after the two timeouts sees new activity, then the turn completes.
+        if (poll === 0) session.messages.push(assistantMessage({ content: [text("tests green")] }));
+        if (poll === 1) {
+          session.messages.push(idleMessage("succeeded"));
+          session.releaseHang?.();
+        }
+      };
+      const result = await drive();
+      expect(result).toMatchObject({ finished: true, killReason: null, stopped: false });
+      expect(client.interrupts).toEqual([]);
+      expect(warnings.slow()).toHaveLength(2);
+      expect(warnings.slow().map((w) => w.consecutive)).toEqual([1, 2]);
+      expect(warnings.slow()[0]).toMatchObject({ request: "activity_poll", sessionId: SESSION });
+    } finally {
+      warnings.restore();
+    }
+  });
+
+  test("polls that never answer are ended by the idle watchdog, not by an ETIMEDOUT throw", async () => {
+    const { client, drive } = setup();
+    const warnings = watchWarnings();
+    try {
+      client.script(wedgedTurn);
+      client.recentMessagesFault = (limit) => (limit > 1 ? budgetExceeded() : undefined);
+      const result = await drive();
+      expect(result).toMatchObject({ finished: false, stopped: false, killReason: "idle" });
+      expect(result.idleMsAtKill).toBeGreaterThanOrEqual(40);
+      expect(client.interrupts).toEqual([SESSION]);
+      expect(warnings.slow().length).toBeGreaterThan(1);
+    } finally {
+      warnings.restore();
+    }
+  });
+
+  test.each([401, 404])("an HTTP %i from the activity poll still throws", async (status) => {
+    const { client, drive } = setup();
+    client.script(wedgedTurn);
+    const denied = new OpencodeHttpError(status, "GET /api/session/ses_1/message");
+    client.recentMessagesFault = (limit) => (limit > 1 ? denied : undefined);
+    await expect(drive()).rejects.toBe(denied);
+    expect(client.interrupts).toEqual([SESSION]);
+  });
+
+  test("a refused connection from the activity poll still throws (a dead server fails fast)", async () => {
+    const { client, drive } = setup();
+    client.script(wedgedTurn);
+    const refused = new Error("opencode server unreachable: ECONNREFUSED");
+    client.recentMessagesFault = (limit) => (limit > 1 ? refused : undefined);
+    await expect(drive()).rejects.toBe(refused);
+  });
+
+  test("a finish check that times out once after an idle wait is retried, the next round finishes", async () => {
+    const { client, drive } = setup();
+    const warnings = watchWarnings();
+    try {
+      client.script({ assistant: [{ content: [text("done")] }] });
+      client.recentMessagesFault = (limit, call) =>
+        limit === 1 && call === 0 ? timeout() : undefined;
+      const result = await drive();
+      expect(result).toMatchObject({ finished: true, killReason: null });
+      expect(client.waitCalls).toBe(2);
+      expect(client.interrupts).toEqual([]);
+      expect(warnings.slow()).toHaveLength(1);
+      expect(warnings.slow()[0]).toMatchObject({ request: "finish_check", consecutive: 1 });
+    } finally {
+      warnings.restore();
+    }
+  });
+
+  test("a wait that rejects with a timeout is re-armed after the back-off", async () => {
+    const { client, drive } = setup();
+    client.script({ assistant: [{ content: [text("done")] }] });
+    const realWait = client.wait.bind(client);
+    let calls = 0;
+    client.wait = (sessionId, signal) =>
+      ++calls === 1 ? Promise.reject(budgetExceeded()) : realWait(sessionId, signal);
+    const result = await drive();
+    expect(result.finished).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  test("a stop during a pending wait while polls are timing out still breaks out promptly", async () => {
+    const { client, drive } = setup();
+    client.script(wedgedTurn);
+    client.recentMessagesFault = (limit) => (limit > 1 ? timeout() : undefined);
+    const running = drive({ idleTimeoutMs: 60_000 });
+    await Bun.sleep(15);
+    expect(terminateSessionsForJob("job-1")).toBe(true);
+    const result = await running;
+    expect(result).toMatchObject({ stopped: true, finished: false, killReason: null });
+    expect(client.interrupts).toEqual([SESSION]);
   });
 });
 

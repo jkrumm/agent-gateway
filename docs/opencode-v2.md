@@ -147,8 +147,12 @@ re-attach reads). Messages are read through `OpencodeClient.allMessages` (asc, p
 messages every 3 s (`opencodeActivityFingerprint`: ids, content lengths, tool states, tokens —
 NOT the provider `retry` field, so a dead endpoint's retry loop is not progress) while one `wait`
 long-poll is open; SSE is not used. A `wait` that returns before a freshly admitted prompt has
-started is re-checked until the newest message is a new `idle`. Cancel and drain call the
-session's registered `stop` (`trackExternalSession`), which interrupts it.
+started is re-checked until the newest message is a new `idle`. In-loop requests (activity poll,
+finish check, `wait`) that merely time out are tolerated — logged `session.opencode_poll_slow`
+and retried next tick, since a heavy tool can make the server answer a short request late — so
+the idle watchdog is the only kill; a refused connection or an HTTP/schema error still fails at
+once. Cancel and drain call the session's registered `stop` (`trackExternalSession`), which
+interrupts it.
 
 **Durability (Wave 4, shipped).** A dispatch worktree episode runs with `reattachable: true`. On a
 drain/SIGTERM (`terminateActiveSessions` → `stop("drain")`) its session is DETACHED: not

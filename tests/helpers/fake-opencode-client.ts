@@ -133,6 +133,10 @@ export class FakeOpencodeClient implements OpencodeClient {
   /** `allMessages` rejects (the post-run usage read). */
   allMessagesError?: Error;
   interruptResult: OpencodeInterruptResult | undefined;
+  /** Asked on every `recentMessages` before it answers (`limit` 1 = the finish check, more = the
+   *  activity poll, `call` counts per kind from 0); a returned error is thrown instead. */
+  recentMessagesFault?: (limit: number, call: number) => Error | undefined;
+  private readonly recentCalls = { finishCheck: 0, activityPoll: 0 };
   /** Called on every activity poll with the session — lets a test mutate messages deterministically. */
   onActivityPoll?: (session: FakeSession, pollIndex: number) => void;
 
@@ -238,6 +242,9 @@ export class FakeOpencodeClient implements OpencodeClient {
 
   async recentMessages(sessionId: string, limit: number): Promise<OpencodeMessage[]> {
     this.callLog.push("recentMessages");
+    const kind = limit > 1 ? "activityPoll" : "finishCheck";
+    const fault = this.recentMessagesFault?.(limit, this.recentCalls[kind]++);
+    if (fault) throw fault;
     const session = this.get(sessionId);
     if (limit > 1) this.onActivityPoll?.(session, this.activityPolls++);
     return session.messages.slice(-limit).toReversed();
