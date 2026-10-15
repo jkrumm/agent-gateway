@@ -240,7 +240,7 @@ warden, agent-gateway and dotfiles. Before editing a repo, check `rd agents` and
 - **Review (jobs 6931fff0 … + HEAD~1) not taken:** unifying the v1/v2 model-entry builders and the sync script's duplicated cost shaping, `summarizeOpencodeMessages` model param required, cacheWrite on the Claude-wire entries (not priced through OpenCode), the session-runner↔opencode-runner import cycle (pre-existing), bench-script style nits (nested ternaries, `sync-opencode-config`/bench scripts unreferenced by a Makefile target).
 - **Open:** 2.0.29 upgrade still undecided; review-angle recall is a regex-hint proxy (read `findings.json` for a real A/B before moving `frontend`); the >100K surcharge is unmeasured against IU's actual invoice (no gateway `usage.cost` on the Anthropic leg).
 
-## Wave 6 — decision model for warden triage, in shadow            <!-- status: partial -->
+## Wave 6 — decision model for warden triage, in shadow            <!-- status: active -->
 - [x] Add an agw `decide` job/route using `@ai-sdk/typesafe-ai` on IU's decision API,
       mirroring email-gateway's Jev lane, including cost computation and usage records.
       Warden calls it through its agw client.
@@ -259,6 +259,7 @@ warden, agent-gateway and dotfiles. Before editing a repo, check `rd agents` and
       agreement, then the decision model decides above confidence C with LLM fallback
       below.
 - [ ] Gate, deploy and verify: real intake items show shadow decisions in the ledger.
+- [ ] (Re-opened by the orchestrator 2026-10-15 08:50 UTC) The agw route fix 349dc9a is live (restart done, `decide` submit with `pplx-decider-v1-27b` → 200). Finish items 1–4 under "Still to do" below, run `/review` on this wave's whole diff (agw 05ff9db..349dc9a + warden 6126803), then close out normally.
 **Left behind:** PARTIAL — code shipped, live proof and the model comparison are open (the orchestrator closed the wave out early).
 - **agw (05ff9db; route fix 349dc9a):** `decide` job — `server/lib/decision.ts` (`runDecision`, `DECISION_MODELS` rates + `maxStateChars`), `server/jobs/handlers/decide.ts`, wired in types/executor/store recovery; HTTP-only (no MCP tool/CLI yet). AGENTS.md §Decide. `ai@7.0.137` + `@ai-sdk/typesafe-ai@3.0.17` added. Live wire facts: IU's own `confidence` per choice differs from the option probability (0.18 vs 0.59 on a coin-flip) — the runner uses `providerMetadata.typesafe.confidence`; booleans come back as `noul`/`probability`. Measured: `pplx-decider-v1-27b` 0.8–1.6 s, ~$0.00001/call; `decision-1-eu` 0.4 s, ~$0.000006. A live `decide` job (3bb4b916) returned correct typed answers on the first deployed build and wrote a `decide` row to the `agent-gateway-iu` sink. Also fixed a Wave 5 lint error (`scripts/bench-routes.ts` `new Array`) that was failing `make check`.
 - **Bug found live:** `POST /api/jobs` checked a per-job `decide.model` against the chat-model registry (400 `not a verified registry model`). Fixed (`server/routes/jobs.ts` exempts `decide`, test in `tests/jobs-submit-model.test.ts`), `make check` green (1480 tests) — **but the fix is not live**: my graceful `POST /api/shutdown` drain was still waiting on one foreign `review` (f5b3687d) at close-out, with 11 jobs pending behind it (warden's triage/dispatch among them). The orchestrator reported agw back; `/api/jobs/health` still said `draining: true`, `sinceBootMs` ~16 min. **First step of whoever continues: confirm `sinceBootMs` is small and `draining` false, then `curl` a `decide` job with `"model":"pplx-decider-v1-27b"` → 200.**
@@ -271,7 +272,8 @@ warden, agent-gateway and dotfiles. Before editing a repo, check `rd agents` and
 - **Cost of my deploy:** the drain stalled warden's queue for ~16 min and counting. The first drain was needed (jobs never left a gap); the second was for a route fix. Prefer batching a fix with the next deploy.
 - **Review:** `/review` was not run on this wave's diff.
 
-## Wave 7 — no stale word left            <!-- status: active -->
+## Wave 7 — no stale word left            <!-- status: pending -->
+- [ ] **First, a P0 regression:** about 1 in 4 dispatches fail with `session.opencode_error` "opencode server unreachable: ETIMEDOUT (no answer within the request budget)" after about 5 min of work (2026-10-15 jobs 39f93ffc, 50cb94bb, ad670106, 9e5d9e80; the server's LaunchAgent stays up, and successes are interleaved). `REQUEST_TIMEOUT_MS = 30_000` in `server/mcp/opencode-client.ts` turns one slow server answer into a failed write-tier episode. Find which call stalls (log the op + latency). A slow read on a live session must retry or poll again, never fail the episode. Hypothesis: 2.0.25 stalls the server on git diffs over many untracked files, which 2.0.26 fixed ("batched Git operations"). If the probes confirm it, upgrade the pin to the latest 2.0.x behind `scripts/opencode-v2-probe.ts` + `scripts/opencode-live-probe.ts`. Restart the OpenCode agent only with `agw jobs --running` empty of dispatches. Prove it with `make verify` green and ≥ 10 consecutive dispatches with no unreachable error.
 - [ ] Update every doc that describes the old spawn model or the DeepSeek-only tiers.
       Known list:
       - agent-gateway `docs/routing-and-quota.md`, `README.md`, `AGENTS.md`
