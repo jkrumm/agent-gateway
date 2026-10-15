@@ -655,6 +655,25 @@ boundary for a sensitive episode, not the permission profile.
 - Salvage retries only a serialization failure (fresh session, no `--resume`)
   and marks it `degraded: true`; a real failure throws.
 
+### Decide — a decision model, not a language model
+
+`decide` (`server/jobs/handlers/decide.ts` → `server/lib/decision.ts`) is one call to an IU
+**decision model** (`GET <origin>/decisions/v1/models`; default `pplx-decider-v1-27b`, override
+`AGENT_GATEWAY_DECISION_MODEL`, per job `model`): the AI SDK's experimental `decide` through
+`@ai-sdk/typesafe-ai`, mirroring email-gateway's Jev lane. Input `{state, questions, model?}` —
+`state` is plain text, each question a `choice` (`options` id → description, ≥ 2) or `boolean`. Output
+`{answers, model, latencyMs, usage, truncatedChars}`; a choice answer carries `confidence`
+(the provider's calibrated per-question value from `providerMetadata.typesafe.confidence`, NOT the
+option probability) plus `probabilities`; a boolean carries `value`/`probability`. The model
+generates no text and cannot search or read anything: **the caller's `state` is its whole world**,
+so context quality is the caller's job (warden builds it, `lifecycle/shadow.py`). `DECISION_MODELS`
+(decision.ts) holds each known model's rate and a conservative `maxStateChars` cap; the state is
+cut to it and `truncatedChars` says how much. Cost is computed from the rate (the provider drops
+IU's own `usage.cost`) and recorded to the `agent-gateway-iu` sink as tool `decide`. HTTP-only
+(`POST /api/jobs {tool:"decide"}`): no MCP tool or CLI verb yet, so no `/mcp` reconnect. Boot recovery
+re-queues it once, like `triage`. The single request has a 30 min hang guard (agent-limits rule),
+no retry here — the caller owns retries.
+
 ### Review — multi-angle pipeline
 
 The `review` job (`server/jobs/handlers/review.ts`) runs a 3-phase parallel
