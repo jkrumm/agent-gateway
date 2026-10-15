@@ -1,6 +1,6 @@
 # OpenCode v2 server mode — measured facts, design, upgrade gate
 
-Spec order for this migration: `docs/waves/PLAN.md` > this file > dotfiles
+Spec order for this migration: `docs/waves/archive/2026-10-opencode-v2.md` (the archived plan) > this file > dotfiles
 `docs/agent-platform.md` > older docs. Everything under **Measured** was observed on
 **opencode 2.0.25** (then Homebrew; re-probed on 2.0.29 on 2026-10-15, the pinned build since) with `scripts/opencode-v2-probe.ts` on 2026-10-14; the probe is
 the executable form of this page and the upgrade gate (below).
