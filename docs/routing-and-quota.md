@@ -184,8 +184,9 @@ review angle were closed 2026-10-05:
 1. **Max fallback on an overridden angle.** `buildRoutingTable` gives a `review_angle_*`
    whose model override strands it on `iu` a reverse lane to `max` on the angle's default
    Claude model (Sonnet), run via `claude -p`. The adopted `ANGLE_OC` angles declare that
-   fallback directly; the still-`JUDGE` `frontend` angle has it synthesized by
-   `effectiveFallback`.
+   fallback directly; the then-`JUDGE` `frontend` angle had it synthesized by
+   `effectiveFallback` (removed in Wave 11, when `frontend` moved to `ANGLE_OC` and no
+   per-angle route had that shape any more).
 2. **Repo agent config in review's cwd.** Ref mode strips `opencode.json`/`opencode.jsonc`/
    `.opencode/` from the throwaway worktree — the same `stripProjectSettings`/
    `restoreStrippedSettings` pairing dispatch uses. Scope mode never deletes the caller's
@@ -476,8 +477,8 @@ review worker attaches to.
 **`review` moved to Haiku 5.5 EU on OpenCode (synthesis and the keyless angles).** `review`'s
 synthesis session and every angle without its own route key (architect, backend, the router-picked
 content angles) now take CLASSIFY: `claude-haiku-5-5-eu` on `iu`, the OpenCode harness, Sonnet on
-Max as the reverse lane. `review_angle_frontend` stays JUDGE (Sonnet on Max, claude harness), as
-does `otel`. Two real ranges through the production handler, one run per route:
+Max as the reverse lane. `review_angle_frontend` stayed JUDGE here (Sonnet on Max, claude harness; it moved in Wave 11,
+below), as does `otel`. Two real ranges through the production handler, one run per route:
 
 | range | Sonnet on Max | Haiku 5.5 EU on OpenCode | flash on OpenCode |
 |-|-|-|-|
@@ -488,6 +489,60 @@ n=2 ranges and no ground truth: the counts say Haiku 5.5 is not obviously worse 
 not that it is better. Wave 11's real-findings A/B is the follow-up. Revert:
 `AGENT_GATEWAY_MODEL_REVIEW=claude-sonnet-5[1m] AGENT_GATEWAY_HARNESS_REVIEW=claude
 AGENT_GATEWAY_BACKEND_REVIEW=max`.
+
+### Wave 11 — cost truth for Haiku 5.5 above 100K (2026-10-15)
+
+**Question:** does agw's per-message repricing (`messageCostUsd`, `rate.longContext`) match what IU bills?
+
+**Finding: IU's bill is not observable from this side; the registry matches the vendor list exactly.**
+- IU's gateway exposes no usage or billing endpoint (`/v1/usage`, `/usage`, `/v1/key`, `/v1/credits`,
+  `/v1/billing`, `/v1/spend`, … all 404; only `/decisions/v1/models` answers).
+- Neither leg returns a cost for Haiku 5.5 EU: the Anthropic leg's `usage` carries token counts only
+  (headers add Bedrock's own token counts, which agree), and the OpenAI leg (`claude-haiku-5-5`, the
+  `-eu` id is refused there) returns `usage` without `cost`. The `usage.cost` that
+  calibrated the OpenAI-route models in 2026-09 does not exist for this model.
+- Anthropic's pricing page (via `/research`, two pages agreeing): $0.10 in / $0.50 out up to 100K prompt
+  tokens; $0.50 / $2.50 above; cache write 5-min $0.125 (above: $0.625), 1-hour $0.20 (above: $1.00),
+  cache read $0.01 (above: $0.05). The prompt length counts input + cache read + cache write, per
+  request. That is what `messageCostUsd` implements and what the registry holds; the 1-hour write tier
+  is not used (OpenCode's anthropic provider writes 5-min entries).
+- Not verifiable: AWS Bedrock's own list price for the `eu` profile (its pricing page does not render
+  its token tables) and IU's markup/invoice. A divergence would show only on IU's invoice.
+
+**Decision:** no rate correction. The cost column stays "vendor list price", labelled as such. The
+reconcile step, if the invoice ever disagrees: compare one month's invoice line for
+`claude-haiku-5-5-eu` with `sum(costUsd)` of the `agent-gateway` sessions sink for the same month and
+move `rate.longContext`/`cacheWrite` by the ratio.
+
+### Wave 11 — the `frontend` review angle moves to OpenCode (2026-10-15)
+
+`review_angle_frontend` was the last angle on Sonnet-on-Max (`JUDGE`): the 2026-10-05 flash A/B
+had a false-positive problem and the Wave 5/10 benches measured only senior-dev/typescript/qa and the
+synthesis. Re-measured on **real findings**, not regex hints: `bun scripts/bench-frontend.ts` runs the
+pipeline's own `frontend` angle prompt over three real weatherorb commits (5de4e2d, 6264775, 4ea52bf; React
+Native and web account UI), two reps per arm: Haiku 5.5 EU on OpenCode vs the old route (Sonnet on Max). Raw
+findings, per-cell meta and the pooled side-by-side files:
+`~/.local/share/agent-gateway/bench/wave11/frontend/`.
+
+| arm | findings per rep (5de4e2d / 6264775 / 4ea52bf) | median wall | notional cost per run |
+|-|-|-|-|
+| Haiku 5.5 EU, opencode | 10,7 / 5,5 / 4,4 | 18 s | $0.004-0.010 |
+| Sonnet, claude on Max | 3,5 / 5,3 / 1,1 | 107-169 s | $0.5-0.7 (Max is flat-rate; the figure is the API list price) |
+
+Ground truth, the only one this set has: the fix commit `4ea52bf` ("W18 review findings") names what was
+wrong in `5de4e2d`. Of its four defects, a sign-in token delivered twice turning success into failure was
+named by Haiku in 2 of 2 reps (the cold-start `getInitialURL` replay) and by Sonnet in 1 of 2 (weakly); sign-out
+swallowing its error by Haiku 1/2 and Sonnet 1/2; neither arm named the Measure-pan unmount leak or the
+licence link opening on scroll. So recall is tied-to-better for Haiku at one ninth of the wall time. The cost
+is noise: Haiku files roughly twice the findings, much of it accessibility roles and 44 dp touch targets, all
+`improvement`/`discussion`; neither arm filed a `blocking` finding on any commit. Precision on 6264775 and 4ea52bf
+was not judged against code (no later fix commit to anchor it), and n=3 commits is thin.
+
+**Decision:** moved to `ANGLE_OC` (Sonnet on Max stays the reverse lane). The synthesis already folds
+low-value improvements, so the extra nits cost reading time, not gates. Revert, one line each:
+`AGENT_GATEWAY_MODEL_REVIEW_ANGLE_FRONTEND=claude-sonnet-5[1m] AGENT_GATEWAY_HARNESS_REVIEW_ANGLE_FRONTEND=claude
+AGENT_GATEWAY_BACKEND_REVIEW_ANGLE_FRONTEND=max`. Watch item: warden's review outcomes on frontend-heavy
+PRs. Everything routed through `routeFor` is now off Claude except `otel`.
 
 ### dispatch_editorial
 
@@ -507,7 +562,7 @@ gpt-6.1-sol stays verified for chat/Responses only (2026-10-02) — rates/limits
 
 ### JUDGE
 
-*Wave 10 (2026-10-15): review's synthesis and keyless angles moved to CLASSIFY (Haiku 5.5 EU on OpenCode, § Wave 10); only the `frontend` angle and `otel` remain on JUDGE. What follows is the history of the tier as it stood before.*
+*Wave 10 (2026-10-15): review's synthesis and keyless angles moved to CLASSIFY (Haiku 5.5 EU on OpenCode, § Wave 10); only the `frontend` angle and `otel` remained on JUDGE (`frontend` moved in Wave 11; only `otel` is left). What follows is the history of the tier as it stood before.*
 
 JUDGE: judgment-heavy work that stays on Max — review's synthesis/router, the `frontend`
 angle, and otel. The `senior-dev`, `typescript` and `qa` angles moved off JUDGE onto

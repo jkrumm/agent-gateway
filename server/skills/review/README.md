@@ -162,10 +162,10 @@ Each agent loads project context via `--setting-sources user,project`:
 ## Cost Profile
 
 Angle sessions resolve their route per angle (`routeForReviewAngle`): `senior-dev`,
-`typescript` and `qa` default to the cheap OpenCode route, and so do the synthesis and the angles
+`typescript`, `qa` and `frontend` default to the cheap OpenCode route, and so do the synthesis and the angles
 without their own route key (architect, backend, content angles) via the `review` route (Haiku 5.5 EU
-on OpenCode over IU per-token, Max as the reverse fallback); `frontend` stays on the Sonnet
-**Max** route, falling back to IU per-token only when a Max session dies with a quota error. The router runs as one single-shot call
+on OpenCode over IU per-token, Max as the reverse fallback); the Max reverse lane is Sonnet,
+used only when the primary attempt fails. The router runs as one single-shot call
 (the cheap triage model over the IU OpenAI transport), and the adversary critic uses the **IU OpenAI transport**
 (the `adversary` route's model) directly — IU per-token, zero Max, and a different model family
 so its bias profile is uncorrelated with the Claude reviewers. The live

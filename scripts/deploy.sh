@@ -81,7 +81,7 @@ fi
 if ! opencode_server_ok; then
   echo "deploy of $head ABORTED: the opencode server is not ok — the agent-gateway server was not touched, not rolling back"
   echo "  status: ${OPENCODE_STATUS_OUT:-unreachable}"
-  echo "  fix: make install-opencode-agent (refuses while jobs run) · brew list --pinned (opencode must be pinned at the version in server/mcp/opencode-server.ts) · tail ~/Library/Logs/agent-gateway-opencode.err"
+  echo "  fix: make install-opencode-agent (refuses while jobs run) · the pinned build under ~/.local/share/agent-gateway/opencode-bin/<version> (OPENCODE_PINNED_VERSION in server/mcp/opencode-server.ts) · tail ~/Library/Logs/agent-gateway-opencode.err"
   exit 1
 fi
 if make --no-print-directory reload; then
@@ -91,7 +91,7 @@ if make --no-print-directory reload; then
   fi
   if opencode_only_failure; then
     echo "deploy of $head: reloaded, but verify fails ONLY on the opencode server — not a build regression, NOT rolling back"
-    echo "  fix: make install-opencode-agent · brew list --pinned · tail ~/Library/Logs/agent-gateway-opencode.err, then make verify"
+    echo "  fix: make install-opencode-agent · the pinned build (docs/opencode-v2.md) · tail ~/Library/Logs/agent-gateway-opencode.err, then make verify"
     exit 1
   fi
 fi

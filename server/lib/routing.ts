@@ -224,11 +224,12 @@ const AGENT_OC_ESCALATION: ToolRoute = {
   harness: "opencode",
   variant: "max",
 };
-// ANGLE_OC: the review angles whose 2026-10-05 A/B cleared the adoption rule (senior-dev,
-//   typescript, qa) — the same cheap OpenCode shape as AGENT_OC, with the review route's
-//   Sonnet on Max as the reverse lane. `frontend` stays on JUDGE (recall tied but its false
-//   positive rate did not clear the rule). Evidence: docs/routing-and-quota.md
-//   § Review-angle A/B (Wave 4).
+// ANGLE_OC: the review angles whose A/B cleared the adoption rule (senior-dev, typescript, qa on
+//   2026-10-05; frontend on 2026-10-15, Wave 11 — on three real weatherorb commits Haiku 5.5 EU
+//   named the defects the repo's own fix commit corrected at least as often as Sonnet on Max, in
+//   ~18 s vs ~160 s) — the same cheap OpenCode shape as AGENT_OC, with the review route's Sonnet on
+//   Max as the reverse lane. Evidence: docs/routing-and-quota.md § Review-angle A/B (Wave 4) and
+//   § Wave 11 frontend angle.
 const ANGLE_OC: ToolRoute = {
   model: HAIKU_5_5,
   backend: "iu",
@@ -236,9 +237,9 @@ const ANGLE_OC: ToolRoute = {
   transport: "session",
   harness: "opencode",
 };
-// JUDGE: work that stays on Claude/Max — the `frontend` review angle (its A/B has not cleared the
-//   adoption rule; Wave 11 re-measures it on real findings) and `otel` (needs a per-session MCP
-//   server, which OpenCode v2 has only at server scope — docs/routing-and-quota.md § Wave 10).
+// JUDGE: work that stays on Claude/Max — `otel` (needs a per-session MCP server, which OpenCode v2
+//   has only at server scope — docs/routing-and-quota.md § Wave 10). The `frontend` review angle
+//   left it in Wave 11 (ANGLE_OC).
 //   review's synthesis and keyless angles (architect, backend, content angles) moved to CLASSIFY in
 //   Wave 10: on two real ranges Haiku 5.5 EU found the same top blocking findings as Sonnet in
 //   ~0.5-0.65x the wall time (298 s vs 585 s, 473 s vs 705 s); flash did not (1 blocking, 521 s).
@@ -291,7 +292,7 @@ const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
   review: CLASSIFY,
   review_angle_senior_dev: ANGLE_OC,
   review_angle_typescript: ANGLE_OC,
-  review_angle_frontend: JUDGE,
+  review_angle_frontend: ANGLE_OC,
   review_angle_qa: ANGLE_OC,
   // review_ocr: an external CLI that only consumes `.model` — not a `runSession` worker, so no
   // Max lane. `--effort low` (ocr.ts) picked by a bake-off, see docs/routing-and-quota.md.
@@ -627,7 +628,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
     routes[tool] = {
       model,
       backend,
-      fallback: effectiveFallback(tool, base, model, backend),
+      fallback: usableFallback(base.fallback, model, backend),
       transport: base.transport,
       thinkingTokens,
       harness,
@@ -635,42 +636,6 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
     };
   }
   return { routes, overrides };
-}
-
-/** Is this a per-angle review key (`review_angle_*`)? The one route shape whose base
- *  default is a `max` primary (Sonnet) with an `iu` fallback (the frontend angle, JUDGE)
- *  and whose override can therefore strand it on `iu` with no reverse lane — see
- *  `effectiveFallback`. */
-function isPerAngleReviewRoute(tool: RoutedTool): boolean {
-  return tool.startsWith("review_angle_");
-}
-
-/** The fallback for a route after overrides. Normally the route's own declared fallback,
- *  kept only when it still moves (`usableFallback`). A still-`JUDGE` per-angle review route
- *  (frontend) is the one shape that needs more: its default is a `max` primary (Sonnet) with
- *  an `iu` fallback, and an override onto a non-Claude id forces it onto `iu` — at which
- *  point the declared fallback would point at the primary's own backend and is dropped,
- *  leaving the OpenCode angle with NO reverse lane. Mirror the default there: fall back to
- *  `max` on the angle's own default model (the Claude id it was declared with), which a
- *  fallback attempt always runs through `claude -p` (`resolveHarness`). An ANGLE_OC angle
- *  already declares that same `max`/Sonnet fallback, so it needs no special case. */
-function effectiveFallback(
-  tool: RoutedTool,
-  base: ToolRoute,
-  model: string,
-  backend: Backend,
-): RouteFallback | null {
-  const declared = usableFallback(base.fallback, model, backend);
-  if (declared) return declared;
-  if (
-    isPerAngleReviewRoute(tool) &&
-    backend === "iu" &&
-    base.fallback?.backend === "iu" &&
-    servesOnMax(base.model)
-  ) {
-    return { backend: "max", model: base.model };
-  }
-  return null;
 }
 
 /** A fallback is only kept when it actually moves somewhere Max can serve: not the

@@ -108,17 +108,16 @@ describe("buildRoutingTable defaults", () => {
     expect(validateModel(route.model)).toMatchObject({ ok: true, model: { id: DEEPSEEK_PRO } });
   });
 
-  test("review_angle_frontend, otel: Sonnet on max with the quota fallback to iu (the JUDGE tier — deliberately NOT on glm, see routing.ts)", () => {
-    for (const tool of ["review_angle_frontend", "otel"] as const) {
-      expect(routes[tool], tool).toEqual({
-        model: SONNET,
-        backend: "max",
-        fallback: { backend: "iu" },
-        transport: "session",
-        harness: "claude",
-        variant: undefined,
-      });
-    }
+  test("otel: Sonnet on max with the quota fallback to iu (the JUDGE tier — deliberately NOT on glm, see routing.ts); claudeSafeRoute() is the same seat", () => {
+    expect(routes.otel).toEqual({
+      model: SONNET,
+      backend: "max",
+      fallback: { backend: "iu" },
+      transport: "session",
+      harness: "claude",
+      variant: undefined,
+    });
+    expect(claudeSafeRoute()).toEqual(routes.otel);
   });
 
   test("review (synthesis + keyless angles): the CLASSIFY shape since Wave 10 — Haiku 5.5 EU via opencode on iu with the Sonnet-on-max fallback, no thinking budget", () => {
@@ -134,10 +133,10 @@ describe("buildRoutingTable defaults", () => {
     expect(routes.review).toEqual(routes.check);
   });
 
-  test("review.ts falls back to routeFor('review_angle_frontend') when the live checkout carries its own opencode config — that route must run on the claude harness", () => {
+  test("review.ts falls back to claudeSafeRoute() when the live checkout carries its own opencode config — that route must run on the claude harness", () => {
     // runReview swaps an angle onto this route when `liveOpencodeConfig` is set (an opencode
     // plugin there would execute code regardless of permissions), so it must never be opencode.
-    expect(routeFor("review_angle_frontend").harness).toBe("claude");
+    expect(claudeSafeRoute().harness).toBe("claude");
     expect(routeFor("review").harness).toBe("opencode");
   });
 
@@ -323,25 +322,32 @@ describe("buildRoutingTable env overrides", () => {
 
   test("a gateway model override on a max route forces iu and keeps a fixed-model fallback only", () => {
     const { routes, overrides } = buildRoutingTable({
-      AGENT_GATEWAY_MODEL_REVIEW_ANGLE_FRONTEND: DEEPSEEK_FLASH,
+      AGENT_GATEWAY_MODEL_OTEL: DEEPSEEK_FLASH,
     });
-    expect(routes.review_angle_frontend.backend).toBe("iu");
+    expect(routes.otel.backend).toBe("iu");
     // The backend flip is the override's most consequential side effect (metered IU instead
     // of Max), so /api/routing lists it next to the model override that caused it.
     expect(overrides).toEqual([
-      { tool: "review_angle_frontend", field: "model", value: DEEPSEEK_FLASH },
+      { tool: "otel", field: "model", value: DEEPSEEK_FLASH },
       {
-        tool: "review_angle_frontend",
+        tool: "otel",
         field: "backend",
         value: "iu",
         implied: expect.stringContaining(`forced by the ${DEEPSEEK_FLASH} model override`),
       },
     ]);
-    // a per-angle review route keeps a reverse lane to its own Claude default (effectiveFallback)
+    // otel declares no fixed-model fallback, so nothing Max can serve is left to fall back to
+    expect(routes.otel.fallback).toBeNull();
+  });
+
+  test("a gateway model override on an iu angle route stays on iu and keeps the Sonnet-on-max reverse lane", () => {
+    const { routes, overrides } = buildRoutingTable({
+      AGENT_GATEWAY_MODEL_REVIEW_ANGLE_FRONTEND: DEEPSEEK_FLASH,
+    });
+    expect(routes.review_angle_frontend.backend).toBe("iu");
     expect(routes.review_angle_frontend.fallback).toEqual({ backend: "max", model: SONNET });
-    const otel = buildRoutingTable({ AGENT_GATEWAY_MODEL_OTEL: DEEPSEEK_FLASH }).routes.otel;
-    expect(otel.backend).toBe("iu");
-    expect(otel.fallback).toBeNull();
+    // iu is already the primary: no backend flip to report
+    expect(overrides.some((o) => o.field === "backend")).toBe(false);
   });
 
   test("whitespace-only overrides are ignored", () => {
@@ -704,12 +710,13 @@ describe("per-angle review routes", () => {
     qa: "review_angle_qa",
   } as const;
 
-  test("senior-dev, typescript and qa default to the cheap OpenCode route; frontend stays on the JUDGE route", () => {
+  test("all four angles default to the cheap OpenCode route (frontend joined in Wave 11); otel stays on the JUDGE route", () => {
     const { routes, overrides } = buildRoutingTable({});
     expect(overrides).toEqual([]);
     for (const key of [
       "review_angle_senior_dev",
       "review_angle_typescript",
+      "review_angle_frontend",
       "review_angle_qa",
     ] as const) {
       expect(routes[key], key).toEqual({
@@ -721,8 +728,9 @@ describe("per-angle review routes", () => {
         variant: undefined,
       });
     }
-    expect(routes.review_angle_frontend).toEqual(routes.otel);
-    expect(routes.review_angle_frontend.harness).toBe("claude");
+    expect(routes.review_angle_frontend).toEqual(routes.review_angle_senior_dev);
+    expect(routes.otel.harness).toBe("claude");
+    expect(routes.otel).toEqual(claudeSafeRoute());
   });
 
   test("angle ids map to their key; angles without a key (and unknown ids) fall back to review", () => {
@@ -749,12 +757,12 @@ describe("per-angle review routes", () => {
     expect(routes.review_angle_typescript).toEqual(defaults.review_angle_typescript);
   });
 
-  test("an opencode-harness override on a claude angle (model + harness paired) validates and applies to that angle only", () => {
+  test("an opencode-harness override on a claude route (model + harness paired) validates and applies to that route only", () => {
     const { routes, overrides } = buildRoutingTable({
-      AGENT_GATEWAY_MODEL_REVIEW_ANGLE_FRONTEND: DEEPSEEK_V41_FLASH,
-      AGENT_GATEWAY_HARNESS_REVIEW_ANGLE_FRONTEND: "opencode",
+      AGENT_GATEWAY_MODEL_OTEL: DEEPSEEK_V41_FLASH,
+      AGENT_GATEWAY_HARNESS_OTEL: "opencode",
     });
-    expect(routes.review_angle_frontend).toMatchObject({
+    expect(routes.otel).toMatchObject({
       model: DEEPSEEK_V41_FLASH,
       backend: "iu",
       transport: "session",
@@ -764,31 +772,50 @@ describe("per-angle review routes", () => {
     const defaults = buildRoutingTable({}).routes;
     expect(routes.review).toEqual(defaults.review);
     expect(routes.review_angle_senior_dev).toEqual(defaults.review_angle_senior_dev);
+    expect(routes.review_angle_frontend).toEqual(defaults.review_angle_frontend);
   });
 
-  test("an opencode-harness angle override keeps an iu->max fallback to the angle's default Claude model", () => {
-    const { routes } = buildRoutingTable({
+  test("a model + harness override on an opencode angle swaps the model, stays on opencode and keeps the iu->max Sonnet fallback", () => {
+    const { routes, overrides } = buildRoutingTable({
       AGENT_GATEWAY_MODEL_REVIEW_ANGLE_FRONTEND: DEEPSEEK_V41_FLASH,
       AGENT_GATEWAY_HARNESS_REVIEW_ANGLE_FRONTEND: "opencode",
     });
-    expect(routes.review_angle_frontend.fallback).toEqual({ backend: "max", model: SONNET });
-    // The override is scoped: the other JUDGE route (otel) keeps its shape.
+    expect(routes.review_angle_frontend).toMatchObject({
+      model: DEEPSEEK_V41_FLASH,
+      backend: "iu",
+      harness: "opencode",
+      fallback: { backend: "max", model: SONNET },
+    });
+    expect(overrides.some((o) => o.refused)).toBe(false);
+    // The override is scoped: the JUDGE route (otel) keeps its shape.
     expect(routes.otel.fallback).toEqual({ backend: "iu" });
   });
 
-  test("the opencode-only model without its harness override is refused back to the angle's Claude default", () => {
+  test("an opencode-only model on an opencode angle needs no harness override", () => {
     const { routes, overrides } = buildRoutingTable({
       AGENT_GATEWAY_MODEL_REVIEW_ANGLE_FRONTEND: DEEPSEEK_V41_FLASH,
     });
-    expect(routes.review_angle_frontend).toEqual(
-      buildRoutingTable({}).routes.review_angle_frontend,
-    );
+    expect(routes.review_angle_frontend).toMatchObject({
+      model: DEEPSEEK_V41_FLASH,
+      backend: "iu",
+      harness: "opencode",
+    });
+    expect(overrides).toEqual([
+      { tool: "review_angle_frontend", field: "model", value: DEEPSEEK_V41_FLASH },
+    ]);
+  });
+
+  test("the opencode-only model without its harness override is refused back to a claude route's default", () => {
+    const { routes, overrides } = buildRoutingTable({
+      AGENT_GATEWAY_MODEL_OTEL: DEEPSEEK_V41_FLASH,
+    });
+    expect(routes.otel).toEqual(buildRoutingTable({}).routes.otel);
     expect(overrides).toEqual([
       {
-        tool: "review_angle_frontend",
+        tool: "otel",
         field: "model",
         value: DEEPSEEK_V41_FLASH,
-        refused: expect.stringContaining("AGENT_GATEWAY_HARNESS_REVIEW_ANGLE_FRONTEND=claude"),
+        refused: expect.stringContaining("AGENT_GATEWAY_HARNESS_OTEL=claude"),
       },
     ]);
   });
@@ -817,8 +844,8 @@ describe("per-angle review routes", () => {
     const noVariants = buildRoutingTable({ AGENT_GATEWAY_VARIANT_REVIEW_ANGLE_QA: "none" });
     expect(noVariants.routes.review_angle_qa.variant).toBeUndefined();
     expect(noVariants.overrides[0]?.refused).toContain("exposes no");
-    const refused = buildRoutingTable({ AGENT_GATEWAY_VARIANT_REVIEW_ANGLE_FRONTEND: "high" });
-    expect(refused.routes.review_angle_frontend.variant).toBeUndefined();
+    const refused = buildRoutingTable({ AGENT_GATEWAY_VARIANT_OTEL: "high" });
+    expect(refused.routes.otel.variant).toBeUndefined();
     expect(refused.overrides[0]?.refused).toContain("opencode-only");
   });
 });
@@ -831,7 +858,7 @@ describe("withModel", () => {
   });
 
   test("a Claude override on a max route keeps max and the iu fallback", () => {
-    const r = withModel(routeFor("review_angle_frontend"), "claude-sonnet-5");
+    const r = withModel(routeFor("otel"), "claude-sonnet-5");
     expect(r).toEqual({
       model: "claude-sonnet-5",
       backend: "max",
@@ -890,7 +917,7 @@ describe("withModel", () => {
   });
 
   test("withModel refuses (returns the route unchanged) an unknown, unverified or harness-incompatible id", () => {
-    const review = routeFor("review_angle_frontend");
+    const review = routeFor("otel");
     const dispatch = routeFor("dispatch");
     expect(withModel(review, "not-a-model")).toBe(review);
     expect(withModel(review, "gpt-6-sol")).toBe(review); // registered, unverified
@@ -900,7 +927,7 @@ describe("withModel", () => {
   });
 
   test("a gateway override on a max route is forced onto iu with no Max-servable fallback", () => {
-    const r = withModel(routeFor("review_angle_frontend"), DEEPSEEK_FLASH);
+    const r = withModel(routeFor("otel"), DEEPSEEK_FLASH);
     expect(r.backend).toBe("iu");
     expect(r.fallback).toBeNull();
   });
@@ -950,9 +977,7 @@ describe("routeFor / describeRoute", () => {
     expect(describeRoute(routeFor("check"))).toBe(
       `${HAIKU_5_5} on iu via opencode (fallback ${SONNET} on max)`,
     );
-    expect(describeRoute(routeFor("review_angle_frontend"))).toBe(
-      `${SONNET} on max (fallback ${SONNET} on iu)`,
-    );
+    expect(describeRoute(routeFor("otel"))).toBe(`${SONNET} on max (fallback ${SONNET} on iu)`);
     expect(describeRoute(routeFor("adversary"))).toBe("gpt-5.6-terra on iu");
   });
 });

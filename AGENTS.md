@@ -409,9 +409,9 @@ MCP tool descriptions print the same route under `MODEL:`, and **`GET
 override.
 
 Per-angle review routes `review_angle_{senior_dev,typescript,frontend,qa}`:
-`senior-dev`, `typescript` and `qa` default to the OpenCode route (Haiku 5.5 since the
-Wave-5 bench, previously the Wave-4 flash A/B), `frontend` and every angle without its own key keep the
-`review` route. Override via
+`senior-dev`, `typescript`, `qa` and `frontend` default to the OpenCode route (Haiku 5.5 since the
+Wave-5 bench, previously the Wave-4 flash A/B; `frontend` joined them in Wave 11 on a real-findings
+A/B), and every angle without its own key keeps the `review` route. Override via
 `AGENT_GATEWAY_MODEL_`/`AGENT_GATEWAY_HARNESS_`/`AGENT_GATEWAY_VARIANT_REVIEW_ANGLE_<NAME>` (an
 opencode angle needs both the MODEL and HARNESS overrides; pinning one back to
 `review` needs the model override plus `AGENT_GATEWAY_BACKEND_=max`) — see
@@ -440,8 +440,8 @@ dispatch_editorial) controls depth with `variant` instead, and Haiku 5.5 has non
 No route runs on GLM (retired 2026-09-23). `session-runner.ts`'s `buildWorkerEnv` exports `MAX_THINKING_TOKENS`
 only for non-Claude models — a Claude route's `thinkingTokens` (currently none
 set) would be a no-op there anyway, since thinking on Claude is controlled a
-different way. JUDGE (otel, the frontend angle) carries no
-`thinkingTokens` — they stay on Claude.
+different way. JUDGE (`otel`, the only route left on Claude) carries no
+`thinkingTokens` — it stays on Claude.
 
 **`dispatch`/`dispatch_implement` run on a second harness, OpenCode, not
 `claude -p`** (2026-09-24, `harness: "opencode"` on `ToolRoute` — AGENT_OC/
