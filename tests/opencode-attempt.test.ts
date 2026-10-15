@@ -601,6 +601,27 @@ describe("runOpencodeAttempt — transport failures and secret redaction", () =>
     expect(lastRow()).toMatchObject({ outcome: "error", reason: "opencode_session_error" });
   });
 
+  test("fails closed when the server lacks the agent: no session, no prompt, a retryable transport-class error", async () => {
+    const { client, run } = setup(finalText('{"answer":1}'));
+    client.agents = ["agw-readonly", "agw-implement"];
+    const result = await run({ readOnly: true, sensitive: true });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("lacks agent agw-readonly-sensitive");
+    expect(result.error).toContain("make install-opencode-agent");
+    expect(isRetryableSessionError(result.error ?? "")).toBe(true);
+    expect(classifyBreakerOutcome(result)).toBe("transport");
+    expect(client.created).toEqual([]);
+    expect(client.prompts).toEqual([]);
+    expect(lastRow()).toMatchObject({ outcome: "error", reason: "opencode_session_error" });
+  });
+
+  test("a server that lists the requested agent proceeds (extra agents are fine)", async () => {
+    const { client, run } = setup(finalText('{"answer":1}'));
+    client.agents = ["build", "agw-implement"];
+    expect((await run()).ok).toBe(true);
+    expect(client.created.map((c) => c.agent)).toEqual(["agw-implement"]);
+  });
+
   test("a failing session create is the same transport-class failure", async () => {
     const { client, run } = setup();
     client.createError = new Error("opencode server unreachable: ECONNREFUSED");

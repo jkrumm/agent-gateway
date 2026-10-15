@@ -10,10 +10,14 @@
 # FORCE=1 is passed through to every reload (running jobs otherwise make reload refuse).
 # Before the reload it also makes sure the shared OpenCode server's LaunchAgent is loaded
 # (verify fails without it) — installing it only when ABSENT, never restarting a loaded one: a
-# restart would kill the episodes attached to it. A failed install, or a server that is not ok
-# afterwards (down, wrong password, not the pinned opencode), aborts before the reload with
-# nothing touched and no rollback. Likewise a post-reload verify that fails ONLY on the opencode
-# server is reported as an opencode problem and does not roll back master: the build is not at fault.
+# restart would kill the episodes attached to it. The one exception is a STALE CONFIG (the status
+# says `staleConfig`: up, password right, pinned build, but a configured model or agent is not
+# listed — it booted before a registry/agent change): then it runs `make install-opencode-agent`
+# once (no FORCE, so it refuses while jobs run) and re-checks. A failed install, or a server that
+# is not ok afterwards (down, wrong password, not the pinned opencode, install refused), aborts
+# before the reload with nothing touched and no rollback. Likewise a post-reload verify that fails
+# ONLY on the opencode server is reported as an opencode problem and does not roll back master:
+# the build is not at fault.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -56,6 +60,17 @@ opencode_server_ok() {
   return 1
 }
 
+# opencode_server_ok, plus the one self-healing case: a stale config is fixed by restarting the
+# server. Never FORCE — install-opencode-agent refuses while jobs run and the deploy then aborts
+# like any other not-ok server (warden retries deploys). OPENCODE_STATUS_OUT keeps the last status.
+opencode_server_ready() {
+  opencode_server_ok && return 0
+  jq -e '.staleConfig == true' <<<"${OPENCODE_STATUS_OUT:-}" >/dev/null 2>&1 || return 1
+  echo "the opencode server runs a stale config (${OPENCODE_STATUS_OUT}) — reinstalling it to load the current one"
+  make --no-print-directory install-opencode-agent || return 1
+  opencode_server_ok
+}
+
 # True when the NEW build's job health shows a healthy queue and only the opencode server not ok.
 opencode_only_failure() {
   local body
@@ -78,7 +93,7 @@ if ! ensure_opencode_agent; then
   echo "deploy of $head FAILED: the opencode LaunchAgent could not be installed — the agent-gateway server was not touched, not rolling back"
   exit 1
 fi
-if ! opencode_server_ok; then
+if ! opencode_server_ready; then
   echo "deploy of $head ABORTED: the opencode server is not ok — the agent-gateway server was not touched, not rolling back"
   echo "  status: ${OPENCODE_STATUS_OUT:-unreachable}"
   echo "  fix: make install-opencode-agent (refuses while jobs run) · brew list --pinned (opencode must be pinned at the version in server/mcp/opencode-server.ts) · tail ~/Library/Logs/agent-gateway-opencode.err"

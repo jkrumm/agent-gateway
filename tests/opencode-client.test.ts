@@ -264,6 +264,15 @@ describe("session, active, interrupt", () => {
     expect(path(seen[0] as Seen)).toBe("/api/session/active");
   });
 
+  test("listAgents() lists the configured agent ids from GET /api/agent", async () => {
+    const { seen, client } = stub(() =>
+      ok({ data: [{ id: "build", name: "build", mode: "primary" }, { id: "agw-readonly" }] }),
+    );
+    expect(await client.listAgents()).toEqual(["build", "agw-readonly"]);
+    expect(seen[0]?.method).toBe("GET");
+    expect(path(seen[0] as Seen)).toBe("/api/agent");
+  });
+
   test("interrupt() goes through the shared server helper on the same fetch and never throws", async () => {
     const { seen, client } = stub(() => ok({ interrupted: true }));
     expect(await client.interrupt("ses_1")).toEqual({ ok: true, interrupted: true });
@@ -319,6 +328,7 @@ describe("failures", () => {
       () => client.allMessages("ses_1"),
       () => client.session("ses_1"),
       () => client.active(),
+      () => client.listAgents(),
     ];
     for (const call of calls) {
       const error = await call().then(

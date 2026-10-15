@@ -16,6 +16,7 @@ import {
   getOpencodeServerStatus,
   interruptOpencodeSession,
   normalizeOpencodeVersion,
+  OPENCODE_AGENT_IDS,
   OPENCODE_AGENT_IMPLEMENT,
   OPENCODE_AGENT_READONLY,
   OPENCODE_AGENT_READONLY_SENSITIVE,
@@ -696,17 +697,79 @@ describe("getOpencodeServerStatus", () => {
     expect(status.error).toContain("make install-opencode-agent");
   });
 
+  const allModels = () =>
+    listModels()
+      .filter((m) => m.verified !== null && m.harnesses.includes("opencode"))
+      .map((m) => ({ providerID: opencodeProviderForWire(m.wire), id: m.id }));
+
+  /** A server listing every registry model and the given agent ids. */
+  function fakeWithAgents(agentIds: string[]) {
+    fake((req) => {
+      const path = new URL(req.url).pathname;
+      if (path === "/api/info") return Response.json({ version: OPENCODE_PINNED_VERSION });
+      if (path === "/api/model") return Response.json({ data: allModels() });
+      if (path === "/api/agent") {
+        return Response.json({ data: agentIds.map((id) => ({ id, name: id, mode: "primary" })) });
+      }
+      return Response.json([]);
+    });
+  }
+
   test("a server listing every registry model is ok", async () => {
     fake((req) => {
       const path = new URL(req.url).pathname;
       if (path === "/api/info") return Response.json({ version: OPENCODE_PINNED_VERSION });
-      if (path === "/api/model") {
-        return Response.json({
-          data: listModels()
-            .filter((m) => m.verified !== null && m.harnesses.includes("opencode"))
-            .map((m) => ({ providerID: opencodeProviderForWire(m.wire), id: m.id })),
-        });
-      }
+      if (path === "/api/model") return Response.json({ data: allModels() });
+      return Response.json([]);
+    });
+    expect((await getOpencodeServerStatus()).ok).toBe(true);
+  });
+
+  test("a server listing every model and all three agents is ok, with no staleConfig flag", async () => {
+    fakeWithAgents([...OPENCODE_AGENT_IDS, "build"]);
+    const status = await getOpencodeServerStatus();
+    expect(status.ok).toBe(true);
+    expect(status).not.toHaveProperty("staleConfig");
+  });
+
+  test("a server missing a configured agent is NOT ok: staleConfig, the agent named, the fix command", async () => {
+    fakeWithAgents(["build", OPENCODE_AGENT_READONLY, OPENCODE_AGENT_IMPLEMENT]);
+    const status = await getOpencodeServerStatus();
+    expect(status).toMatchObject({ ok: false, up: true, versionOk: true, staleConfig: true });
+    expect(status.error).toContain(`agent ${OPENCODE_AGENT_READONLY_SENSITIVE}`);
+    expect(status.error).not.toContain(`agent ${OPENCODE_AGENT_IMPLEMENT}`);
+    expect(status.error).toContain("make install-opencode-agent");
+  });
+
+  test("missing models and missing agents are reported together, both under staleConfig", async () => {
+    fake((req) => {
+      const path = new URL(req.url).pathname;
+      if (path === "/api/info") return Response.json({ version: OPENCODE_PINNED_VERSION });
+      if (path === "/api/model") return Response.json({ data: [] });
+      if (path === "/api/agent") return Response.json({ data: [] });
+      return Response.json([]);
+    });
+    const status = await getOpencodeServerStatus();
+    expect(status.staleConfig).toBe(true);
+    for (const id of OPENCODE_AGENT_IDS) expect(status.error).toContain(`agent ${id}`);
+    expect(status.error).toContain("iu-anthropic/claude-haiku-5-5-eu");
+  });
+
+  test("a stale model list alone sets staleConfig too", async () => {
+    fake((req) => {
+      const path = new URL(req.url).pathname;
+      if (path === "/api/info") return Response.json({ version: OPENCODE_PINNED_VERSION });
+      if (path === "/api/model") return Response.json({ data: [] });
+      return Response.json([]);
+    });
+    expect((await getOpencodeServerStatus()).staleConfig).toBe(true);
+  });
+
+  test("an unreadable agent list proves nothing: no drift reported", async () => {
+    fake((req) => {
+      const path = new URL(req.url).pathname;
+      if (path === "/api/info") return Response.json({ version: OPENCODE_PINNED_VERSION });
+      if (path === "/api/agent") return new Response("boom", { status: 500 });
       return Response.json([]);
     });
     expect((await getOpencodeServerStatus()).ok).toBe(true);
@@ -723,6 +786,7 @@ describe("getOpencodeServerStatus", () => {
     expect(status.up).toBe(true);
     expect(status.ok).toBe(false);
     expect(status.versionOk).toBe(false);
+    expect(status).not.toHaveProperty("staleConfig");
     expect(status.version).toBe("2.0.30");
     expect(status.error).toContain("2.0.30");
     expect(status.error).toContain(OPENCODE_PINNED_VERSION);
@@ -756,6 +820,7 @@ describe("getOpencodeServerStatus", () => {
       versionOk: true,
     });
     expect(status.error).toContain("password rejected");
+    expect(status).not.toHaveProperty("staleConfig");
   });
 
   test("a non-200 from /api/session/active other than 401 is not ok either", async () => {
@@ -797,7 +862,7 @@ describe("getOpencodeServerStatus", () => {
     expect(status.ok).toBe(false);
   });
 
-  test("the three requests (info, active, model list) are issued concurrently", async () => {
+  test("the four requests (info, active, model list, agent list) are issued concurrently", async () => {
     let inFlight = 0;
     let maxInFlight = 0;
     const slow = (async (url: string) => {
@@ -810,7 +875,7 @@ describe("getOpencodeServerStatus", () => {
         : Response.json([]);
     }) as unknown as typeof fetch;
     expect((await getOpencodeServerStatus(slow)).ok).toBe(true);
-    expect(maxInFlight).toBe(3);
+    expect(maxInFlight).toBe(4);
   });
 
   test("a closed port is not up, and the error is connection-class so the retry ladder sees it", async () => {

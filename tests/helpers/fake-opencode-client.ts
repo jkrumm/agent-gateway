@@ -12,7 +12,12 @@ import type {
   OpencodeSessionInfo,
   OpencodeSessionSpec,
 } from "../../server/mcp/opencode-client.ts";
-import type { OpencodeInterruptResult } from "../../server/mcp/opencode-server.ts";
+import {
+  OPENCODE_AGENT_IMPLEMENT,
+  OPENCODE_AGENT_READONLY,
+  OPENCODE_AGENT_READONLY_SENSITIVE,
+  type OpencodeInterruptResult,
+} from "../../server/mcp/opencode-server.ts";
 
 export type Outcome = "succeeded" | "failed" | "interrupted";
 
@@ -269,6 +274,17 @@ export class FakeOpencodeClient implements OpencodeClient {
     session.releaseHang?.();
     session.releaseHang = undefined;
     return { ok: true, interrupted: true };
+  }
+
+  /** Agent ids the fake server "was booted with"; a test sets a subset to model a stale config. */
+  agents: string[] = [
+    OPENCODE_AGENT_READONLY,
+    OPENCODE_AGENT_READONLY_SENSITIVE,
+    OPENCODE_AGENT_IMPLEMENT,
+  ];
+
+  async listAgents(): Promise<string[]> {
+    return [...this.agents];
   }
 
   async active(): Promise<string[]> {

@@ -788,14 +788,24 @@ export async function runOpencodeAttempt<T>(
         "opencode session re-attached after a restart",
       );
     } else {
+      const agent = readOnly
+        ? sensitive
+          ? OPENCODE_AGENT_READONLY_SENSITIVE
+          : OPENCODE_AGENT_READONLY
+        : OPENCODE_AGENT_IMPLEMENT;
+      // The server accepts a session for an agent it does not have (measured 2.0.25), running it
+      // under permissions nobody chose — so fail closed. Worded as a transport-class failure like
+      // the other server-unavailable refusals: the retry ladder and the caller retry it, and
+      // `make install-opencode-agent` (or the next deploy) loads the current config.
+      if (!(await client.listAgents()).includes(agent)) {
+        throw new Error(
+          `opencode server lacks agent ${agent} (transport-class, fetch failed): its config is stale — make install-opencode-agent`,
+        );
+      }
       sessionId = await client.createSession({
         directory: cwd,
         model: { providerID: opencodeProviderForWire(registryModel.wire), id: model, variant },
-        agent: readOnly
-          ? sensitive
-            ? OPENCODE_AGENT_READONLY_SENSITIVE
-            : OPENCODE_AGENT_READONLY
-          : OPENCODE_AGENT_IMPLEMENT,
+        agent,
         title: `agw ${tool ?? "episode"}`,
         metadata: { agw: { jobId, tool } },
       });

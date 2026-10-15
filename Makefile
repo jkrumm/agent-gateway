@@ -196,7 +196,8 @@ uninstall-agent:
 # away before bootstrapping, no `|| true` on `bootstrap`, and fail loudly if the port never
 # answers. Restarting the server kills every episode attached to it, hence the same running-jobs
 # guard as install-agent (FORCE=1 skips it; a SIGTERM exits the server in ~50 ms, no drain).
-# `scripts/deploy.sh` calls this only when the agent is not loaded at all.
+# `scripts/deploy.sh` calls this when the agent is not loaded at all, or when its status says
+# `staleConfig` (never with FORCE).
 install-opencode-agent:
 	@if [ -z "$(FORCE)" ]; then \
 	  n=$$(curl -sf --max-time 3 http://127.0.0.1:7705/api/jobs/health 2>/dev/null | jq -r '.running // 0' 2>/dev/null || echo 0); \

@@ -16,6 +16,7 @@
 
 import { z } from "zod";
 import {
+  AgentListSchema,
   basicAuthHeader,
   interruptOpencodeSession,
   opencodeServerUrl,
@@ -95,7 +96,7 @@ const ActiveSchema = z.object({ data: z.record(z.string(), z.unknown()) });
 export interface OpencodeSessionSpec {
   directory: string;
   model: { providerID: string; id: string; variant?: string };
-  /** `agw-readonly` | `agw-implement` — the permission profile defined in the server config. */
+  /** `agw-readonly` | `agw-readonly-sensitive` | `agw-implement` — the permission profile defined in the server config. */
   agent: string;
   title?: string;
   metadata?: Record<string, unknown>;
@@ -135,6 +136,9 @@ export interface OpencodeClient {
   interrupt(sessionId: string): Promise<OpencodeInterruptResult>;
   /** Session ids with a running turn. */
   active(): Promise<string[]>;
+  /** Ids of the agents the running server was booted with (`GET /api/agent`). The server does NOT
+   *  refuse an unknown `agent` on session create (measured 2.0.25), so a caller must check. */
+  listAgents(): Promise<string[]>;
 }
 
 // ── Adapter ─────────────────────────────────────────────────────────────────────────────
@@ -295,6 +299,11 @@ export function createOpencodeClient(fetchImpl: typeof fetch = fetch): OpencodeC
     async active() {
       const res = await call("GET", "/api/session/active", { timeoutMs: REQUEST_TIMEOUT_MS });
       return Object.keys((await json(res, "GET /api/session/active", ActiveSchema)).data);
+    },
+
+    async listAgents() {
+      const res = await call("GET", "/api/agent", { timeoutMs: REQUEST_TIMEOUT_MS });
+      return (await json(res, "GET /api/agent", AgentListSchema)).data.map((a) => a.id);
     },
   };
 }

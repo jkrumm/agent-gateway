@@ -57,6 +57,12 @@ export const OPENCODE_AGENT_READONLY = "agw-readonly";
 /** `agw-readonly` minus the host probes: a sensitive investigate episode (secret-bearing repo). */
 export const OPENCODE_AGENT_READONLY_SENSITIVE = "agw-readonly-sensitive";
 export const OPENCODE_AGENT_IMPLEMENT = "agw-implement";
+/** Every agent the server config defines — what a healthy server must list on `GET /api/agent`. */
+export const OPENCODE_AGENT_IDS = [
+  OPENCODE_AGENT_READONLY,
+  OPENCODE_AGENT_READONLY_SENSITIVE,
+  OPENCODE_AGENT_IMPLEMENT,
+] as const;
 
 // ── Permission rules ────────────────────────────────────────────────────────────
 
@@ -471,6 +477,10 @@ export interface OpencodeServerStatus {
   version: string | null;
   pinned: string;
   versionOk: boolean;
+  /** Set only when the ONLY problem is a stale config: the server is up, the password is right and
+   *  the build is pinned, but it does not list a configured model or agent (it booted before a
+   *  registry or agent change). `make install-opencode-agent` fixes exactly this. */
+  staleConfig?: true;
   error?: string;
 }
 
@@ -543,16 +553,18 @@ export async function getOpencodeServerStatus(
     });
 
   // In parallel: one hung server must cost one timeout, not three. The model list rides along
-  // (its failure proves nothing and is judged only after the version/password checks pass).
-  const [infoResult, activeResult, modelsResult] = await Promise.allSettled([
+  // (its failure proves nothing and is judged only after the version/password checks pass), and
+  // so does the agent list.
+  const [infoResult, activeResult, modelsResult, agentsResult] = await Promise.allSettled([
     get("/api/info"),
     get("/api/session/active"),
     get("/api/model"),
+    get("/api/agent"),
   ]);
   for (const result of [infoResult, activeResult]) {
     if (result.status === "fulfilled") continue;
     // The other responses (if any) are not read — release them.
-    for (const other of [infoResult, activeResult, modelsResult]) {
+    for (const other of [infoResult, activeResult, modelsResult, agentsResult]) {
       if (other.status === "fulfilled") await other.value.body?.cancel();
     }
     return {
@@ -604,14 +616,18 @@ export async function getOpencodeServerStatus(
       error: `opencode server version ${version ?? "unknown"} != pinned ${OPENCODE_PINNED_VERSION}`,
     };
   }
-  const missing = await missingServerModels(modelsResult);
+  const missing = [
+    ...(await missingServerModels(modelsResult)),
+    ...(await missingServerAgents(agentsResult)).map((id) => `agent ${id}`),
+  ];
   if (missing.length > 0) {
     return {
       ...found,
       ok: false,
+      staleConfig: true,
       error:
         `opencode server config is stale: it does not list ${missing.join(", ")} ` +
-        "(registry models changed since it started) — `make install-opencode-agent` loads the current config",
+        "(registry models or agents changed since it started) — `make install-opencode-agent` loads the current config",
     };
   }
   return { ...found, ok: true };
@@ -638,6 +654,25 @@ async function missingServerModels(result: PromiseSettledResult<Response>): Prom
   return opencodeServerModels()
     .map((m) => `${opencodeProviderForWire(m.wire)}/${m.id}`)
     .filter((ref) => !listed.has(ref));
+}
+
+export const AgentListSchema = z.object({ data: z.array(z.object({ id: z.string() })) });
+
+/** Configured agents (`OPENCODE_AGENT_IDS`) the running server does not list on `GET /api/agent`:
+ *  same staleness as a missing model, and worse — the server accepts a session for an unknown
+ *  agent without complaint (measured 2.0.25), so its permissions would be unknown. Same fail-soft
+ *  reading as `missingServerModels`; the runner re-checks per session and fails closed. */
+async function missingServerAgents(result: PromiseSettledResult<Response>): Promise<string[]> {
+  if (result.status !== "fulfilled") return [];
+  const res = result.value;
+  if (res.status !== 200) {
+    await res.body?.cancel();
+    return [];
+  }
+  const parsed = AgentListSchema.safeParse(await res.json().catch(() => null));
+  if (!parsed.success) return [];
+  const listed = new Set(parsed.data.data.map((a) => a.id));
+  return OPENCODE_AGENT_IDS.filter((id) => !listed.has(id));
 }
 
 // ── Interrupt ───────────────────────────────────────────────────────────────────

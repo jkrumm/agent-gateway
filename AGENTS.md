@@ -41,7 +41,12 @@ touched; any later reload failure rolls back like a failed verify. Detail below.
 **A second LaunchAgent, `com.jkrumm.agent-gateway-opencode`**, runs the shared OpenCode v2
 server dispatch episodes attach to (§Worker routing). `make deploy` installs it only when it is
 not loaded at all, before the reload (a failed install aborts the deploy untouched) — it never
-restarts a loaded one, since that kills attached episodes. If the server is still not ok afterwards
+restarts a loaded one, since that kills attached episodes, with ONE exception: a **stale config**
+(`staleConfig: true` in the status — up, password right, pinned build, but a registry model or one
+of the three `agw-*` agents missing from `GET /api/model` / `GET /api/agent` because the server
+booted before the change) makes the deploy run `make install-opencode-agent` once, never with
+`FORCE`, and re-check. That target refuses while jobs run, and the deploy then aborts like any
+other not-ok server (no rollback; warden retries deploys). If the server is still not ok afterwards
 (`bun scripts/opencode-server-env.ts --status`) the deploy aborts BEFORE the reload with the fix
 commands and no rollback; a post-reload verify that fails ONLY on `opencodeServer` is reported as an
 opencode-server problem and does not roll master back. `make install-opencode-agent` (same
@@ -437,7 +442,9 @@ zod-typed `fetch` adapter; tests inject an in-memory fake of the same interface)
 `getOpencodeServerStatus()`, `interruptOpencodeSession`. What a session sets (measured on 2.0.25):
 (1) **permissions live in three v2 agents** in the server config (`OPENCODE_CONFIG_CONTENT`, set on
 the server process — it overrides a repo-local `opencode.json`; never the `OPENCODE_CONFIG` file
-path, which a repo file overrides), selected with `agent` on session create: ordered
+path, which a repo file overrides), selected with `agent` on session create (the server does NOT refuse an unknown agent — measured
+2.0.25 — so `runOpencodeAttempt` checks `GET /api/agent` before every fresh session and fails closed
+with a transport-class error naming `make install-opencode-agent`): ordered
 `{action,resource,effect}` rules, LAST match wins, only `allow`/`deny` (an unmatched action
 defaults to `ask`, which blocks an unattended session forever — `agw-readonly` opens with a
 catch-all deny (`agw-readonly-sensitive` is the same profile minus the exact-match `make logs`/
