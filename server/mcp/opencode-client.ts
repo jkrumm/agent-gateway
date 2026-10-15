@@ -27,6 +27,8 @@ import {
 /** Hang guard for the short request/response calls (create, env, prompt, list, get) — plain local
  *  HTTP, not an agent run. `wait` carries no timeout: it is the episode (agent-limits rule). */
 const REQUEST_TIMEOUT_MS = 30_000;
+/** Tries for a timed-out GET (idempotent); other verbs are never repeated. */
+const GET_ATTEMPTS = 3;
 /** v2 caps `limit` at 200 (400 above). */
 const PAGE_LIMIT = 200;
 
@@ -154,18 +156,18 @@ export class OpencodeHttpError extends Error {
 }
 
 export function createOpencodeClient(fetchImpl: typeof fetch = fetch): OpencodeClient {
-  const call = async (
+  const attempt = async (
     method: string,
     path: string,
-    options: { body?: unknown; signal?: AbortSignal; timeoutMs?: number } = {},
+    options: { body?: unknown; signal?: AbortSignal; timeoutMs?: number },
   ): Promise<Response> => {
     const signals = [
       ...(options.signal ? [options.signal] : []),
       ...(options.timeoutMs === undefined ? [] : [AbortSignal.timeout(options.timeoutMs)]),
     ];
-    let res: Response;
+    const startedAt = Date.now();
     try {
-      res = await fetchImpl(`${opencodeServerUrl()}${path}`, {
+      return await fetchImpl(`${opencodeServerUrl()}${path}`, {
         method,
         headers: {
           authorization: basicAuthHeader(readServerPassword()),
@@ -175,11 +177,31 @@ export function createOpencodeClient(fetchImpl: typeof fetch = fetch): OpencodeC
         ...(signals.length > 0 ? { signal: AbortSignal.any(signals) } : {}),
       });
     } catch (err) {
-      // The caller's own abort stays an AbortError; everything else is a transport failure.
+      // The caller's own abort stays an AbortError; everything else is a transport failure. The
+      // route and elapsed time name which call stalled (a bare "ETIMEDOUT" never did).
       if (options.signal?.aborted) throw err;
-      throw new Error(`opencode server unreachable: ${unreachableReason(err)}`);
+      throw new Error(
+        `opencode server unreachable: ${unreachableReason(err)} [${method} ${path.split("?")[0]} after ${Date.now() - startedAt}ms]`,
+      );
     }
-    return res;
+  };
+
+  /** A timed-out GET is idempotent: retry it before surfacing, so one slow server answer (the
+   *  2.0.25 stall) never fails a read that a second try would have served. */
+  const call = async (
+    method: string,
+    path: string,
+    options: { body?: unknown; signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<Response> => {
+    const tries = method === "GET" ? GET_ATTEMPTS : 1;
+    for (let n = 1; ; n++) {
+      try {
+        return await attempt(method, path, options);
+      } catch (err) {
+        const timedOut = err instanceof Error && /ETIMEDOUT/.test(err.message);
+        if (n >= tries || !timedOut) throw err;
+      }
+    }
   };
 
   const json = async <S extends z.ZodType>(

@@ -353,3 +353,36 @@ describe("failures", () => {
     expect((error as Error).message).not.toContain(secret);
   });
 });
+
+describe("timed-out requests", () => {
+  const timeout = () => Object.assign(new Error("timed out"), { name: "TimeoutError" });
+
+  test("a GET that times out is retried and the retry's answer is served", async () => {
+    const { seen, client } = stub((_s, i) => {
+      if (i === 0) throw timeout();
+      return ok({ data: {} });
+    });
+    expect(await client.active()).toEqual([]);
+    expect(seen).toHaveLength(2);
+  });
+
+  test("a GET that keeps timing out names the route and elapsed time, after 3 tries", async () => {
+    const { seen, client } = stub(() => {
+      throw timeout();
+    });
+    const error = await client.active().catch((e: Error) => e);
+    expect(seen).toHaveLength(3);
+    expect((error as Error).message).toMatch(
+      /^opencode server unreachable: ETIMEDOUT .* \[GET \/api\/session\/active after \d+ms\]$/,
+    );
+    expect(isRetryableSessionError((error as Error).message)).toBe(true);
+  });
+
+  test("a POST is never repeated", async () => {
+    const { seen, client } = stub(() => {
+      throw timeout();
+    });
+    await client.prompt("ses_1", { text: "x" }).catch(() => undefined);
+    expect(seen).toHaveLength(1);
+  });
+});
