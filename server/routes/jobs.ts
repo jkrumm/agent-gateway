@@ -4,6 +4,7 @@ import { isJobTool } from "../jobs/types.ts";
 import { resolveDispatchTarget } from "../lib/dispatch-policy.ts";
 import { computeHealth } from "../lib/health.ts";
 import { dispatchSubmitRefusal } from "../jobs/handlers/dispatch.ts";
+import { isDecisionModel } from "../lib/decision.ts";
 import { validateModel } from "../lib/routing.ts";
 import { steerJob } from "../lib/steer.ts";
 
@@ -44,7 +45,11 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
       const model = (body.params as Record<string, unknown> | undefined)?.model;
       // `decide` names a decision model, which the chat registry does not list; its handler
       // validates the id against `DECISION_MODELS` instead.
-      if (body.tool !== "decide" && typeof model === "string" && !validateModel(model).ok) {
+      const isDecide = body.tool === "decide";
+      if (
+        typeof model === "string" &&
+        (isDecide ? !isDecisionModel(model) : !validateModel(model).ok)
+      ) {
         set.status = 400;
         return {
           ok: false as const,

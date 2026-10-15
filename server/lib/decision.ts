@@ -32,9 +32,20 @@ export const DECISION_MODELS: Record<string, DecisionModelInfo> = {
 
 export const DEFAULT_DECISION_MODEL = "pplx-decider-v1-27b";
 
+/** Own-property check: `in` / indexing would accept `constructor`, `__proto__` and friends. */
+export function isDecisionModel(id: string): boolean {
+  return Object.hasOwn(DECISION_MODELS, id);
+}
+
 export function defaultDecisionModel(): string {
   const override = process.env.AGENT_GATEWAY_DECISION_MODEL;
-  return override && override in DECISION_MODELS ? override : DEFAULT_DECISION_MODEL;
+  if (override && !isDecisionModel(override)) {
+    logger.warn(
+      { event: "decide.bad_default_model", override },
+      "AGENT_GATEWAY_DECISION_MODEL is not a known decision model — using the default",
+    );
+  }
+  return override && isDecisionModel(override) ? override : DEFAULT_DECISION_MODEL;
 }
 
 const HANG_GUARD_MS = 30 * 60_000;
@@ -83,14 +94,16 @@ export async function runDecision(opts: {
   state: string;
   questions: Record<string, DecisionQuestion>;
   model?: string;
+  /** Aborts the request (job cancel / drain). Merged with the hang guard. */
+  signal?: AbortSignal;
 }): Promise<DecisionOutput> {
   const model = opts.model ?? defaultDecisionModel();
-  const info = DECISION_MODELS[model];
-  if (!info)
+  if (!isDecisionModel(model))
     throw new Error(
       `unknown decision model "${model}" (known: ${Object.keys(DECISION_MODELS).join(", ")})`,
     );
 
+  const info = DECISION_MODELS[model]!;
   const truncatedChars = Math.max(0, opts.state.length - info.maxStateChars);
   const text = truncatedChars > 0 ? opts.state.slice(0, info.maxStateChars) : opts.state;
   const questions = Object.fromEntries(
@@ -112,7 +125,9 @@ export async function runDecision(opts: {
       questions,
       // The caller (warden) owns retries; one HTTP request per job attempt.
       maxRetries: 0,
-      abortSignal: AbortSignal.timeout(HANG_GUARD_MS),
+      abortSignal: opts.signal
+        ? AbortSignal.any([opts.signal, AbortSignal.timeout(HANG_GUARD_MS)])
+        : AbortSignal.timeout(HANG_GUARD_MS),
     });
   } catch (err) {
     await recordIuUsage({
@@ -120,7 +135,7 @@ export async function runDecision(opts: {
       model,
       latencyMs: Date.now() - startedAt,
       outcome: "error",
-    });
+    }).catch(() => {});
     throw err;
   }
 
@@ -131,6 +146,20 @@ export async function runDecision(opts: {
   const costUsd = (inputTokens * info.rate.input + outputTokens * info.rate.output) / 1_000_000;
   const latencyMs = Date.now() - startedAt;
 
+  // The call is billed whatever the mapping below decides — record it first.
+  await recordIuUsage({
+    tool: "decide",
+    model,
+    latencyMs,
+    usage: {
+      inputTokens,
+      outputTokens,
+      reasoningTokens: 0,
+      totalTokens: inputTokens + outputTokens,
+      cacheReadTokens: 0,
+      costUsd,
+    },
+  });
   const answers: Record<string, DecisionAnswerOut> = {};
   for (const [id, answer] of Object.entries(result.answers)) {
     if (answer.type === "choice") {
@@ -155,19 +184,6 @@ export async function runDecision(opts: {
     }
   }
 
-  await recordIuUsage({
-    tool: "decide",
-    model,
-    latencyMs,
-    usage: {
-      inputTokens,
-      outputTokens,
-      reasoningTokens: 0,
-      totalTokens: inputTokens + outputTokens,
-      cacheReadTokens: 0,
-      costUsd,
-    },
-  });
   logger.info(
     {
       event: "decide.done",

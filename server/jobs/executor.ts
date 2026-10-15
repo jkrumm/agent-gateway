@@ -52,7 +52,7 @@ export function executeJob(job: JobRecord, onProgress: ProgressSink): Promise<un
     case "triage":
       return runTriage(job.params, onProgress, job.id, isCancelRequested);
     case "decide":
-      return runDecide(job.params, onProgress);
+      return runDecide(job.params, onProgress, job.id, isCancelRequested);
     case "update_pr":
       return runUpdatePr(job.params, onProgress, job.id, isCancelRequested);
     default: {

@@ -520,7 +520,7 @@ function render(cells: Cell[], models: string[]): string {
 // ── Main ────────────────────────────────────────────────────────────────────────
 
 async function pool<T, R>(items: T[], size: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results = Array.from({ length: items.length }) as R[];
+  const results: R[] = [];
   let next = 0;
   await Promise.all(
     Array.from({ length: Math.min(size, items.length) }, async () => {

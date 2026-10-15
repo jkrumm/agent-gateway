@@ -1,7 +1,7 @@
 import { z } from "zod";
 import {
   DECISION_QUESTION,
-  DECISION_MODELS,
+  isDecisionModel,
   runDecision,
   type DecisionOutput,
 } from "../../lib/decision.ts";
@@ -25,16 +25,28 @@ export const DECIDE_INPUT = z.object({
   model: z.string().optional(),
 });
 
-export type DecideOutput = DecisionOutput;
-
 export async function runDecide(
   rawParams: Record<string, unknown>,
   onProgress?: ProgressSink,
-): Promise<DecideOutput> {
+  jobId?: string,
+  isCancelled?: (jobId: string) => boolean,
+): Promise<DecisionOutput> {
   const params = parseParams(DECIDE_INPUT, rawParams);
-  if (params.model !== undefined && !(params.model in DECISION_MODELS)) {
+  if (params.model !== undefined && !isDecisionModel(params.model)) {
     throw new Error(`invalid params: model: "${params.model}" is not a known decision model`);
   }
   onProgress?.({ turns: 1, lastAction: "decide: requesting", lastActivityAt: Date.now() });
-  return runDecision(params);
+  // Cancel / drain reach the request through an abort signal, polled like `triage`'s retry gate.
+  const abort = new AbortController();
+  const watcher =
+    jobId !== undefined && isCancelled
+      ? setInterval(() => {
+          if (isCancelled(jobId)) abort.abort();
+        }, 2000)
+      : undefined;
+  try {
+    return await runDecision({ ...params, signal: abort.signal });
+  } finally {
+    clearInterval(watcher);
+  }
 }

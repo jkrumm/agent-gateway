@@ -101,4 +101,33 @@ describe("decide", () => {
     )) as { model: string };
     expect(out.model).toBe("pplx-decider-v1-27b");
   });
+
+  test("an Object.prototype name is not a decision model", async () => {
+    for (const model of ["constructor", "__proto__", "toString"]) {
+      await expect(runDecide({ state: "s", questions, model })).rejects.toThrow(
+        /not a known decision model/,
+      );
+    }
+  });
+
+  test("a failed request rethrows and writes an error usage row", async () => {
+    globalThis.fetch = (async () =>
+      new Response("boom", { status: 500 })) as unknown as typeof fetch;
+    await expect(runDecide({ state: "s", questions })).rejects.toThrow();
+    const row = JSON.parse(readFileSync(sink, "utf8").trim().split("\n").at(-1) ?? "{}");
+    expect(row).toMatchObject({ tool: "decide", outcome: "error" });
+  });
+
+  test("a choice without a reported confidence falls back to the option's probability", async () => {
+    globalThis.fetch = (async () =>
+      Response.json({
+        model: "pplx-decider-v1-27b",
+        answers: {
+          action: { type: "choice", choice: "attach", probabilities: { attach: 0.7, new: 0.3 } },
+        },
+        usage: { input_tokens: 7, output_tokens: 1 },
+      })) as unknown as typeof fetch;
+    const out = await runDecide({ state: "s", questions: { action: questions.action } });
+    expect(out.answers.action).toMatchObject({ choice: "attach", confidence: 0.7 });
+  });
 });
