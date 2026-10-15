@@ -3,7 +3,7 @@ import { join } from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
 import { runSession, SessionDetachedError, zodValidator } from "../../mcp/session-runner.ts";
-import { routeFor, routeForReviewAngle } from "../../lib/routing.ts";
+import { claudeSafeRoute, routeFor, routeForReviewAngle } from "../../lib/routing.ts";
 import { textComplete } from "../../lib/iu-openai.ts";
 import { dataBlock, newFenceNonce } from "../../lib/prompt-fence.ts";
 import { parseJsonLoose, singleShotJson } from "../../lib/single-shot.ts";
@@ -1254,9 +1254,7 @@ export async function runReview(
             },
             "refusing an opencode-harness angle in a live checkout carrying its own opencode config — using the claude route",
           );
-          // `review_angle_frontend` is the claude-harness (JUDGE) seat; `review` itself is an
-          // opencode route since Wave 10.
-          angleRoute = routeFor("review_angle_frontend");
+          angleRoute = claudeSafeRoute();
         }
 
         // Retry a failed angle once — session-runner does not retry a non-transport failure,
@@ -1401,6 +1399,22 @@ export async function runReview(
       .replace("[FALLOW_RESULTS]", () => fallowBlock)
       .replace("[OCR_RESULTS]", () => ocrResult.block);
 
+    // Same guard as the angles: an OpenCode synthesis session in a live checkout with its own
+    // opencode config would run that config's plugins — use the claude route instead.
+    let synthesisRoute = routeFor("review");
+    if (liveOpencodeConfig.length > 0 && synthesisRoute.harness === "opencode") {
+      logger.warn(
+        {
+          event: "review.opencode_synthesis_refused_config",
+          tool: "review",
+          project: cwd,
+          files: liveOpencodeConfig,
+        },
+        "refusing an opencode-harness synthesis in a live checkout carrying its own opencode config — using the claude route",
+      );
+      synthesisRoute = claudeSafeRoute();
+    }
+
     const runSynthesis = (synthPrompt: string) =>
       runSession<SynthesisOutput>({
         cwd: effectiveCwd,
@@ -1409,7 +1423,7 @@ export async function runReview(
         jobId,
         isCancelled,
         reattachKey: "synthesis",
-        route: routeFor("review"),
+        route: synthesisRoute,
         model,
         jsonSchema: REVIEW_JSON_SCHEMA,
         readOnly: true,

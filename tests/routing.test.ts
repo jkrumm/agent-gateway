@@ -5,6 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildRoutingTable,
+  claudeSafeRoute,
   DEEPSEEK_FLASH,
   DEEPSEEK_PRO,
   DEEPSEEK_V41_FLASH,
@@ -1060,5 +1061,15 @@ describe("logStaleQuotaEnvVars", () => {
       "AGENT_GATEWAY_MAX_WEEKLY_CEILING",
       "AGENT_GATEWAY_QUOTA_FILE_MAX_AGE_S",
     ]);
+  });
+});
+
+describe("claudeSafeRoute", () => {
+  test("is the claude-harness Sonnet-on-Max seat, a copy that cannot poison the next call", () => {
+    const route = claudeSafeRoute();
+    expect(route).toMatchObject({ model: SONNET, backend: "max", harness: "claude" });
+    route.model = "mutated";
+    if (route.fallback) route.fallback.backend = "max";
+    expect(claudeSafeRoute()).toMatchObject({ model: SONNET, fallback: { backend: "iu" } });
   });
 });

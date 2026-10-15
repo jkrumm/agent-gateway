@@ -743,6 +743,15 @@ export function reviewAngleRouteKey(angle: string): RoutedTool {
 }
 
 /** The effective route for one review angle session — its own key when it has one, else `review`. */
+/** The route a session runs on when an OpenCode harness is unsafe in the cwd (a live checkout
+ *  carrying its own `opencode.json`/`.opencode/`: a plugin there executes regardless of the
+ *  permission profile). Built from the JUDGE constant — Sonnet on Max over `claude -p` — and
+ *  deliberately NOT read from the env-overridable table, so no operator override can point the
+ *  fallback back at OpenCode. */
+export function claudeSafeRoute(): ToolRoute {
+  return { ...JUDGE, fallback: JUDGE.fallback ? { ...JUDGE.fallback } : null };
+}
+
 export function routeForReviewAngle(angle: string): ToolRoute {
   return routeFor(reviewAngleRouteKey(angle));
 }

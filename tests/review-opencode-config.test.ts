@@ -153,6 +153,10 @@ function angleSessions(): SeenSession[] {
   return seen.filter((s) => s.tool === "review:angle");
 }
 
+function synthesisSessions(): SeenSession[] {
+  return seen.filter((s) => s.tool === "review:synthesis");
+}
+
 /** The senior-dev angle sessions — the ones the retry tests script. The floor's architect
  *  angle always runs too, on the same opencode route. */
 function opencodeAngleSessions(): SeenSession[] {
@@ -171,6 +175,7 @@ describe("runReview scope mode — live checkout is never stripped", () => {
     expect(routeFor("review_angle_frontend").harness).toBe("claude");
     const harnesses = angleSessions().map((s) => s.harness);
     expect(harnesses).toContain("opencode");
+    expect(synthesisSessions().map((s) => s.harness)).toEqual(["opencode"]);
   });
 
   test.each([
@@ -188,6 +193,8 @@ describe("runReview scope mode — live checkout is never stripped", () => {
       const angles = angleSessions();
       expect(angles.length).toBeGreaterThan(0);
       expect(angles.every((s) => s.harness === "claude")).toBe(true);
+      // The synthesis session runs in the same checkout, so it takes the same guard.
+      expect(synthesisSessions().map((s) => s.harness)).toEqual(["claude"]);
       // Sessions still run in the caller's own checkout, and nothing was deleted from it.
       expect(angles.every((s) => s.cwd === fx.repo)).toBe(true);
       expect(opencodeRepoConfigPresent(fx.repo)).not.toEqual([]);
