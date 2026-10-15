@@ -42,7 +42,9 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
       // refuse loudly here instead, for every tool that takes one (dispatch, review, overview,
       // narrative). Non-string values fall through to the handler's zod.
       const model = (body.params as Record<string, unknown> | undefined)?.model;
-      if (typeof model === "string" && !validateModel(model).ok) {
+      // `decide` names a decision model, which the chat registry does not list; its handler
+      // validates the id against `DECISION_MODELS` instead.
+      if (body.tool !== "decide" && typeof model === "string" && !validateModel(model).ok) {
         set.status = 400;
         return {
           ok: false as const,

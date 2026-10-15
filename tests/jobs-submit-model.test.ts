@@ -109,3 +109,18 @@ describe("`model` refusal beyond dispatch", () => {
     expect(body.error).toBe("review refused: model no-such-model is not a verified registry model");
   });
 });
+
+describe("decide `model`", () => {
+  test("a decision-model id passes the submit route (its handler validates it)", async () => {
+    const { status, body } = await post({
+      tool: "decide",
+      params: {
+        state: "s",
+        model: "pplx-decider-v1-27b",
+        questions: { q: { type: "boolean", instructions: "x?" } },
+      },
+    });
+    expect(status).toBe(200);
+    expect(body.ok).toBe(true);
+  });
+});
