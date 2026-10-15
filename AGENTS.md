@@ -209,8 +209,8 @@ re-queues an interrupted `check`/`overview`/`narrative`/`review`/`triage` **once
 pushed). A job whose OpenCode session(s) a drain **detached** is not a crash and is
 requeued whatever its attempts say — see *Durable and steerable OpenCode
 episodes* below. `make reload` refuses while jobs it cannot detach are running
-(`drainBlockers`: `claude -p` sessions, check steps — OpenCode-only runs never
-refuse) unless `FORCE=1` (which asks for the same forced abort as always — never
+(`reloadRefusals`: `claude -p` sessions, check steps — OpenCode-only runs never
+refuse; the drain also waits for short single-shot jobs, which are not a reason to refuse) unless `FORCE=1` (which asks for the same forced abort as always — never
 SIGKILL, which isn't catchable and would skip `terminateActiveSessions()`
 entirely, orphaning `claude -p` workers that keep writing/committing after the
 reload believed it had stopped them). Otherwise `make reload` now asks the server to shut itself
@@ -248,22 +248,29 @@ per lane; a full lane never blocks the other). `review_router` is not a job, it 
 `review` job. While draining, the queue backs up too, which `GET
 /api/jobs/health`'s `draining: true` flag distinguishes from a wedged queue.
 
-**Durable and steerable OpenCode episodes (Waves 4 and 9, `docs/opencode-v2.md`).** EVERY OpenCode
-session run under a job is detached by a drain — not interrupted — and re-attached by the next boot;
-only `claude -p` sessions still drain or requeue. The drain does it at its **start**
+**Durable and steerable OpenCode episodes (Waves 4 and 9, `docs/opencode-v2.md`).** Every OpenCode
+session a caller can hand back (it runs under a job AND passes `reattachKey` or `onSessionId` —
+`canDetachSession`) is detached by a drain — not interrupted — and re-attached by the next boot;
+`claude -p` sessions, and OpenCode sessions nothing can re-attach (a repo check run for dispatch or
+`update_pr`, excalidraw), still drain or requeue. The drain does it at its **start**
 (`createShutdownController` → `detachSessions` → `detachRemoteSessions()`, session-runner.ts): the
 session keeps running on the shared server, `SessionDetachedError` unwinds its handler, and the jobs
 are marked durably (`jobs.detached_at`, `markJobsDetached`) before the process can exit. The drain
 then waits only for **`drainBlockers`** (`QueueStats`/`/api/jobs/health`): running jobs whose live work
-is NOT a detachable OpenCode session (a `claude -p` session, a check step, a single-shot request, a
-job between phases) — a drain with only OpenCode sessions in flight is over at once, and a session
-that would start mid-drain detaches before it creates anything. Re-attach is by state, the same
+is NOT purely detachable OpenCode sessions (a `claude -p` session — also one running NEXT TO a
+detached OpenCode one in the same job —, a check step, a non-detachable session, a single-shot request,
+a job between phases) — a drain with only detachable sessions in flight is over at once, and a
+detachable session that would start mid-drain detaches before it creates anything (re-checked right
+before `createSession`). Re-attach is by state, the same
 logic everywhere (`runOpencodeAttempt`): live → wait only, finished while down → read the result,
 cut off → `prompt {resume:true}`, never prompted → a first prompt. How a job hands its session back
 differs: **dispatch** persists the session id on the job row (`onSessionId` → `session_id`, the
 worktree's `worktree_meta`); **every other tool** passes `SessionOptions.reattachKey` and the runner
-records each session it creates in the **session ledger** (`job_sessions(job_id, key, session_id,
-settled)`, key `<reattachKey>:<call>.<attempt>`) — review: `angle:<name>` per angle and `synthesis`; a
+records the session it creates in the **session ledger** (`job_sessions(job_id, key, session_id,
+settled)`, key = `reattachKey` exactly — the persisted ROW decides, no counter: a failed attempt
+drops its row, so at most one survives per key and it is the session to continue; a repeat call in the
+same process is a handler-level retry and starts fresh) — review: `angle:<name>` per angle and
+`synthesis`, check/overview one key each; a
 `ref`-mode review also keeps its throwaway worktree on detach (`worktree_meta`, protected from the
 boot sweep) and the re-run reopens it. A detached `review` aborts at once (the detach is not an angle
 failure, does not consume `ANGLE_MAX_ATTEMPTS`) and is requeued by `recover()`; its OCR run, claude
@@ -271,8 +278,9 @@ sibling sessions, adversary and synthesis simply run again, while angles with a 
 (finished → result read from the messages, still running → waited). A detached session writes no usage
 row; a `settled` ledger row (usage already attributed) re-attaches without writing a second one.
 **Requeue accounting:** a row with `detached_at` is requeued by `recover()` regardless of `attempts`,
-for every tool, and gives the attempt back (`attempts - 1`, so a later genuine crash still gets its
-requeue-once); a row without it keeps today's rules. **In-place dispatch** is detached and resumed
+for `dispatch` and the `REQUEUE_ON_RECOVER` tools (`resumesAfterDetach`), and gives the attempt back
+(`attempts - 1`, logged `attemptRefunded`, so a later genuine crash still gets its requeue-once); a
+row without it — or of any other tool — keeps today's rules. **In-place dispatch** is detached and resumed
 too: its metadata marker persists the pre-episode snapshot (`{ path, workspace: "in-place", snapshot }`,
 dispatch-git.ts `InPlaceSnapshot`), so the re-attached run reports `applied_in_place` against the
 SAME baseline; with no marker (a crash) or no persisted snapshot (an older row) it is still
@@ -330,7 +338,8 @@ Job lifecycle events log to `~/Library/Logs/agent-gateway.jsonl` (`job.create` /
 oldestPendingAgeMs }, drainBlockers, failedLastHour,
 interruptedLastHour, oldestPendingAgeMs, leaseQueued, lastFailure, draining, sinceBootMs,
 recoveredFromDrain }` (`running`/`pending`/`max`/`oldestPendingAgeMs` are the session lane;
-`drainBlockers` is what a reload waits for or discards — `make reload`'s preflight reads it;
+`drainBlockers` is what the drain waits for (single-shot jobs included) and `reloadRefusals` the
+session-lane subset `make reload` refuses on — the preflight reads only it;
 `oldestPendingAgeMs` runs from the last requeue, `jobs.requeued_at`, not the submission;
 `singleShot` is the `triage`/`decide` lane with its own oldest-waiting age;
 `leaseQueued` counts pending rows waiting behind a per-repo implement

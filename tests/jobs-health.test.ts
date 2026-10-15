@@ -125,6 +125,7 @@ describe("evaluateJobHealth", () => {
     max: 3,
     singleShot: { running: 0, pending: 0, max: 6, oldestPendingAgeMs: null as number | null },
     drainBlockers: 0,
+    reloadRefusals: 0,
     failedLastHour: 0,
     interruptedLastHour: 0,
     oldestPendingAgeMs: null,

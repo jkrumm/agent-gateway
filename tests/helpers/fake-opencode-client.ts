@@ -12,6 +12,7 @@ import type {
   OpencodeSessionInfo,
   OpencodeSessionSpec,
 } from "../../server/mcp/opencode-client.ts";
+import { OpencodeHttpError } from "../../server/mcp/opencode-client.ts";
 import type { OpencodeInterruptResult } from "../../server/mcp/opencode-server.ts";
 
 export type Outcome = "succeeded" | "failed" | "interrupted";
@@ -170,7 +171,7 @@ export class FakeOpencodeClient implements OpencodeClient {
 
   private get(sessionId: string): FakeSession {
     const session = this.sessions.get(sessionId);
-    if (!session) throw new Error(`fake opencode: unknown session ${sessionId}`);
+    if (!session) throw new OpencodeHttpError(404, `GET /api/session/${sessionId}`);
     return session;
   }
 

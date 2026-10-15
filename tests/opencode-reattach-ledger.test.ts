@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { __resetForTests } from "../server/jobs/store.ts";
 import { routeFor } from "../server/lib/routing.ts";
+import { OpencodeHttpError } from "../server/mcp/opencode-client.ts";
 import { runOpencodeAttempt, type OpencodeAttemptDeps } from "../server/mcp/opencode-runner.ts";
 import {
   __resetActiveProcsForTests,
@@ -164,11 +165,67 @@ describe("drain detach — every OpenCode session under a job", () => {
   test("a session that starts after the drain began detaches before creating anything", async () => {
     detachRemoteSessions();
     const client = new FakeOpencodeClient();
-    await expect(runOn(client, { reattachKey: undefined })).rejects.toBeInstanceOf(
-      SessionDetachedError,
-    );
+    await expect(runOn(client)).rejects.toBeInstanceOf(SessionDetachedError);
     expect(client.created).toEqual([]);
     expect(client.prompts).toEqual([]);
+  });
+
+  test("a drain that begins while the attempt awaits its preflight creates nothing", async () => {
+    const client = new FakeOpencodeClient();
+    await expect(
+      runOn(
+        client,
+        {},
+        {
+          // The IU reachability probe is the slow await before `createSession`.
+          preflight: async () => {
+            detachRemoteSessions();
+            return { ok: true as const };
+          },
+        },
+      ),
+    ).rejects.toBeInstanceOf(SessionDetachedError);
+    expect(client.created).toEqual([]);
+  });
+
+  test("a drain that begins during the server-status read also creates nothing", async () => {
+    const client = new FakeOpencodeClient();
+    const status = okDeps.serverStatus;
+    await expect(
+      runOn(
+        client,
+        {},
+        {
+          serverStatus: async () => {
+            const result = await status();
+            detachRemoteSessions();
+            return result;
+          },
+        },
+      ),
+    ).rejects.toBeInstanceOf(SessionDetachedError);
+    expect(client.created).toEqual([]);
+  });
+
+  test("a session nothing can hand back (a job id but no reattachKey / onSessionId) is interrupted, not detached", async () => {
+    const client = new FakeOpencodeClient();
+    const settled = startHanging(client, { reattachKey: undefined });
+    await Bun.sleep(30);
+    expect(detachableJobIds().size).toBe(0);
+    expect(detachRemoteSessions()).toEqual([]);
+    expect(terminateActiveSessions()).toEqual([JOB]);
+    const { value, error } = await settled;
+    expect(error).toBeUndefined();
+    expect(value?.error).toContain("interrupted by request");
+    expect(client.interrupts).toEqual(["ses_fake_1"]);
+  });
+
+  test("a non-detachable session does not throw Detached once a drain began (the drain waits for it)", async () => {
+    detachRemoteSessions();
+    const client = new FakeOpencodeClient();
+    client.script({ assistant: [{ content: [text('{"answer":1}')] }] });
+    const result = await runOn(client, { reattachKey: undefined });
+    expect(result).toMatchObject({ ok: true });
   });
 
   test("a session with no job is not detachable: the drain interrupts it", async () => {
@@ -196,15 +253,17 @@ describe("drain detach — every OpenCode session under a job", () => {
     expect(client.prompts).toEqual([]);
 
     // The re-run after the restart: the ledger names the empty session; it is prompted as a
-    // FIRST prompt (resume: false), not as the resume of a turn that never started.
+    // FIRST prompt (resume: false) with the FULL prompt — the continuation nudge assumes history
+    // the session does not have.
     __resetActiveProcsForTests();
     client.setEnvironment = setEnvironment;
     client.script({ assistant: [{ content: [text('{"answer":9}')] }] });
-    const result = await runOn(client);
+    const result = await runOn(client, { prompt: "the full brief", resumePrompt: "NUDGE" });
     expect(result).toMatchObject({ ok: true, data: { answer: 9 } });
     expect(client.created).toHaveLength(1);
     expect(client.prompts).toHaveLength(1);
     expect(client.prompts[0]?.input.resume).toBeUndefined();
+    expect(client.prompts[0]?.input.text).toStartWith("the full brief");
   });
 });
 
@@ -309,8 +368,86 @@ describe("session ledger — re-attach without double billing", () => {
   });
 });
 
+describe("session ledger — errors and unreadable results", () => {
+  test("a cut-off ledger session with history is resumed with the continuation nudge", async () => {
+    getSessionLedger()?.put(JOB, KEY, "ses_cut");
+    const client = new FakeOpencodeClient();
+    client.seed("ses_cut", [assistantMessage({ content: [text("half")] }), idleMessage("failed")]);
+    client.script({ assistant: [{ content: [text('{"answer":8}')] }] });
+    const result = await runOn(client, { prompt: "the full brief", resumePrompt: "NUDGE" });
+    expect(result).toMatchObject({ ok: true, data: { answer: 8 } });
+    expect(client.prompts[0]?.input).toMatchObject({ resume: true });
+    expect(client.prompts[0]?.input.text).toStartWith("NUDGE");
+  });
+
+  test("only a definite 404 replaces a ledger session; a transport error rethrows and keeps the row", async () => {
+    getSessionLedger()?.put(JOB, KEY, "ses_live");
+    const client = new FakeOpencodeClient();
+    client.seed("ses_live", [assistantMessage({ content: [text("x")] })]);
+    client.recentMessagesFault = () => new Error("fetch failed (connect error)");
+
+    const result = await runOn(client);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("fetch failed");
+    expect(client.created).toEqual([]); // no second session while the first may be alive
+    expect(getSessionLedger()?.get(JOB, KEY)?.sessionId).toBe("ses_live");
+  });
+
+  test("a 5xx from the server is not a not-found either", async () => {
+    getSessionLedger()?.put(JOB, KEY, "ses_live");
+    const client = new FakeOpencodeClient();
+    client.seed("ses_live", []);
+    client.recentMessagesFault = () => new OpencodeHttpError(503, "GET /api/session/{id}/message");
+    const result = await runOn(client);
+    expect(result.ok).toBe(false);
+    expect(client.created).toEqual([]);
+    expect(getSessionLedger()?.get(JOB, KEY)?.sessionId).toBe("ses_live");
+  });
+
+  test("a settled session whose messages cannot be read: error without a second usage row, row kept, and the retry reads it", async () => {
+    const client = new FakeOpencodeClient();
+    client.script({ assistant: [{ content: [text('{"answer":1}')] }] });
+    expect(await runOn(client)).toMatchObject({ ok: true });
+    expect(usageRows()).toHaveLength(1);
+
+    client.allMessagesError = new Error("fetch failed");
+    const failed = await runOn(client);
+    expect(failed.ok).toBe(false);
+    expect(failed.error).toContain("unreachable reading messages");
+    expect(usageRows()).toHaveLength(1);
+    expect(getSessionLedger()?.get(JOB, KEY)).toMatchObject({ settled: true });
+
+    client.allMessagesError = undefined;
+    expect(await runOn(client)).toMatchObject({ ok: true, data: { answer: 1 } });
+    expect(usageRows()).toHaveLength(1);
+    expect(client.created).toHaveLength(1);
+  });
+
+  test("an UNsettled session whose messages cannot be read keeps its row and is attributed once the read works", async () => {
+    getSessionLedger()?.put(JOB, KEY, "ses_fin");
+    const client = new FakeOpencodeClient();
+    client.seed("ses_fin", [
+      assistantMessage({ content: [text('{"answer":2}')], cost: 0.1 }),
+      idleMessage("succeeded"),
+    ]);
+    client.allMessagesError = new Error("fetch failed");
+    expect((await runOn(client)).ok).toBe(false);
+    expect(usageRows()).toHaveLength(1); // the error row of the failed read
+    expect(getSessionLedger()?.get(JOB, KEY)).toMatchObject({ settled: false });
+
+    client.allMessagesError = undefined;
+    expect(await runOn(client)).toMatchObject({ ok: true, data: { answer: 2 } });
+    expect(usageRows()).toHaveLength(2);
+    expect(getSessionLedger()?.get(JOB, KEY)).toMatchObject({ settled: true });
+  });
+});
+
 describe("runSession — ledger keys", () => {
-  test("each call under a key gets its own ordinal and each attempt its number", async () => {
+  const base = { cwd: "/tmp", prompt: "p", route: routeFor("dispatch"), tool: "review:angle" };
+  const okResult = { ok: true, data: {}, backend: "iu", model: MODEL };
+
+  test("the key is used as is — no ordinal, no attempt number — so a restart cannot shift it", async () => {
     const seen: Array<string | undefined> = [];
     let failFirst = true;
     __setAttemptRunnerForTests((async (opts: SessionOptions<unknown>) => {
@@ -325,22 +462,61 @@ describe("runSession — ledger keys", () => {
           model: MODEL,
         };
       }
-      return { ok: true, data: {}, backend: "iu", model: MODEL };
+      return okResult;
     }) as never);
-    const base = { cwd: "/tmp", prompt: "p", route: routeFor("dispatch"), tool: "review:angle" };
 
     await runSession({ ...base, jobId: "key-job", reattachKey: "angle:qa" });
-    await runSession({ ...base, jobId: "key-job", reattachKey: "angle:qa" });
-    await runSession({ ...base, jobId: "key-job", reattachKey: "synthesis" });
-    // No key → no ledger.
     await runSession({ ...base, jobId: "key-job" });
 
-    expect(seen).toEqual([
-      "angle:qa:1.1", // first attempt failed with a transport error …
-      "angle:qa:1.2", // … the retry is a different session
-      "angle:qa:2.1", // a second call under the same key is a second session
-      "synthesis:1.1",
-      undefined,
+    // The transport-retried attempt reuses the key: the row decides whether it re-attaches.
+    expect(seen).toEqual(["angle:qa", "angle:qa", undefined]);
+  });
+
+  test("the first call of a (re-)run keeps the surviving row; a repeat call in the same process starts fresh", async () => {
+    const ledger = getSessionLedger();
+    ledger?.put("rerun-job", "angle:qa", "ses_survivor");
+    const rowAtCall: Array<string | undefined> = [];
+    __setAttemptRunnerForTests((async (opts: SessionOptions<unknown>) => {
+      rowAtCall.push(ledger?.get("rerun-job", opts.reattachKey ?? "")?.sessionId);
+      return okResult;
+    }) as never);
+
+    await runSession({ ...base, jobId: "rerun-job", reattachKey: "angle:qa" });
+    await runSession({ ...base, jobId: "rerun-job", reattachKey: "angle:qa" });
+
+    expect(rowAtCall).toEqual(["ses_survivor", undefined]);
+  });
+
+  test("after a retry-then-detach the re-run re-attaches the SECOND attempt's session: the row, not a counter, decides", async () => {
+    // Process 1: attempt 1 failed (its row was dropped and its session is idle), attempt 2 created
+    // session B and was detached. Only B's row survives.
+    getSessionLedger()?.put(JOB, "angle:senior-dev", "ses_B");
+    // Process 2: the review's attempt 1 is the first runSession call — it re-attaches B instead of
+    // starting a third session next to a live one.
+    const client = new FakeOpencodeClient();
+    client.seed("ses_B", [
+      assistantMessage({ content: [text('{"answer":7}')] }),
+      idleMessage("succeeded"),
     ]);
+    __setAttemptRunnerForTests(((opts: SessionOptions<unknown>, turnsRef: { current: number }) =>
+      runOpencodeAttempt(
+        opts,
+        turnsRef,
+        { model: MODEL, backend: "iu" },
+        {
+          ...okDeps,
+          client,
+        },
+      )) as never);
+
+    const result = await runSession({
+      ...base,
+      jobId: JOB,
+      reattachKey: "angle:senior-dev",
+    });
+
+    expect(result).toMatchObject({ ok: true, data: { answer: 7 } });
+    expect(client.created).toEqual([]);
+    expect(client.prompts).toEqual([]);
   });
 });

@@ -449,6 +449,26 @@ describe("mocked round trip", () => {
     expect(err).toContain("worker died");
   });
 
+  test("health renders the single-shot lane and the drain/reload counters", async () => {
+    const { code, out } = await runWith(["health"], {
+      "GET /api/jobs/health": () => ({
+        body: {
+          ok: true,
+          running: 2,
+          pending: 1,
+          singleShot: { running: 4, pending: 0 },
+          drainBlockers: 3,
+          reloadRefusals: 1,
+          failedLastHour: 0,
+          interruptedLastHour: 0,
+        },
+      }),
+    });
+    expect(code).toBe(0);
+    expect(out).toContain("single-shot: running 4  pending 0");
+    expect(out).toContain("drainBlockers: 3  reloadRefusals: 1");
+  });
+
   test("an unreachable server exits 3 with the LaunchAgent hint", async () => {
     const out: string[] = [];
     const err: string[] = [];

@@ -85,6 +85,28 @@ describe("runReview — a drain detaches an angle session", () => {
     expect(seen.some((s) => s.tool === "review:synthesis")).toBe(false);
   });
 
+  test("sibling angle sessions in flight are awaited, not left running unobserved behind the rejection", async () => {
+    fx.write("src/app.ts", "export const changed = 1;\n");
+    const finished: string[] = [];
+    sessionSpy?.mockImplementation((async (opts: sessionRunner.SessionOptions<unknown>) => {
+      const harness = opts.route.harness ?? "claude";
+      if (opts.tool === "review:angle" && harness === "opencode") {
+        throw new sessionRunner.SessionDetachedError(opts.jobId);
+      }
+      // The claude angle (the floor's architect) keeps working for a while.
+      await Bun.sleep(150);
+      finished.push(opts.tool ?? "");
+      return { ok: true, data: { findings: [] } };
+    }) as unknown as typeof sessionRunner.runSession);
+
+    await expect(
+      runReview({ cwd: fx.repo, scope: "uncommitted", angles: ["senior-dev", "architect"] }),
+    ).rejects.toBeInstanceOf(sessionRunner.SessionDetachedError);
+
+    // By the time the review rejects, the sibling has settled — nothing runs on unobserved.
+    expect(finished).toEqual(["review:angle"]);
+  });
+
   test("every angle session carries a stable ledger key", async () => {
     fx.write("src/app.ts", "export const changed = 1;\n");
     detachNext = false;

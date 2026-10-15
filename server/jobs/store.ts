@@ -500,26 +500,29 @@ function dropJobSession(jobId: string, key: string): void {
 }
 
 setSessionLedger({
+  markDetached: (jobId) => markJobsDetached([jobId]),
   get: getJobSession,
   put: putJobSession,
   settle: settleJobSession,
   drop: dropJobSession,
 });
 
-/** A job has left `running` for good: forget its ledger rows (and call counters). With
- *  `interrupt` (cancelled / interrupted by boot recovery — nothing will re-attach them) the
- *  sessions still running on the shared server are stopped too, best-effort. */
-function endJobSessions(jobId: string, interrupt = false): void {
+/** A job has left `running` for good and its sessions are done: forget its ledger rows (and call
+ *  counters). */
+function forgetJobSessions(jobId: string): void {
   forgetLedgerCalls(jobId);
-  if (interrupt) {
-    const rows = db
-      .query<{ session_id: string }, [string]>(
-        "SELECT session_id FROM job_sessions WHERE job_id = ?",
-      )
-      .all(jobId);
-    for (const { session_id } of rows) void interruptOpencodeSession(session_id);
-  }
   db.run("DELETE FROM job_sessions WHERE job_id = ?", [jobId]);
+}
+
+/** A job has left `running` without finishing (cancelled / interrupted by boot recovery): nothing
+ *  will re-attach its ledger sessions, so stop the ones still running on the shared server
+ *  (best-effort) and forget the rows. */
+function releaseJobSessions(jobId: string): void {
+  const rows = db
+    .query<{ session_id: string }, [string]>("SELECT session_id FROM job_sessions WHERE job_id = ?")
+    .all(jobId);
+  for (const { session_id } of rows) void interruptOpencodeSession(session_id);
+  forgetJobSessions(jobId);
 }
 
 /** Marks jobs whose OpenCode session(s) a drain detached (`detachRemoteSessions`, called at the
@@ -697,17 +700,26 @@ export interface QueueStats {
   pending: number;
   max: number;
   singleShot: { running: number; pending: number; max: number };
-  /** Running jobs (both lanes) a reload has to wait for or discard: everything except a job whose
-   *  live work is a detachable OpenCode session (`detachableJobIds`). A drain detaches those at
-   *  its start, so it waits for this many; `make reload` refuses on it. */
+  /** Running jobs (both lanes) the DRAIN waits for: everything except a job whose only live work
+   *  is detachable OpenCode sessions (`detachableJobIds`) — a `claude -p` session, a check step,
+   *  a non-detachable session, a single-shot request, a job between phases. */
   drainBlockers: number;
+  /** The subset of `drainBlockers` that `make reload` REFUSES on (without FORCE=1): the session
+   *  lane. Single-shot jobs (`triage`/`decide`, one short request each) are waited for by the drain
+   *  but never worth refusing a reload over. */
+  reloadRefusals: number;
 }
 
-/** Running jobs that are not detachable-only — see `QueueStats.drainBlockers`. */
-export function drainBlockerCount(): number {
+/** Running jobs that are not detachable-only — see `QueueStats.drainBlockers`. `lane` narrows
+ *  the count to one admission lane. */
+export function drainBlockerCount(lane?: JobLane): number {
   const detachable = detachableJobIds();
   let blockers = 0;
-  for (const id of runningIds) if (!detachable.has(id)) blockers++;
+  for (const id of runningIds) {
+    if (detachable.has(id)) continue;
+    if (lane === "session" && singleShotRunningIds.has(id)) continue;
+    blockers++;
+  }
   return blockers;
 }
 
@@ -734,6 +746,7 @@ export function queueStats(): QueueStats {
       max: MAX_SINGLE_SHOT,
     },
     drainBlockers: drainBlockerCount(),
+    reloadRefusals: drainBlockerCount("session"),
   };
 }
 
@@ -750,9 +763,11 @@ export interface JobHealthStats {
   /** The single-shot lane (`triage`/`decide`) with its own oldest-waiting age: a single-shot
    *  waiting >15 min for one of its slots pages exactly like a session job does. */
   singleShot: { running: number; pending: number; max: number; oldestPendingAgeMs: number | null };
-  /** Running jobs a reload has to wait for or discard — `QueueStats.drainBlockers`. A running
-   *  job whose live work is an OpenCode session is not one: a drain detaches it. */
+  /** Running jobs the drain waits for / that `make reload` refuses on — see `QueueStats`. A
+   *  running job whose only live work is detachable OpenCode sessions is neither: a drain
+   *  detaches it. */
   drainBlockers: number;
+  reloadRefusals: number;
   failedLastHour: number;
   interruptedLastHour: number;
   /** Age of the oldest session-lane `pending` row that is waiting for a concurrency slot, or null
@@ -821,15 +836,15 @@ export function jobHealth(now = Date.now()): JobHealth {
   const slotWaiting = pendingRows.filter((r) => leaseBlockerOf(rowToRecord(r)) === undefined);
   // Waiting time runs from the last (re)queue: a job `recover()` put back after a reload has been
   // pending since the restart, not since it was first submitted.
-  const oldestIn = (lane: JobLane) =>
+  const oldestWaitingIn = (lane: JobLane) =>
     slotWaiting
       .filter((r) => laneOf(r.tool) === lane)
       .reduce<JobRow | undefined>(
         (oldest, r) => (oldest && waitingSince(oldest) <= waitingSince(r) ? oldest : r),
         undefined,
       );
-  const oldestSession = oldestIn("session");
-  const oldestSingleShot = oldestIn("single_shot");
+  const oldestSession = oldestWaitingIn("session");
+  const oldestSingleShot = oldestWaitingIn("single_shot");
   const ageOf = (row: JobRow | undefined) => (row ? Math.max(0, now - waitingSince(row)) : null);
   const stats = queueStats();
   const lastFailed = db
@@ -1240,7 +1255,7 @@ function finish(
   forgetRunning(job.id);
   releaseJobLease(job.id);
   leaseQueueLogged.delete(job.id);
-  endJobSessions(job.id);
+  forgetJobSessions(job.id);
   logger.info(jobFinishLogFields(job, status, outcome, now), `job ${status}`);
   if (status === "done" && onDone) {
     const row = fetchRow(job.id);
@@ -1273,13 +1288,56 @@ function hasInPlaceSnapshot(meta: { snapshot?: unknown } | null): boolean {
 /** The `UPDATE` that puts a recovered row back to `pending`. A drain-detached row (`detached_at`)
  *  gives back the attempt `promote()` is about to charge, so repeated reloads never exhaust the
  *  requeue-once budget a genuine crash is held to; the marker is cleared and `requeued_at`
- *  starts the pending clock `jobHealth` reads. `extra` = additional column resets. */
-function requeueRow(id: string, now: number, extra = ""): void {
+ *  starts the pending clock `jobHealth` reads. `clearSession` / `clearWorktree` also null
+ *  `session_id` / `worktree_meta` (a fresh run, or a worktree the boot sweep removed). */
+function requeueRow(
+  id: string,
+  now: number,
+  options: { clearSession?: boolean; clearWorktree?: boolean } = {},
+): void {
+  const resets = [
+    options.clearSession ? ", session_id = NULL" : "",
+    options.clearWorktree ? ", worktree_meta = NULL" : "",
+  ].join("");
   db.run(
     `UPDATE jobs SET status = 'pending', progress = NULL, started_at = NULL, error = NULL,
        attempts = CASE WHEN detached_at IS NOT NULL THEN MAX(attempts - 1, 0) ELSE attempts END,
-       detached_at = NULL, requeued_at = ?${extra} WHERE id = ?`,
+       detached_at = NULL, requeued_at = ?${resets} WHERE id = ?`,
     [now, id],
+  );
+}
+
+/** Whether a drain-detached row of this tool can be requeued without spending its budget: only
+ *  tools that hand their sessions back (dispatch: the job row; the idempotent `REQUEUE_ON_RECOVER`
+ *  tools: the session ledger). Any other tool never has a detachable session — and if a marker
+ *  ever lands on one, it is recovered by the ordinary rules, not given a free re-run. */
+function resumesAfterDetach(tool: JobTool): boolean {
+  return tool === "dispatch" || REQUEUE_ON_RECOVER.has(tool);
+}
+
+type DispatchMeta = { path?: unknown; workspace?: unknown; snapshot?: unknown };
+
+/** Boot-recovery decision for a `dispatch` row. An in-place episode resumes only after a drain
+ *  DETACHED its session AND its metadata carries the pre-episode snapshot (`{ path, workspace:
+ *  "in-place", snapshot }`, persisted by dispatch.ts's `onWorktreeReady`): the re-attached run
+ *  attributes its edits against that baseline. A crash (no detach marker — the session may be
+ *  gone, the per-repo lease was process-local) or a row written before the snapshot was
+ *  persisted is never resumed. Every other dispatch row follows `dispatchRecoveryStatusFor`; a
+ *  detached one spends no attempt. */
+export function dispatchRecoveryDecision(
+  row: Pick<JobRow, "attempts" | "session_id">,
+  meta: DispatchMeta | null,
+  detached: boolean,
+  pathExists: boolean,
+): DispatchRecoveryDecision {
+  if (meta?.workspace === "in-place") {
+    const resumable = detached && hasInPlaceSnapshot(meta) && row.session_id !== null && pathExists;
+    return resumable ? "resume" : "interrupted";
+  }
+  return dispatchRecoveryStatusFor(
+    detached ? 0 : row.attempts,
+    row.session_id !== null,
+    pathExists,
   );
 }
 
@@ -1321,7 +1379,7 @@ function recover(): void {
         [now, row.id],
       );
       recordJobStats(row.id);
-      endJobSessions(row.id, true);
+      releaseJobSessions(row.id);
       cancelled++;
       logger.info(
         { event: "job.cancelled", jobId: row.id, tool: row.tool },
@@ -1329,42 +1387,22 @@ function recover(): void {
       );
       continue;
     }
-    const detached = row.detached_at !== null;
-    // What the requeue clock and the logs report for a detached row: how long its sessions ran
-    // headless between the drain and this boot.
+    const detached = row.detached_at !== null && resumesAfterDetach(row.tool as JobTool);
+    // What the logs report for a detached row: how long its sessions ran headless between the
+    // drain and this boot, and that the attempt was given back (the budget-free requeue).
     const detachFields = detached
-      ? { detached: true, detachedForMs: now - (row.detached_at ?? now) }
+      ? { detached: true, detachedForMs: now - (row.detached_at ?? now), attemptRefunded: true }
       : {};
     if ((row.tool as JobTool) === "dispatch") {
       // Parsed once: `worktree_meta` is read for both the in-place marker check and the
       // worktree path below, and re-parsing the same column twice invited the two reads to
       // silently drift if only one were ever updated.
       const meta =
-        row.worktree_meta !== null
-          ? (JSON.parse(row.worktree_meta) as {
-              path?: unknown;
-              workspace?: unknown;
-              snapshot?: unknown;
-            })
-          : null;
-      // An in-place episode resumes only after a drain detached its session AND its metadata
-      // carries the pre-episode snapshot (`{ path, workspace: "in-place", snapshot }`, persisted
-      // by dispatch.ts's `onWorktreeReady`): the re-attached run attributes its edits against
-      // that baseline. A crash (no detach marker — the session may be gone, the snapshot's
-      // per-repo lock was process-local) or a row written before the snapshot was persisted is
-      // never resumed. The `workspace` key identifies it: a real `DispatchWorktree` never has one.
+        row.worktree_meta !== null ? (JSON.parse(row.worktree_meta) as DispatchMeta) : null;
       const metaIsInPlace = meta?.workspace === "in-place";
       const worktreePath = meta?.path ?? null;
       const pathExists = typeof worktreePath === "string" && existsSync(worktreePath);
-      const decision = metaIsInPlace
-        ? detached && hasInPlaceSnapshot(meta) && row.session_id !== null && pathExists
-          ? ("resume" as const)
-          : ("interrupted" as const)
-        : dispatchRecoveryStatusFor(
-            detached ? 0 : row.attempts,
-            row.session_id !== null,
-            pathExists,
-          );
+      const decision = dispatchRecoveryDecision(row, meta, detached, pathExists);
       if (decision === "interrupted") {
         db.run(
           "UPDATE jobs SET status = 'interrupted', error = 'HTTP server restarted while job was running', finished_at = ? WHERE id = ?",
@@ -1414,7 +1452,7 @@ function recover(): void {
       // "fresh" — clear both markers so the handler creates a new worktree, same as an
       // ordinary first attempt.
       if (row.session_id?.startsWith("ses_")) void interruptOpencodeSession(row.session_id);
-      requeueRow(row.id, now, ", session_id = NULL, worktree_meta = NULL");
+      requeueRow(row.id, now, { clearSession: true, clearWorktree: true });
       requeued++;
       if (detached) detachedResumed++;
       logger.warn(
@@ -1436,7 +1474,7 @@ function recover(): void {
       // them. A review's throwaway worktree survives only a detach — a crash's was swept at boot.
       const keepWorktree =
         detached && typeof row.worktree_meta === "string" && worktreeMetaExists(row.worktree_meta);
-      requeueRow(row.id, now, keepWorktree ? "" : ", worktree_meta = NULL");
+      requeueRow(row.id, now, { clearWorktree: !keepWorktree });
       requeued++;
       if (detached) detachedResumed++;
       logger.warn(
@@ -1458,7 +1496,7 @@ function recover(): void {
       );
       interrupted++;
       recordJobStats(row.id);
-      endJobSessions(row.id, true);
+      releaseJobSessions(row.id);
     }
   }
   const pending =

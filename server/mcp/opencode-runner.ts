@@ -34,6 +34,7 @@ import type { Backend } from "../lib/routing.ts";
 import { IDLE_TIMEOUT_MS } from "../lib/idle-timeout.ts";
 import {
   extractJson,
+  canDetachSession,
   getSessionLedger,
   isIdleTimedOut,
   isSessionDraining,
@@ -50,6 +51,7 @@ import {
 } from "./session-runner.ts";
 import {
   createOpencodeClient,
+  OpencodeHttpError,
   type OpencodeClient,
   type OpencodeMessage,
 } from "./opencode-client.ts";
@@ -345,8 +347,8 @@ export interface OpencodeDriveInput {
   /** Attach to a session that is running its turn (or already finished it) on its own: no prompt
    *  is sent, only waited on. */
   attach?: boolean;
-  /** A drain detaches the session instead of interrupting it — true for every session run under a
-   *  job; the next boot re-attaches it (job row `session_id` or the session ledger). */
+  /** A drain detaches the session instead of interrupting it (`canDetachSession`: it runs under a
+   *  job and the caller can hand it back — job row `session_id` or the session ledger). */
   reattachOnDrain?: boolean;
   /** The newest `idle` message id BEFORE this prompt (resume only) — completion needs a newer one. */
   baselineIdleId?: string;
@@ -771,7 +773,8 @@ export async function runOpencodeAttempt<T>(
   if (jobId !== undefined && isCancelled?.(jobId)) throw new SessionCancelledError(jobId);
   // A drain has begun: nothing may start now. The job is requeued by the next boot, which starts
   // (or re-attaches) this session — never create one this process is about to abandon.
-  if (jobId !== undefined && isSessionDraining()) throw new SessionDetachedError(jobId);
+  const detachable = canDetachSession(opts);
+  if (detachable && isSessionDraining()) throw new SessionDetachedError(jobId);
   const probe = await (deps.preflight ?? preflightIuEndpoint)(iuOpenaiBase, preflightBudgetMs());
   if (!probe.ok) {
     return refuse(
@@ -820,7 +823,12 @@ export async function runOpencodeAttempt<T>(
   const startMs = performance.now();
   if (jobId !== undefined && isCancelled?.(jobId)) throw new SessionCancelledError(jobId);
 
-  const finalPrompt = jsonSchema ? appendJsonSchemaInstruction(prompt, jsonSchema) : prompt;
+  // Usage of a session an earlier attempt already attributed (a settled ledger row) is never
+  // written twice. Declared before anything below can write a row.
+  let alreadyAttributed = false;
+  const attributeOnce = (row: Parameters<typeof writeAttribution>[0]): void => {
+    if (!alreadyAttributed) writeAttribution(row);
+  };
   // The session ledger (multi-session jobs, `SessionOptions.reattachKey`): a session an earlier
   // process recorded for this exact (job, key) is re-attached instead of created.
   const ledger = jobId !== undefined && opts.reattachKey ? getSessionLedger() : null;
@@ -829,14 +837,16 @@ export async function runOpencodeAttempt<T>(
     ledger && jobId !== undefined && ledgerKey && resumeSessionId === undefined
       ? ledger.get(jobId, ledgerKey)
       : undefined;
-  /** Usage of a ledger session an earlier attempt already attributed is never written twice. */
-  let alreadyAttributed = ledgerRow?.settled === true;
+  alreadyAttributed = ledgerRow?.settled === true;
   let drive: OpencodeDriveResult;
   let sessionId = resumeSessionId ?? ledgerRow?.sessionId;
   try {
     let baselineIdleId: string | undefined;
     let attach = false;
     let promptResume = false;
+    // The prompt a re-attached session with history is sent (the continuation nudge); a fresh or
+    // never-prompted session gets the full `prompt`.
+    let sendPrompt = prompt;
     if (sessionId) {
       // A re-attach after a restart. The session lives on the server, so it is in one of three
       // states: running its turn (a detached drain — attach, never prompt: a second prompt would
@@ -855,15 +865,13 @@ export async function runOpencodeAttempt<T>(
         attach = live || finishedOnItsOwn;
         baselineIdleId = !finishedOnItsOwn && newest?.type === "idle" ? newest.id : undefined;
         // A session with no message at all was detached before its prompt went out: send the
-        // prompt as a first one, not as a resume of a turn that never started.
+        // full prompt as a first one, not a resume of a turn that never started.
         promptResume = !attach && newest !== undefined;
-        const mode = live
-          ? "live"
-          : finishedOnItsOwn
-            ? "finished"
-            : newest
-              ? "resume"
-              : "unprompted";
+        if (promptResume && opts.resumePrompt) sendPrompt = opts.resumePrompt;
+        let mode: "live" | "finished" | "resume" | "unprompted" = "unprompted";
+        if (live) mode = "live";
+        else if (finishedOnItsOwn) mode = "finished";
+        else if (newest) mode = "resume";
         runnerLogger().info(
           {
             event: "session.opencode_reattach",
@@ -876,9 +884,12 @@ export async function runOpencodeAttempt<T>(
           "opencode session re-attached after a restart",
         );
       } catch (err) {
-        // A ledger session that is gone from the server (state wiped, pruned) is not an error:
-        // forget it and start the call over. A caller-supplied id keeps failing loudly.
-        if (!ledgerRow || !ledger || jobId === undefined || !ledgerKey) throw err;
+        // A ledger session the server DEFINITELY no longer has (HTTP 404: state wiped, pruned) is
+        // not an error: forget it and start the call over. Anything else — a refused connection,
+        // a timeout, a 5xx — says nothing about the session and rethrows (transport class → the
+        // retry ladder), as does a caller-supplied id.
+        const notFound = err instanceof OpencodeHttpError && err.status === 404;
+        if (!notFound || !ledgerRow || !ledger || jobId === undefined || !ledgerKey) throw err;
         runnerLogger().warn(
           {
             event: "session.opencode_ledger_stale",
@@ -895,6 +906,9 @@ export async function runOpencodeAttempt<T>(
       }
     }
     if (!sessionId) {
+      // The preflight and the server-status read above await: a drain may have begun meanwhile.
+      // Nothing may be created once it has — the next boot starts this call.
+      if (detachable && isSessionDraining()) throw new SessionDetachedError(jobId);
       sessionId = await client.createSession({
         directory: cwd,
         model: { providerID: opencodeProviderForWire(registryModel.wire), id: model, variant },
@@ -910,10 +924,10 @@ export async function runOpencodeAttempt<T>(
       jobId,
       cwd,
       sessionId,
-      prompt: finalPrompt,
+      prompt: jsonSchema ? appendJsonSchemaInstruction(sendPrompt, jsonSchema) : sendPrompt,
       resume: promptResume,
       attach,
-      reattachOnDrain: jobId !== undefined,
+      reattachOnDrain: detachable,
       baselineIdleId,
       logContext: errCtx,
       onActivity,
@@ -923,6 +937,7 @@ export async function runOpencodeAttempt<T>(
       idleTimeoutMs: deps.idleTimeoutMs ?? opts.idleTimeoutMs,
     });
   } catch (err) {
+    if (err instanceof SessionDetachedError) throw err;
     // The server became unreachable (or answered garbage) mid-setup or mid-run. The error text
     // carries a connection-class token for transport failures, so the retry ladder and the
     // breaker read it as such; the message never includes a response body.
@@ -934,7 +949,7 @@ export async function runOpencodeAttempt<T>(
       { event: "session.opencode_error", project: cwd, ...errCtx, sessionId, error },
       "opencode session failed",
     );
-    writeAttribution({
+    attributeOnce({
       sessionId: sessionUuid,
       tool: tool ?? "unknown",
       project: cwd,
@@ -963,7 +978,9 @@ export async function runOpencodeAttempt<T>(
   // Fail as a transport-class error (connection text) instead of collapsing into "no output".
   if (drive.messagesError && drive.finished && !drive.stopped && !drive.killReason) {
     const error = `opencode server unreachable reading messages after the run (fetch failed): ${redactSecret(redactSecret(drive.messagesError, iuKey), password)}`;
-    writeAttribution({
+    // Neither settled nor dropped: the session is intact, so a settled row keeps its result for the
+    // retry (which re-attaches and reads again) and an unsettled one stays to be attributed.
+    attributeOnce({
       sessionId: sessionUuid,
       opencodeSessionId: sessionId,
       tool: tool ?? "unknown",
@@ -1011,8 +1028,7 @@ export async function runOpencodeAttempt<T>(
       if (outcome === "ok") ledger.settle(jobId, ledgerKey);
       else ledger.drop(jobId, ledgerKey);
     }
-    if (alreadyAttributed) return;
-    writeAttribution({
+    attributeOnce({
       sessionId: sessionUuid,
       opencodeSessionId: sessionId,
       tool: tool ?? "unknown",

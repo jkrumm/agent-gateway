@@ -596,6 +596,10 @@ export async function runCheck(
   onProgress?: ProgressSink,
   jobId?: string,
   isCancelled?: (jobId: string) => boolean,
+  /** Makes an OpenCode check session detachable (`SessionOptions.reattachKey`). Only a `check`
+   *  JOB passes it (executor.ts): a check run on behalf of another job (dispatch's pre-push
+   *  check, `update_pr`) is not re-attachable by that job, so a drain waits for it instead. */
+  reattachKey?: string,
 ): Promise<CheckOutput> {
   const { cwd, commands, stepTimeoutSeconds } = parseParams(CHECK_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
@@ -622,7 +626,7 @@ export async function runCheck(
       tool: "check",
       jobId,
       isCancelled,
-      reattachKey: "check",
+      reattachKey,
       jsonSchema: CHECK_JSON_SCHEMA,
       route: routeFor("check"),
       readOnly: true,

@@ -185,19 +185,26 @@ A drain used to wait for every running job because a worker had no checkpoint. A
 does: it lives on the shared OpenCode server (`com.jkrumm.agent-gateway-opencode`), a separate
 LaunchAgent a reload never touches. So the drain's first act (`createShutdownController.begin()` →
 `detachSessions`, `detachRemoteSessions()` in `session-runner.ts`) is to **detach every OpenCode
-session run under a job**: it stops being awaited, keeps running on the server, and its handler
-unwinds with `SessionDetachedError`. The affected jobs are marked durably first (`jobs.detached_at`,
-`markJobsDetached`), so even a SIGKILL a moment later leaves them requeueable. The drain then waits
+session a caller can hand back** (`canDetachSession`: under a job, with a `reattachKey` or an
+`onSessionId`): it stops being awaited, keeps running on the server, and its handler unwinds with
+`SessionDetachedError`. Each detach marks its job durably through the store (`jobs.detached_at`,
+`SessionLedger.markDetached`) — also for a session that registers after the drain began — so even a
+SIGKILL a moment later leaves the job requeueable. The drain then waits
 only for **`drainBlockers`** (`QueueStats`, exported in `/api/jobs/health`): running jobs that are not
-detachable-only — a live `claude -p` session, a `make check` step, a single-shot request, or a job
-between phases (it reaches its next OpenCode session, which detaches before creating anything, or it
-finishes). Review angles, a worktree or in-place dispatch and any other OpenCode-harness tool detach;
-a drain with only those in flight finishes immediately.
+detachable-only — a live `claude -p` session (also one next to a detached OpenCode session of the same
+job), a `make check` step, a non-detachable session, a single-shot request, or a job between phases
+(it reaches its next OpenCode session, which detaches before creating anything, or it finishes).
+Review angles, a worktree or in-place dispatch, check and overview jobs detach; a repo check run FOR
+another job (dispatch's pre-push check, `update_pr`) and excalidraw do not (nothing could hand their
+session back), so the drain waits for them. A drain with only detachable sessions in flight finishes
+immediately.
 
 What the next boot does (`recover()` in `store.ts`): a `running` row with `detached_at` is requeued
-**without spending its requeue-once budget** — whatever its `attempts`, for every tool, and the attempt
-the requeue would charge is given back, so repeated deploys never push a job toward `interrupted` and
-a later genuine crash still gets its one requeue. A crash (no marker) keeps today's rules. Dispatch
+**without spending its requeue-once budget** — whatever its `attempts`, for `dispatch` and the
+requeue-on-recover tools (a marker on any other tool is ignored), and the attempt the requeue would
+charge is given back (`attemptRefunded` in the log), so repeated deploys never push a job toward
+`interrupted` and a later genuine crash still gets its one requeue. A crash (no marker) keeps today's
+rules. Dispatch
 resumes its recorded session; any other tool re-runs and finds its sessions in the ledger
 (`job_sessions`, written by `runOpencodeAttempt` under `SessionOptions.reattachKey`), re-attaching by
 state: live → wait, finished while down → read the result, cut off → `prompt {resume:true}`. Usage is
@@ -208,8 +215,9 @@ carries the pre-episode snapshot; one without it (a crash, or a row from before 
 `interrupted` as before.
 
 `make reload`'s preflight (`scripts/reload-preflight.sh`) therefore refuses only while
-`drainBlockers - singleShot.running > 0` (single-shot jobs, seconds long and requeued on boot, never
-refused and still do not); OpenCode-only runs never refuse. `FORCE=1` is unchanged for what it
+`reloadRefusals > 0` in `/api/jobs/health` — the session-lane subset of `drainBlockers`, computed
+next to it in `store.ts`. The drain itself still waits for single-shot jobs (`triage`/`decide`, one
+short request each); they are simply not worth a refusal. OpenCode-only runs never refuse. `FORCE=1` is unchanged for what it
 discards — `claude -p` workers are still killed and recovered like a crash — but it no longer
 interrupts OpenCode sessions: the forced abort detaches them first too.
 

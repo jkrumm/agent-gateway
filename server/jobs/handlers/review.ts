@@ -88,7 +88,10 @@ wrapped in one \`\`\`json fence) — no preamble such as "Here's the verdict", n
 headings, no commentary before or after. Emit it as your final message and stop.`;
 
 /** Run `fn` over `items` with at most `limit` in flight. Preserves input order. After one call
- *  throws (a cancel, a drain detach) no further item is started: the run is already lost. */
+ *  throws (a cancel, a drain detach) no further item is started, the calls already in flight are
+ *  allowed to settle — none is left running unobserved behind the rejection (a `claude -p` angle
+ *  next to a detached OpenCode one keeps the job a drain blocker until it ends) — and the FIRST
+ *  error is then rethrown. */
 async function mapWithConcurrency<T, R>(
   items: T[],
   limit: number,
@@ -96,20 +99,20 @@ async function mapWithConcurrency<T, R>(
 ): Promise<R[]> {
   const results: R[] = [];
   let next = 0;
-  let aborted = false;
+  let failure: { error: unknown } | undefined;
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (!aborted) {
+    while (!failure) {
       const i = next++;
       if (i >= items.length) return;
       try {
         results[i] = await fn(items[i]);
-      } catch (err) {
-        aborted = true;
-        throw err;
+      } catch (error) {
+        failure ??= { error };
       }
     }
   });
   await Promise.all(workers);
+  if (failure) throw failure.error;
   return results;
 }
 

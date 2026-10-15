@@ -24,7 +24,7 @@ import { runUpdatePr } from "./handlers/update-pr.ts";
 export function executeJob(job: JobRecord, onProgress: ProgressSink): Promise<unknown> {
   switch (job.tool) {
     case "check":
-      return runCheck(job.params, onProgress, job.id, isCancelRequested);
+      return runCheck(job.params, onProgress, job.id, isCancelRequested, "check");
     case "review":
       // `worktreeMeta` is non-null only for a ref-mode review a drain detached (`recover()` keeps
       // the throwaway worktree its angle sessions are still reading): reopen it, don't recut it.

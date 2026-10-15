@@ -153,7 +153,6 @@ export async function runExcalidrawDiagram(
     tool: "excalidraw-diagram",
     jobId,
     isCancelled,
-    reattachKey: "excalidraw-diagram",
     route: routeFor("excalidraw"),
     jsonSchema: WORKER_JSON_SCHEMA,
     readOnly: true,

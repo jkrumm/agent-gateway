@@ -6,13 +6,14 @@
 // Rows are seeded through a second sqlite connection, same as tests/jobs-recover-dispatch.test.ts.
 
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   __resetForTests,
   createJob,
+  dispatchRecoveryDecision,
   drainBlockerCount,
   getJob,
   initJobStore,
@@ -22,6 +23,7 @@ import {
   queueStats,
   setDraining,
 } from "../server/jobs/store.ts";
+import * as opencodeServer from "../server/mcp/opencode-server.ts";
 import {
   __registerProcForTests,
   __resetActiveProcsForTests,
@@ -80,6 +82,14 @@ function column<T>(id: string, name: string): T {
   read.close();
   return row?.[name] as T;
 }
+
+const worktree = (path: string) => ({
+  path,
+  branch: "b",
+  base: "a",
+  baseRef: "HEAD",
+  pushable: false,
+});
 
 const SNAPSHOT = { headOid: "abc", branch: "master", stashOid: "", untracked: ["notes.txt"] };
 
@@ -259,28 +269,58 @@ describe("drain blockers", () => {
       await Bun.sleep(2);
     }
   };
+  const liveProc = { exitCode: null, kill() {}, pid: 1 } as never;
 
-  test("only jobs whose live work is an OpenCode session are exempt; claude procs and idle jobs block", async () => {
+  test("OC-only is exempt; claude-only blocks; OC MIXED with a live claude proc of the same job blocks", async () => {
     initJobStore({ executor: NEVER_EXECUTE });
-    const oc = createJob("review", {});
-    const claude = createJob("check", {});
-    const between = createJob("narrative", {});
-    await untilRunning([oc.id, claude.id, between.id]);
+    const ocOnly = createJob("review", {});
+    const claudeOnly = createJob("check", {});
+    const mixed = createJob("overview", {});
+    await untilRunning([ocOnly.id, claudeOnly.id, mixed.id]);
 
-    trackExternalSession(oc.id, () => {});
-    __registerProcForTests({ exitCode: null, kill() {}, pid: 1 } as never, claude.id);
+    trackExternalSession(ocOnly.id, () => {}, true);
+    __registerProcForTests(liveProc, claudeOnly.id);
+    trackExternalSession(mixed.id, () => {}, true);
+    __registerProcForTests(liveProc, mixed.id);
 
     expect(queueStats().running).toBe(3);
-    expect(queueStats().drainBlockers).toBe(2); // the claude job and the job between sessions
-    expect(drainBlockerCount()).toBe(2);
+    expect(drainBlockerCount()).toBe(2); // claude-only and mixed
+    expect(queueStats().drainBlockers).toBe(2);
     expect(jobHealth().drainBlockers).toBe(2);
+  });
+
+  test("a job between sessions (no live work at all) blocks", async () => {
+    initJobStore({ executor: NEVER_EXECUTE });
+    const job = createJob("narrative", {});
+    await untilRunning([job.id]);
+    expect(drainBlockerCount()).toBe(1);
+  });
+
+  test("a finished claude proc no longer blocks its job", async () => {
+    initJobStore({ executor: NEVER_EXECUTE });
+    const job = createJob("review", {});
+    await untilRunning([job.id]);
+    trackExternalSession(job.id, () => {}, true);
+    const proc = { exitCode: null, kill() {}, pid: 2 };
+    __registerProcForTests(proc as never, job.id);
+    expect(drainBlockerCount()).toBe(1);
+    proc.exitCode = 0 as never;
+    expect(drainBlockerCount()).toBe(0);
+  });
+
+  test("a non-detachable session (a check run FOR another job) blocks", async () => {
+    initJobStore({ executor: NEVER_EXECUTE });
+    const job = createJob("dispatch", {});
+    await untilRunning([job.id]);
+    trackExternalSession(job.id, () => {}, false);
+    expect(drainBlockerCount()).toBe(1);
   });
 
   test("a job detached by the drain stays out of the count after its drive loop is gone", async () => {
     initJobStore({ executor: NEVER_EXECUTE });
     const oc = createJob("review", {});
     await untilRunning([oc.id]);
-    const untrack = trackExternalSession(oc.id, () => {});
+    const untrack = trackExternalSession(oc.id, () => {}, true);
 
     expect(drainBlockerCount()).toBe(0);
     expect(detachRemoteSessions()).toEqual([oc.id]);
@@ -288,11 +328,32 @@ describe("drain blockers", () => {
     expect(drainBlockerCount()).toBe(0);
   });
 
-  test("a single-shot job blocks the drain like any job without a session", async () => {
+  test("detaching marks the job durably, also for a session that registers after the drain began", async () => {
+    initJobStore({ executor: NEVER_EXECUTE });
+    const early = createJob("review", {});
+    const late = createJob("review", {});
+    await untilRunning([early.id, late.id]);
+    trackExternalSession(early.id, () => {}, true);
+
+    detachRemoteSessions();
+    expect(column<number | null>(early.id, "detached_at")).not.toBeNull();
+    expect(column<number | null>(late.id, "detached_at")).toBeNull();
+
+    // The drain's start-of-drain pass never saw this one; registering after it detaches on the spot.
+    const stops: string[] = [];
+    trackExternalSession(late.id, (reason) => stops.push(reason), true);
+    expect(stops).toEqual(["drain"]);
+    expect(column<number | null>(late.id, "detached_at")).not.toBeNull();
+  });
+
+  test("a single-shot job blocks the drain but is not a reload refusal", async () => {
     initJobStore({ executor: NEVER_EXECUTE });
     const triage = createJob("triage", {});
-    await untilRunning([triage.id]);
-    expect(drainBlockerCount()).toBe(1);
+    const claude = createJob("check", {});
+    await untilRunning([triage.id, claude.id]);
+    expect(drainBlockerCount()).toBe(2);
+    expect(queueStats().reloadRefusals).toBe(1);
+    expect(jobHealth().reloadRefusals).toBe(1);
   });
 });
 
@@ -332,5 +393,169 @@ describe("pending age after a recovery", () => {
     seed.close();
     expect(jobHealth().draining).toBe(true);
     expect(jobHealth().ok).toBe(true);
+  });
+});
+
+describe("recover() — detached rows with nothing to resume", () => {
+  test("detached dispatch whose worktree is gone: re-run from scratch, no budget spent, markers cleared", () => {
+    const job = createJob("dispatch", {});
+    seedRunning(job.id, {
+      attempts: 3,
+      sessionId: "ses_gone_wt",
+      worktreeMeta: worktree("/nonexistent/agw-wt"),
+      detachedAt: Date.now(),
+    });
+    initJobStore({ executor: NEVER_EXECUTE });
+    expect(["pending", "running"]).toContain(getJob(job.id)?.status ?? "");
+    expect(column<string | null>(job.id, "session_id")).toBeNull();
+    expect(column<string | null>(job.id, "worktree_meta")).toBeNull();
+    expect(column<number>(job.id, "attempts")).toBe(3); // 3 → 2 given back → 3 on promotion
+  });
+
+  test("detached dispatch with a worktree but no recorded session: re-run from scratch", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "agw-detach-nosess-"));
+    try {
+      const job = createJob("dispatch", {});
+      seedRunning(job.id, { attempts: 2, worktreeMeta: worktree(tmp), detachedAt: Date.now() });
+      initJobStore({ executor: NEVER_EXECUTE });
+      expect(["pending", "running"]).toContain(getJob(job.id)?.status ?? "");
+      expect(column<string | null>(job.id, "worktree_meta")).toBeNull();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("detached in-place dispatch whose live path is gone: interrupted", () => {
+    const job = createJob("dispatch", {});
+    seedRunning(job.id, {
+      sessionId: "ses_ip",
+      worktreeMeta: { path: "/nonexistent/agw-live", workspace: "in-place", snapshot: SNAPSHOT },
+      detachedAt: Date.now(),
+    });
+    initJobStore({ executor: NEVER_EXECUTE });
+    expect(getJob(job.id)?.status).toBe("interrupted");
+  });
+
+  test("detached review: the throwaway worktree is kept while it exists, cleared once it is gone", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "agw-detach-review-"));
+    try {
+      const kept = createJob("review", {});
+      seedRunning(kept.id, { detachedAt: Date.now(), worktreeMeta: worktree(tmp) });
+      const gone = createJob("review", {});
+      seedRunning(gone.id, {
+        detachedAt: Date.now(),
+        worktreeMeta: worktree("/nonexistent/agw-review-wt"),
+      });
+      initJobStore({ executor: NEVER_EXECUTE });
+      expect(JSON.parse(column<string>(kept.id, "worktree_meta")).path).toBe(tmp);
+      expect(column<string | null>(gone.id, "worktree_meta")).toBeNull();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a crashed (not detached) review requeue clears its worktree reference — the boot sweep removed it", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "agw-crash-review-"));
+    try {
+      const job = createJob("review", {});
+      seedRunning(job.id, { attempts: 1, worktreeMeta: worktree(tmp) });
+      initJobStore({ executor: NEVER_EXECUTE });
+      expect(column<string | null>(job.id, "worktree_meta")).toBeNull();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("recover() — tools without a detachable session ignore the marker", () => {
+  test("update_pr and excalidraw_diagram are recovered by the ordinary rules, never given a free re-run", () => {
+    const updatePr = createJob("update_pr", {});
+    seedRunning(updatePr.id, { attempts: 1, detachedAt: Date.now() });
+    const excalidraw = createJob("excalidraw_diagram", {});
+    seedRunning(excalidraw.id, { attempts: 1, detachedAt: Date.now() });
+    initJobStore({ executor: NEVER_EXECUTE });
+    // Neither is requeued on recovery today; the marker changes nothing.
+    expect(getJob(updatePr.id)?.status).toBe("interrupted");
+    expect(getJob(excalidraw.id)?.status).toBe("interrupted");
+  });
+});
+
+describe("recover() — a detached session that will not be re-attached is interrupted on boot", () => {
+  test("in-place without a snapshot, a worktree-less dispatch, and a cancelled review's ledger sessions", () => {
+    const interrupt = spyOn(opencodeServer, "interruptOpencodeSession").mockResolvedValue(
+      undefined as never,
+    );
+    try {
+      const tmp = mkdtempSync(join(tmpdir(), "agw-detach-int-"));
+      const noSnapshot = createJob("dispatch", {});
+      seedRunning(noSnapshot.id, {
+        sessionId: "ses_in_place",
+        worktreeMeta: { path: tmp, workspace: "in-place" },
+        detachedAt: Date.now(),
+      });
+      const fresh = createJob("dispatch", {});
+      seedRunning(fresh.id, {
+        sessionId: "ses_fresh",
+        worktreeMeta: worktree("/nonexistent/agw-int"),
+        detachedAt: Date.now(),
+      });
+      const cancelled = createJob("review", {});
+      seedRunning(cancelled.id, { detachedAt: Date.now() });
+      getSessionLedger()?.put(cancelled.id, "angle:qa", "ses_angle_qa");
+      const seed = new Database(dbPath());
+      seed.run("UPDATE jobs SET cancel_requested_at = ? WHERE id = ?", [Date.now(), cancelled.id]);
+      seed.close();
+
+      initJobStore({ executor: NEVER_EXECUTE });
+      rmSync(tmp, { recursive: true, force: true });
+
+      expect(getJob(noSnapshot.id)?.status).toBe("interrupted");
+      expect(getJob(cancelled.id)?.status).toBe("cancelled");
+      const stopped = interrupt.mock.calls.map((c) => c[0]).toSorted();
+      expect(stopped).toEqual(["ses_angle_qa", "ses_fresh", "ses_in_place"]);
+      expect(getSessionLedger()?.get(cancelled.id, "angle:qa")).toBeUndefined();
+    } finally {
+      interrupt.mockRestore();
+    }
+  });
+
+  test("a review interrupted at the cap releases its ledger sessions", () => {
+    const interrupt = spyOn(opencodeServer, "interruptOpencodeSession").mockResolvedValue(
+      undefined as never,
+    );
+    try {
+      const job = createJob("review", {});
+      seedRunning(job.id, { attempts: 2 }); // crash, budget spent
+      getSessionLedger()?.put(job.id, "angle:qa", "ses_capped");
+      initJobStore({ executor: NEVER_EXECUTE });
+      expect(getJob(job.id)?.status).toBe("interrupted");
+      expect(interrupt.mock.calls.map((c) => c[0])).toEqual(["ses_capped"]);
+    } finally {
+      interrupt.mockRestore();
+    }
+  });
+});
+
+describe("dispatchRecoveryDecision", () => {
+  const row = { attempts: 3, session_id: "ses_x" };
+  test("a detached worktree row spends no attempt; an undetached one at the cap is interrupted", () => {
+    expect(dispatchRecoveryDecision(row, null, true, true)).toBe("resume");
+    expect(dispatchRecoveryDecision(row, null, false, true)).toBe("interrupted");
+    expect(dispatchRecoveryDecision({ attempts: 3, session_id: null }, null, true, true)).toBe(
+      "fresh",
+    );
+  });
+
+  test("in-place needs the detach marker, a snapshot, a session and an existing path", () => {
+    const meta = { path: "/p", workspace: "in-place", snapshot: SNAPSHOT };
+    expect(dispatchRecoveryDecision(row, meta, true, true)).toBe("resume");
+    expect(dispatchRecoveryDecision(row, meta, false, true)).toBe("interrupted");
+    expect(dispatchRecoveryDecision(row, meta, true, false)).toBe("interrupted");
+    expect(dispatchRecoveryDecision(row, { path: "/p", workspace: "in-place" }, true, true)).toBe(
+      "interrupted",
+    );
+    expect(dispatchRecoveryDecision({ attempts: 1, session_id: null }, meta, true, true)).toBe(
+      "interrupted",
+    );
   });
 });

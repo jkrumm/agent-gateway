@@ -31,12 +31,13 @@ if [ -n "$tracked_exit" ] && [ -n "$live_exit" ] && [ "$tracked_exit" != "$live_
 fi
 
 if [ -z "${FORCE:-}" ]; then
-  # Only jobs a reload would WAIT for or discard count: `drainBlockers` excludes a job whose live
-  # work is an OpenCode session — the drain detaches those at its start and the next boot
-  # re-attaches them. Single-shot jobs (triage/decide, seconds long, requeued on boot) were never
-  # a reason to refuse and still are not; the drain itself does wait for them. An older server
-  # without the field falls back to every running session-lane job.
-  n=$(curl -sf --max-time 3 http://127.0.0.1:7705/api/jobs/health 2>/dev/null | jq -r 'if .drainBlockers != null then .drainBlockers - (.singleShot.running // 0) else (.running // 0) end' 2>/dev/null || echo 0)
+  # `reloadRefusals` (computed server-side next to `drainBlockers`, store.ts) is the number of
+  # running session-lane jobs a reload cannot detach: `claude -p` sessions, check steps, jobs
+  # between phases. A job whose only live work is OpenCode sessions is not one — the drain detaches
+  # it and the next boot re-attaches it. Single-shot jobs (triage/decide) are not counted either:
+  # the drain DOES wait for them, but each is one short request, so they are not worth refusing a
+  # reload over. An older server without the field falls back to every running session-lane job.
+  n=$(curl -sf --max-time 3 http://127.0.0.1:7705/api/jobs/health 2>/dev/null | jq -r '.reloadRefusals // .running // 0' 2>/dev/null || echo 0)
   if [ "${n:-0}" != "0" ]; then
     echo "refusing to reload: $n job(s) running that a reload cannot detach (claude -p sessions, check steps) — waiting is normal (jobs commonly run minutes), or FORCE=1 make reload discards them. OpenCode sessions are not counted: they survive a reload."
     exit "$REFUSED"

@@ -551,7 +551,9 @@ describe("runDispatch — in-place detach and resume", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.resumeSessionId).toBe("ses_ip_resume");
-    expect(calls[0]?.prompt).toMatch(/^Continue the task/);
+    // The full brief stays `prompt`; the nudge is for a session that already has history.
+    expect(calls[0]?.prompt).toContain("do it");
+    expect(calls[0]?.resumePrompt).toMatch(/^Continue the task/);
     expect((metas[0] as { snapshot?: unknown }).snapshot).toEqual(persisted); // not re-taken: HEAD is not all zeros
   });
 

@@ -641,7 +641,12 @@ describe("runOpencodeAttempt — durable episodes (Wave 4)", () => {
       hang: true,
       visibleNow: [{ content: [text("halfway there")] }],
     });
-    const running = run({ jobId: "job-7", ...opts }, {}, { idleTimeoutMs: 60_000 });
+    // `onSessionId` is the dispatch-style handle that makes the session detachable.
+    const running = run(
+      { jobId: "job-7", onSessionId: () => {}, ...opts },
+      {},
+      { idleTimeoutMs: 60_000 },
+    );
     const settled = running.then(
       (value) => ({ value, error: undefined as unknown }),
       (error: unknown) => ({ value: undefined, error }),

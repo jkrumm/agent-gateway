@@ -1124,9 +1124,12 @@ function renderJobs(jobs: JobView[]): string {
 }
 
 function renderHealth(data: Record<string, unknown>): string {
+  const singleShot = (data.singleShot ?? {}) as { running?: number; pending?: number };
   const lines = [
     `ok: ${data.ok === true ? "yes" : "no"}`,
     `running: ${String(data.running ?? 0)}  pending: ${String(data.pending ?? 0)}`,
+    `single-shot: running ${String(singleShot.running ?? 0)}  pending ${String(singleShot.pending ?? 0)}`,
+    `drainBlockers: ${String(data.drainBlockers ?? 0)}  reloadRefusals: ${String(data.reloadRefusals ?? 0)}`,
     `failedLastHour: ${String(data.failedLastHour ?? 0)}  interruptedLastHour: ${String(data.interruptedLastHour ?? 0)}`,
   ];
   if (data.draining === true) lines.push("draining: yes");

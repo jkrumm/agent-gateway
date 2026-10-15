@@ -14,7 +14,6 @@ import {
   initJobStore,
   markDrainCompleted,
   markDrainKilled,
-  markJobsDetached,
   protectedWorktreePaths,
   queueStats,
   setDraining,
@@ -173,7 +172,7 @@ const drainBlockers = (): number => queueStats().drainBlockers;
 // A `claude -p` run has no checkpoint — it is atomic from the job's point of view — so a drain
 // buys such a job time to actually finish. An OpenCode session is different: it lives on the
 // shared OpenCode server, outside this process, so the drain DETACHES every one at its start
-// (`detachSessions`, session-runner.ts `detachRemoteSessions`), marks the jobs durably, and
+// (`detachSessions`, session-runner.ts `detachRemoteSessions`, which marks each job durably), and
 // waits only for the jobs that cannot be detached (`drainBlockerCount`). Whatever is still
 // running after the grace period is terminated and exits with the process; a drain-killed job's
 // row is left `running` for the next boot's ordinary crash-recovery to reconcile (store.ts
@@ -193,11 +192,7 @@ const drainBlockers = (): number => queueStats().drainBlockers;
 // period. SIGINT is not otherwise wired in this process (no readline/TTY prompt to interrupt), so
 // reusing it here doesn't shadow anything.
 const shutdownController = createShutdownController({
-  detachSessions: () => {
-    const jobIds = detachRemoteSessions();
-    markJobsDetached(jobIds);
-    return jobIds;
-  },
+  detachSessions: detachRemoteSessions,
   terminateActiveSessions,
   activeSessionCount,
   queueStats: () => ({ running: drainBlockers() }),

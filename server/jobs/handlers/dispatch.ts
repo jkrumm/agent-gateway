@@ -1102,11 +1102,15 @@ export async function runDispatch(
     // comment above this block for the "in-place run records a marker instead" reasoning).
     resumeCtx?.onWorktreeReady?.(worktreeMeta);
     if (strippedSettings.length > 0) note(`stripped ${strippedSettings.join(", ")}`);
-    const spawnEpisode = (p: string, opts: { resumeSessionId?: string } = {}) =>
+    const spawnEpisode = (
+      p: string,
+      opts: { resumeSessionId?: string; resumePrompt?: string } = {},
+    ) =>
       runSession<WorkerOutput>({
         cwd: sessionCwd,
         prompt: p,
         resumeSessionId: opts.resumeSessionId,
+        resumePrompt: opts.resumePrompt,
         tool: "dispatch",
         jobId,
         isCancelled,
@@ -1131,7 +1135,10 @@ export async function runDispatch(
         // boot (recover() keeps session_id + worktree_meta — for in-place, the snapshot too).
         onSessionId: resumeCtx?.onSessionId,
       });
-    const runEpisode = async (p: string, opts: { resumeSessionId?: string } = {}) => {
+    const runEpisode = async (
+      p: string,
+      opts: { resumeSessionId?: string; resumePrompt?: string } = {},
+    ) => {
       const r = await spawnEpisode(p, opts);
       fallbackWithheld ??= fallbackWithheldOf(r);
       return r;
@@ -1142,7 +1149,10 @@ export async function runDispatch(
     // the schema-validation retry below — is unaffected and always a fresh session, resume or
     // not, same as before this feature existed.
     let result = resuming
-      ? await runEpisode(RESUME_CONTINUATION_PROMPT, {
+      ? await runEpisode(prompt, {
+          // The continuation nudge goes to a session that already has history; one detached
+          // before its first prompt (no message at all) is sent the full `prompt` instead.
+          resumePrompt: RESUME_CONTINUATION_PROMPT,
           resumeSessionId: resumeCtx?.resume?.sessionId,
         })
       : await runEpisode(prompt);
