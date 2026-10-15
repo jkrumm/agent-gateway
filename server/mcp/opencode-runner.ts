@@ -1296,7 +1296,7 @@ export async function runOpencodeAttempt<T>(
     );
     attributeOnce(
       trace,
-      attributionRow(base, undefined, {
+      attributionRow(base, trace.sessionId, {
         outcome: "error",
         durationMs: Math.round(performance.now() - startMs),
         reason: "opencode_session_error",

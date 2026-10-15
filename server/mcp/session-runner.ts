@@ -6,6 +6,7 @@ import { z } from "zod";
 import { getIuConfig } from "../lib/iu-openai.ts";
 import { IDLE_TIMEOUT_MS } from "../lib/idle-timeout.ts";
 import { runOpencodeAttempt } from "./opencode-runner.ts";
+import { interruptOpencodeSession } from "./opencode-server.ts";
 import { readTrimmedLines, usageLane, workerBaseEnv } from "./worker-shared.ts";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -2070,7 +2071,12 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
   // (including a re-run's) keeps the row — it is the session to re-attach.
   if (opts.jobId !== undefined && opts.reattachKey) {
     if (nextLedgerCall(opts.jobId, opts.reattachKey) > 1) {
-      getSessionLedger()?.drop(opts.jobId, opts.reattachKey);
+      const ledger = getSessionLedger();
+      const stale = ledger?.get(opts.jobId, opts.reattachKey);
+      // The replaced call's session may still be live (its attempt ended on a transport error
+      // before the drive loop could stop it): stop it, or it keeps running unreferenced.
+      if (stale) void interruptOpencodeSession(stale.sessionId);
+      ledger?.drop(opts.jobId, opts.reattachKey);
     }
   }
   while (true) {

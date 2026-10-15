@@ -44,6 +44,8 @@ if (!path) {
 
 const config = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
 const models = listModels().filter((m) => m.harnesses.includes("opencode"));
+// A pre-v2 file still carries the singular `provider` block; drop it so only the v2 form loads.
+delete config.provider;
 config.providers = Object.fromEntries(
   (Object.keys(PROVIDERS) as ModelWire[]).map((wire) => {
     const p = PROVIDERS[wire];
