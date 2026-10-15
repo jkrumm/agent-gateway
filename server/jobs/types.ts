@@ -15,6 +15,7 @@ export type JobTool =
   | "overview"
   | "narrative"
   | "triage"
+  | "decide"
   | "update_pr";
 
 // Not exported — nothing outside this file needs the raw list, only the `isJobTool` guard
@@ -28,6 +29,7 @@ const JOB_TOOLS: readonly JobTool[] = [
   "overview",
   "narrative",
   "triage",
+  "decide",
   "update_pr",
 ];
 

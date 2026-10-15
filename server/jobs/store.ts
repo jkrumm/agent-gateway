@@ -327,6 +327,7 @@ const REQUEUE_ON_RECOVER: ReadonlySet<JobTool> = new Set<JobTool>([
   "narrative",
   "review",
   "triage",
+  "decide",
 ]);
 const MAX_RECOVER_ATTEMPTS = 2;
 

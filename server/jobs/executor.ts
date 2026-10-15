@@ -8,6 +8,7 @@ import { runDispatch } from "./handlers/dispatch.ts";
 import { runOverview } from "./handlers/overview.ts";
 import { runNarrative } from "./handlers/narrative.ts";
 import { runTriage } from "./handlers/triage.ts";
+import { runDecide } from "./handlers/decide.ts";
 import { runUpdatePr } from "./handlers/update-pr.ts";
 
 /** Dispatch a job to its tool handler. Returns the typed result, or throws on
@@ -50,6 +51,8 @@ export function executeJob(job: JobRecord, onProgress: ProgressSink): Promise<un
       return runNarrative(job.params, onProgress, job.id, isCancelRequested);
     case "triage":
       return runTriage(job.params, onProgress, job.id, isCancelRequested);
+    case "decide":
+      return runDecide(job.params, onProgress);
     case "update_pr":
       return runUpdatePr(job.params, onProgress, job.id, isCancelRequested);
     default: {
