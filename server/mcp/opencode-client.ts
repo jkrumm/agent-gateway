@@ -194,14 +194,14 @@ export function createOpencodeClient(fetchImpl: typeof fetch = fetch): OpencodeC
     options: { body?: unknown; signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<Response> => {
     const tries = method === "GET" ? GET_ATTEMPTS : 1;
-    for (let n = 1; ; n++) {
+    for (let n = 1; n < tries; n++) {
       try {
         return await attempt(method, path, options);
       } catch (err) {
-        const timedOut = err instanceof Error && /ETIMEDOUT/.test(err.message);
-        if (n >= tries || !timedOut) throw err;
+        if (!(err instanceof Error && /ETIMEDOUT/.test(err.message))) throw err;
       }
     }
+    return attempt(method, path, options);
   };
 
   const json = async <S extends z.ZodType>(

@@ -190,9 +190,9 @@ The 2026-10-11 `brew upgrade` changed behaviour under a running agw and broke ev
   `~/.local/share/agent-gateway/opencode-bin/<version>/` (`npm i @opencode/cli@<version>`).
   Homebrew's bottle stays at 2.0.25 (2026-10-15) and serves only interactive `oc`; the wrapper
   prefers the npm build matching `OPENCODE_PINNED_VERSION` and falls back to PATH.
-- The pin lives in `OPENCODE_PINNED_VERSION` (`server/mcp/opencode-server.ts`); the install
-  directory is mini-local state, so a reprovisioned machine needs the `npm i` step again (the
-  wrapper then refuses to start with the fix in its message).
+- The pin lives in `OPENCODE_PINNED_VERSION` (`server/mcp/opencode-server.ts`). The install
+  directory is mini-local state; `make install-opencode-agent` runs the idempotent
+  `scripts/install-opencode-bin.sh` first, so a bumped pin or a reprovisioned machine provisions itself.
 - An upgrade is a deliberate act, gated on the probes:
   ```bash
   agw jobs --running                      # step 0: nothing running — a restart kills attached episodes

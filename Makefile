@@ -198,6 +198,7 @@ uninstall-agent:
 # guard as install-agent (FORCE=1 skips it; a SIGTERM exits the server in ~50 ms, no drain).
 # `scripts/deploy.sh` calls this only when the agent is not loaded at all.
 install-opencode-agent:
+	@scripts/install-opencode-bin.sh
 	@if [ -z "$(FORCE)" ]; then \
 	  n=$$(curl -sf --max-time 3 http://127.0.0.1:7705/api/jobs/health 2>/dev/null | jq -r '.running // 0' 2>/dev/null || echo 0); \
 	  if [ "$${n:-0}" != "0" ]; then echo "refusing to install-opencode-agent: $$n job(s) running — restarting the server kills their episodes; FORCE=1 make install-opencode-agent discards them"; exit 1; fi; \
