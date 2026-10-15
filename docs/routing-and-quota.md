@@ -194,8 +194,10 @@ review angle were closed 2026-10-05:
    claude route instead, logged `review.opencode_angle_refused_config`.
 3. **True read-only profile.** OpenCode `readOnly` now uses the granular `bash` permission
    object: a leading `"*": "deny"`, an allowlist of read commands (`git log/diff/show/status/
-   grep/ls-files/rev-parse`, `rg`, `cat`, `ls`, `find`, `head`, `tail`, `wc`, `jq`, `curl`),
-   and `"*>*": "deny"` re-denied AFTER the allows so a reader cannot become a writer via
+   grep/ls-files/rev-parse`, `rg`, `cat`, `ls`, `find`, `head`, `tail`, `wc`, `jq`, `curl`,
+   plus the exact-match host probes `make logs` and `make verify` — not for sensitive episodes,
+   which run `agw-readonly-sensitive` without them so production log contents never reach their
+   context), and `"*>*": "deny"` re-denied AFTER the allows so a reader cannot become a writer via
    output redirection. `webfetch`/`websearch` are `deny` under `readOnly` (workers shell out
    via `curl`); the writable implement profile is unchanged.
 4. **`settingSources` parity.** OpenCode has no `settingSources` flag; it loads

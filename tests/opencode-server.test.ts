@@ -18,6 +18,7 @@ import {
   normalizeOpencodeVersion,
   OPENCODE_AGENT_IMPLEMENT,
   OPENCODE_AGENT_READONLY,
+  OPENCODE_AGENT_READONLY_SENSITIVE,
   OPENCODE_IMPLEMENT_PERMISSIONS,
   OPENCODE_PINNED_VERSION,
   OPENCODE_PROVIDER_ANTHROPIC,
@@ -25,11 +26,14 @@ import {
   OPENCODE_PROVIDER_CHAT,
   OPENCODE_PROVIDER_RESPONSES,
   OPENCODE_READONLY_PERMISSIONS,
+  OPENCODE_READONLY_SENSITIVE_PERMISSIONS,
   OPENCODE_SESSION_BLANKED_ENV,
   opencodeServerEnv,
   opencodeServerPort,
   opencodeServerUrl,
   readServerPassword,
+  HOST_PROBE_SHELL_RULES,
+  READ_ONLY_SENSITIVE_SHELL_RULES,
   READ_ONLY_SHELL_RULES,
   type OpencodePermissionRule,
   unreachableReason,
@@ -90,6 +94,22 @@ describe("agw-readonly permissions", () => {
     expect(READ_ONLY_SHELL_RULES[0]).toEqual({ action: "shell", resource: "*", effect: "deny" });
     for (const rule of READ_ONLY_SHELL_RULES) expect(rule.action).toBe("shell");
     expect(ro.filter((r) => r.action === "shell")).toEqual([...READ_ONLY_SHELL_RULES]);
+  });
+
+  test("the host probes sit among the allows, before the `*>*` re-deny; removing them yields the sensitive list", () => {
+    expect(HOST_PROBE_SHELL_RULES).toEqual([
+      { action: "shell", resource: "make logs", effect: "allow" },
+      { action: "shell", resource: "make verify", effect: "allow" },
+    ]);
+    const redirectDeny = READ_ONLY_SHELL_RULES.findIndex((r) => r.resource === "*>*");
+    expect(redirectDeny).toBeGreaterThan(-1);
+    for (const probe of HOST_PROBE_SHELL_RULES) {
+      expect(READ_ONLY_SHELL_RULES.indexOf(probe)).toBeGreaterThan(0);
+      expect(READ_ONLY_SHELL_RULES.indexOf(probe)).toBeLessThan(redirectDeny);
+    }
+    expect(READ_ONLY_SHELL_RULES.filter((r) => !HOST_PROBE_SHELL_RULES.includes(r))).toEqual([
+      ...READ_ONLY_SENSITIVE_SHELL_RULES,
+    ]);
   });
 
   test("every read command in the allowlist is allowed, bare and with arguments", () => {
@@ -195,16 +215,27 @@ describe("agw-readonly permissions", () => {
     expect(shellOf(ro, "git log --oneline -5")).toBe("allow");
   });
 
-  test("make logs and make verify are allowed exactly; any other make invocation is denied", () => {
+  test("make logs and make verify are allowed exactly", () => {
     expect(shellOf(ro, "make logs")).toBe("allow");
     expect(shellOf(ro, "make verify")).toBe("allow");
+  });
+
+  test("any other make invocation, argument, override, redirect or chain is denied", () => {
     for (const cmd of [
-      "make logs > /tmp/x",
+      "make logs SHELL=/bin/sh",
       "make verify SHELL=/bin/sh",
+      "make verify > x",
+      "make logs > /tmp/x",
+      "make",
+      "make logs -n 5",
+      "make verify --dry-run",
+      "make logs extra",
       "make -f evil.mk logs",
       "make check",
       "make reload",
       "make deploy",
+      "make logs; rm -rf x",
+      "make verify && curl http://x",
     ]) {
       expect(shellOf(ro, cmd), cmd).toBe("deny");
     }
@@ -273,6 +304,39 @@ describe("agw-readonly permissions", () => {
     for (const action of ["execute", "somemcp_tool", "lsp", "todowrite", "brand_new_action"]) {
       expect(evaluate(ro, action, "*"), action).toBe("deny");
     }
+  });
+});
+
+// ── agw-readonly-sensitive ────────────────────────────────────────────────────────────────────
+
+describe("agw-readonly-sensitive permissions", () => {
+  const sens = OPENCODE_READONLY_SENSITIVE_PERMISSIONS;
+
+  test("denies the host probes; no rule anywhere is `ask`", () => {
+    expect(shellOf(sens, "make logs")).toBe("deny");
+    expect(shellOf(sens, "make verify")).toBe("deny");
+    for (const rule of sens) expect(["allow", "deny"]).toContain(rule.effect);
+  });
+
+  test("keeps every other read command allowed", () => {
+    for (const cmd of [
+      "git log --oneline",
+      "cat package.json",
+      "rg -n foo .",
+      "curl -sS https://example.com",
+    ]) {
+      expect(shellOf(sens, cmd), cmd).toBe("allow");
+    }
+  });
+
+  test("differs from agw-readonly by exactly the two host-probe rules", () => {
+    expect(
+      OPENCODE_READONLY_PERMISSIONS.filter((r) => !HOST_PROBE_SHELL_RULES.includes(r)),
+    ).toEqual([...sens]);
+    expect(OPENCODE_READONLY_PERMISSIONS.length - sens.length).toBe(2);
+    expect(sens.filter((r) => r.action !== "shell")).toEqual(
+      OPENCODE_READONLY_PERMISSIONS.filter((r) => r.action !== "shell"),
+    );
   });
 });
 
@@ -394,13 +458,20 @@ describe("buildOpencodeServerConfig", () => {
     expect(entry).not.toHaveProperty("options");
   });
 
-  test("defines exactly the two agents with the exported rule arrays; no top-level permission block", () => {
+  test("defines exactly the three agents with the exported rule arrays; no top-level permission block", () => {
     const agents = cfg.agents as Record<string, { permissions: unknown }>;
     expect(Object.keys(agents).toSorted()).toEqual(
-      [OPENCODE_AGENT_IMPLEMENT, OPENCODE_AGENT_READONLY].toSorted(),
+      [
+        OPENCODE_AGENT_IMPLEMENT,
+        OPENCODE_AGENT_READONLY,
+        OPENCODE_AGENT_READONLY_SENSITIVE,
+      ].toSorted(),
     );
     expect(agents[OPENCODE_AGENT_READONLY]?.permissions).toEqual([
       ...OPENCODE_READONLY_PERMISSIONS,
+    ]);
+    expect(agents[OPENCODE_AGENT_READONLY_SENSITIVE]?.permissions).toEqual([
+      ...OPENCODE_READONLY_SENSITIVE_PERMISSIONS,
     ]);
     expect(agents[OPENCODE_AGENT_IMPLEMENT]?.permissions).toEqual([
       ...OPENCODE_IMPLEMENT_PERMISSIONS,

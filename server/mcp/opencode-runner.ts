@@ -55,6 +55,7 @@ import {
   getOpencodeServerStatus,
   OPENCODE_AGENT_IMPLEMENT,
   OPENCODE_AGENT_READONLY,
+  OPENCODE_AGENT_READONLY_SENSITIVE,
   OPENCODE_SESSION_BLANKED_ENV,
   opencodeProviderForWire,
   readServerPassword,
@@ -583,6 +584,7 @@ export async function runOpencodeAttempt<T>(
     prompt,
     jsonSchema,
     readOnly = false,
+    sensitive = false,
     extraEnv,
     extraDisallowedTools,
     settingSources,
@@ -789,7 +791,11 @@ export async function runOpencodeAttempt<T>(
       sessionId = await client.createSession({
         directory: cwd,
         model: { providerID: opencodeProviderForWire(registryModel.wire), id: model, variant },
-        agent: readOnly ? OPENCODE_AGENT_READONLY : OPENCODE_AGENT_IMPLEMENT,
+        agent: readOnly
+          ? sensitive
+            ? OPENCODE_AGENT_READONLY_SENSITIVE
+            : OPENCODE_AGENT_READONLY
+          : OPENCODE_AGENT_IMPLEMENT,
         title: `agw ${tool ?? "episode"}`,
         metadata: { agw: { jobId, tool } },
       });

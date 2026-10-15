@@ -147,6 +147,15 @@ describe("runOpencodeAttempt — the session it creates", () => {
     ]);
   });
 
+  test("a sensitive read-only session uses agw-readonly-sensitive; sensitive is ignored when writable", async () => {
+    const ro = setup(finalText('{"answer":1}'));
+    await ro.run({ readOnly: true, sensitive: true });
+    expect(ro.client.created[0]).toMatchObject({ agent: "agw-readonly-sensitive" });
+    const rw = setup(finalText('{"answer":1}'));
+    await rw.run({ sensitive: true });
+    expect(rw.client.created[0]).toMatchObject({ agent: "agw-implement" });
+  });
+
   test("a writable session uses agw-implement; a responses-wire model rides iu-responses", async () => {
     const { client, run } = setup(finalText('{"answer":1}'));
     await run({}, { model: "gpt-6.1-sol", variant: "high" });

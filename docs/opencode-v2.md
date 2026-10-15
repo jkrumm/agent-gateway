@@ -52,7 +52,7 @@ v2 action names (https://opencode.ai/v2/docs/permissions): `shell` (v1 `bash`), 
 `task`), `read`, `edit`, `glob`, `grep`, `skill`, `question`, `webfetch`, `websearch`,
 `external_directory`, `execute`. `list`, `lsp`, `todowrite` and `doom_loop` are not v2 actions
 (an unnamed action falls to the catch-all). A **subagent runs under its own permissions**, not
-its parent's, so `agw-readonly` denies `subagent` — v1's `task: allow` has no equivalent hole.
+its parent's, so `agw-readonly` (and `agw-readonly-sensitive`) denies `subagent` — v1's `task: allow` has no equivalent hole.
 `agw-implement` allows it (its own base policy would `ask` on `external_directory` — watch for a
 stalled episode).
 
@@ -134,8 +134,9 @@ from the Keychain items `getIuConfig()` already reads; the config is generated f
 registry (`buildOpencodeServerConfig`) once at server start, not per run.
 
 **Per-run config is the session (Wave 3, shipped).** Model → `model:{providerID,id,variant}`; the
-permission profile → `agent: agw-readonly|agw-implement` (rule arrays in the server config,
-catch-all first, last match wins); worktree → `location.directory`; per-job env → `PUT
+permission profile → `agent: agw-readonly|agw-readonly-sensitive|agw-implement` (rule arrays in
+the server config, catch-all first, last match wins; `agw-readonly-sensitive` is `agw-readonly`
+minus the `make logs`/`make verify` host probes, selected for a `sensitive` dispatch episode); worktree → `location.directory`; per-job env → `PUT
 …/environment`; `title: "agw <tool>"` and `metadata.agw.{jobId,tool}` (the handle Wave 4's
 re-attach reads). Messages are read through `OpencodeClient.allMessages` (asc, paginated) and
 `recentMessages` (desc, the liveness probe).

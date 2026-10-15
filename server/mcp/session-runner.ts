@@ -208,6 +208,13 @@ export interface SessionOptions<T = unknown> {
    */
   readOnly?: boolean;
   /**
+   * The episode runs in a secret-bearing repo (dispatch `sensitive`). Only the OpenCode harness
+   * reads it: a read-only session then selects `agw-readonly-sensitive`, which lacks the
+   * `make logs`/`make verify` host probes, so production log contents never enter its context.
+   * Ignored when `readOnly` is false and on the claude harness.
+   */
+  sensitive?: boolean;
+  /**
    * Let a timeout AFTER first output still move onto the fallback lane. Default false:
    * a worker that already produced turns may have half-done its work (dispatch,
    * excalidraw), so only a silent timeout switches. Callers whose worker has no side

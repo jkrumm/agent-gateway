@@ -12,8 +12,8 @@
 //   - the shell tool's environment: a sanitized base plus whatever `PUT /api/session/{id}/environment`
 //     sets — per-job env (git credential deny, research-gateway) is delivered per session, and
 //     the credentials the server needs (`OPENCODE_SESSION_BLANKED_ENV`) are blanked there too;
-//   - the permission profile: two AGENTS defined in the server config (`agent: agw-readonly|
-//     agw-implement` on session create).
+//   - the permission profile: three AGENTS defined in the server config (`agent: agw-readonly|
+//     agw-readonly-sensitive|agw-implement` on session create).
 //
 // Permission model (v2, https://opencode.ai/v2/docs/permissions): an ORDERED array of
 // `{action, resource, effect}`, LAST matching rule wins, effects allow|deny|ask. An unmatched
@@ -52,8 +52,10 @@ export const OPENCODE_PROVIDER_RESPONSES = "iu-responses";
 /** The IU native `/anthropic` leg through `@ai-sdk/anthropic`, so OpenCode injects `cache_control`. */
 export const OPENCODE_PROVIDER_ANTHROPIC = "iu-anthropic";
 
-/** The two permission profiles an episode can select with `--agent`. */
+/** The three permission profiles an episode can select with `--agent`. */
 export const OPENCODE_AGENT_READONLY = "agw-readonly";
+/** `agw-readonly` minus the host probes: a sensitive investigate episode (secret-bearing repo). */
+export const OPENCODE_AGENT_READONLY_SENSITIVE = "agw-readonly-sensitive";
 export const OPENCODE_AGENT_IMPLEMENT = "agw-implement";
 
 // ── Permission rules ────────────────────────────────────────────────────────────
@@ -117,8 +119,20 @@ function serverSelfAccessDenyRules(): OpencodePermissionRule[] {
  *
  *  Residual: `curl` POSTing a body is still allowed on purpose (the research-gateway recipe
  *  submits a job that way), so a read-only worker can still make outbound network writes with
- *  it — only the file-writing/uploading/config-reading flags are removed. */
-export const READ_ONLY_SHELL_RULES: readonly OpencodePermissionRule[] = [
+ *  it — only the file-writing/uploading/config-reading flags are removed.
+ *
+ *  Host probes (`HOST_PROBE_SHELL_RULES`, `agw-readonly` only): `make logs` and `make verify` let
+ *  an investigation read live host state. Both targets are read-only by the repo contract
+ *  (dotfiles `docs/agent-platform.md` § Repo contract: `make verify` probes production and exits
+ *  0 when healthy; `make logs` prints a bounded tail and exits). They are EXACT text, no trailing
+ *  ` *`, so any argument is denied: the escape is `make -f <file>` or a recipe-affecting override
+ *  such as `SHELL=` (a plain `VAR=` does not by itself run an arbitrary recipe). Accepted
+ *  residual: recipe bodies run inside make, so this shell scanner never sees them — acceptable
+ *  only because they are the owner's checked-in recipes and `edit` is denied. They sit before the
+ *  re-deny block so `make logs > x` stays denied. Sensitive episodes run `agw-readonly-sensitive`
+ *  WITHOUT them, so production log contents never reach a sensitive episode's context (the
+ *  outbound verdict scan does not cover what the model reads). */
+const READ_ONLY_SHELL_ALLOW_RULES: readonly OpencodePermissionRule[] = [
   shell("*", "deny"),
   shell("git log *", "allow"),
   shell("git diff *", "allow"),
@@ -135,10 +149,17 @@ export const READ_ONLY_SHELL_RULES: readonly OpencodePermissionRule[] = [
   shell("wc *", "allow"),
   shell("jq *", "allow"),
   shell("curl *", "allow"),
-  // Repo probes, exact text only (no trailing ` *`): `make logs`/`make verify` are read-only, but
-  // `make <target> VAR=…` or `make -f …` would run an arbitrary recipe.
+];
+
+/** The exact-text repo probes `agw-readonly` adds to the allows (rationale and residual: the
+ *  block above). Never given to a sensitive episode. */
+export const HOST_PROBE_SHELL_RULES: readonly OpencodePermissionRule[] = [
   shell("make logs", "allow"),
   shell("make verify", "allow"),
+];
+
+/** Every re-deny, AFTER every allow (last match wins) — including the host probes. */
+const READ_ONLY_SHELL_REDENY_RULES: readonly OpencodePermissionRule[] = [
   // curl: output / upload / config flags — attached, space-delimited and trailing forms.
   shell("curl -o*", "deny"),
   shell("curl * -o *", "deny"),
@@ -169,26 +190,51 @@ export const READ_ONLY_SHELL_RULES: readonly OpencodePermissionRule[] = [
   ...serverSelfAccessDenyRules(),
 ];
 
-/** `agw-readonly`: investigate / author / check / review workers. Catch-all deny first, so
+/** The `shell` rules of `agw-readonly`: allows, host probes, then every re-deny. */
+export const READ_ONLY_SHELL_RULES: readonly OpencodePermissionRule[] = [
+  ...READ_ONLY_SHELL_ALLOW_RULES,
+  ...HOST_PROBE_SHELL_RULES,
+  ...READ_ONLY_SHELL_REDENY_RULES,
+];
+
+/** The `shell` rules of `agw-readonly-sensitive`: `READ_ONLY_SHELL_RULES` without the probes. */
+export const READ_ONLY_SENSITIVE_SHELL_RULES: readonly OpencodePermissionRule[] = [
+  ...READ_ONLY_SHELL_ALLOW_RULES,
+  ...READ_ONLY_SHELL_REDENY_RULES,
+];
+
+/** The `agw-readonly` family: investigate / author / check / review workers. Catch-all deny first, so
  *  anything not named below (including Code Mode's `execute`, MCP tools and every future
  *  action) is refused rather than defaulting to `ask`. `webfetch`/`websearch` stay denied —
  *  workers shell out via `curl` (AGENTS.md Worker routing). `subagent` is denied because a
  *  subagent runs under ITS OWN permissions (the built-in `general` allows shell and edit), so
  *  allowing it would be a read-only escape hatch — v1's `task: allow` had no such hole. */
-export const OPENCODE_READONLY_PERMISSIONS: readonly OpencodePermissionRule[] = [
-  { action: "*", resource: "*", effect: "deny" },
-  ...READ_ONLY_SHELL_RULES,
-  { action: "edit", resource: "*", effect: "deny" },
-  { action: "webfetch", resource: "*", effect: "deny" },
-  { action: "websearch", resource: "*", effect: "deny" },
-  { action: "question", resource: "*", effect: "deny" },
-  { action: "external_directory", resource: "*", effect: "deny" },
-  { action: "subagent", resource: "*", effect: "deny" },
-  { action: "read", resource: "*", effect: "allow" },
-  { action: "glob", resource: "*", effect: "allow" },
-  { action: "grep", resource: "*", effect: "allow" },
-  { action: "skill", resource: "*", effect: "allow" },
-];
+function readOnlyPermissions(
+  shellRules: readonly OpencodePermissionRule[],
+): readonly OpencodePermissionRule[] {
+  return [
+    { action: "*", resource: "*", effect: "deny" },
+    ...shellRules,
+    { action: "edit", resource: "*", effect: "deny" },
+    { action: "webfetch", resource: "*", effect: "deny" },
+    { action: "websearch", resource: "*", effect: "deny" },
+    { action: "question", resource: "*", effect: "deny" },
+    { action: "external_directory", resource: "*", effect: "deny" },
+    { action: "subagent", resource: "*", effect: "deny" },
+    { action: "read", resource: "*", effect: "allow" },
+    { action: "glob", resource: "*", effect: "allow" },
+    { action: "grep", resource: "*", effect: "allow" },
+    { action: "skill", resource: "*", effect: "allow" },
+  ];
+}
+
+export const OPENCODE_READONLY_PERMISSIONS: readonly OpencodePermissionRule[] =
+  readOnlyPermissions(READ_ONLY_SHELL_RULES);
+
+/** `agw-readonly-sensitive`: the same profile without the host probes (`make logs`/`make verify`),
+ *  for a sensitive investigate episode. */
+export const OPENCODE_READONLY_SENSITIVE_PERMISSIONS: readonly OpencodePermissionRule[] =
+  readOnlyPermissions(READ_ONLY_SENSITIVE_SHELL_RULES);
 
 /** `agw-implement`: dispatch implement. Everything allowed (the leading catch-all also cancels
  *  the base policy's `.env` read ask), `question` and `external_directory` denied — both would
@@ -359,6 +405,12 @@ export function buildOpencodeServerConfig(): Record<string, unknown> {
         description: "agent-gateway read-only worker (allow-listed shell, no edits)",
         mode: "primary",
         permissions: OPENCODE_READONLY_PERMISSIONS,
+      },
+      [OPENCODE_AGENT_READONLY_SENSITIVE]: {
+        description:
+          "agent-gateway read-only worker for sensitive repos (allow-listed shell, no edits, no host probes)",
+        mode: "primary",
+        permissions: OPENCODE_READONLY_SENSITIVE_PERMISSIONS,
       },
       [OPENCODE_AGENT_IMPLEMENT]: {
         description: "agent-gateway implement worker (full tools, no questions)",

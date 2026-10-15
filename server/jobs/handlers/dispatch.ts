@@ -1094,6 +1094,7 @@ export async function runDispatch(
         model,
         jsonSchema: z.toJSONSchema(WORKER_OUTPUT[tier]),
         readOnly: profile.readOnly,
+        sensitive: effectiveSensitive,
         // The whole premise is the repo's own Claude-shaped context, and the global rule
         // hierarchy it inherits — unlike `check`, which deliberately keeps the prompt small.
         settingSources: "user,project",

@@ -435,12 +435,14 @@ zod-typed `fetch` adapter; tests inject an in-memory fake of the same interface)
 `server/mcp/opencode-server.ts` owns the server itself: the pinned version
 (`OPENCODE_PINNED_VERSION`), the generated config, the permission rule arrays,
 `getOpencodeServerStatus()`, `interruptOpencodeSession`. What a session sets (measured on 2.0.25):
-(1) **permissions live in two v2 agents** in the server config (`OPENCODE_CONFIG_CONTENT`, set on
+(1) **permissions live in three v2 agents** in the server config (`OPENCODE_CONFIG_CONTENT`, set on
 the server process — it overrides a repo-local `opencode.json`; never the `OPENCODE_CONFIG` file
 path, which a repo file overrides), selected with `agent` on session create: ordered
 `{action,resource,effect}` rules, LAST match wins, only `allow`/`deny` (an unmatched action
 defaults to `ask`, which blocks an unattended session forever — `agw-readonly` opens with a
-catch-all deny, `agw-implement` with a catch-all allow, plus `question` and `external_directory`
+catch-all deny (`agw-readonly-sensitive` is the same profile minus the exact-match `make logs`/
+`make verify` host probes, selected for `sensitive` dispatch episodes so production log contents
+never reach their context), `agw-implement` with a catch-all allow, plus `question` and `external_directory`
 denied). `agw-readonly` allow-lists `shell` commands (`READ_ONLY_SHELL_RULES`, re-denies after
 the allows, then trailing denies for command text naming `OPENCODE_SERVER_PASSWORD`, `IU_KEY`,
 `IU_OPENAI_BASE`, the server port or `/api/session` — a cost-raising deny list, not a boundary,
