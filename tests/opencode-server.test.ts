@@ -195,6 +195,21 @@ describe("agw-readonly permissions", () => {
     expect(shellOf(ro, "git log --oneline -5")).toBe("allow");
   });
 
+  test("make logs and make verify are allowed exactly; any other make invocation is denied", () => {
+    expect(shellOf(ro, "make logs")).toBe("allow");
+    expect(shellOf(ro, "make verify")).toBe("allow");
+    for (const cmd of [
+      "make logs > /tmp/x",
+      "make verify SHELL=/bin/sh",
+      "make -f evil.mk logs",
+      "make check",
+      "make reload",
+      "make deploy",
+    ]) {
+      expect(shellOf(ro, cmd), cmd).toBe("deny");
+    }
+  });
+
   // `curl` is allowlisted and the rule matches command TEXT, so these would otherwise expand the
   // server's own secrets in the shell and talk to the server itself. A cost-raising deny list,
   // NOT a boundary (docs/opencode-v2.md) — obfuscated expansions can evade it.

@@ -135,6 +135,10 @@ export const READ_ONLY_SHELL_RULES: readonly OpencodePermissionRule[] = [
   shell("wc *", "allow"),
   shell("jq *", "allow"),
   shell("curl *", "allow"),
+  // Repo probes, exact text only (no trailing ` *`): `make logs`/`make verify` are read-only, but
+  // `make <target> VAR=…` or `make -f …` would run an arbitrary recipe.
+  shell("make logs", "allow"),
+  shell("make verify", "allow"),
   // curl: output / upload / config flags — attached, space-delimited and trailing forms.
   shell("curl -o*", "deny"),
   shell("curl * -o *", "deny"),
