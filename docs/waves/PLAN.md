@@ -314,3 +314,33 @@ warden, agent-gateway and dotfiles. Before editing a repo, check `rd agents` and
 - **Finding for Wave 9 (design hole):** 5 revision rounds, each a NEW finding, 3 of them out-of-scope hardening. `work.py` `revisions_left` counts only stalled rounds, so a drifting reviewer never hits the cap (orchestrator is filing it). Also: a retention delete in a brief is read as `[data_loss]` unless the decision is stated in the brief.
 - **Improve loop:** `rd say warden-improve` delivered, the tab went `working` on it.
 - **Gate:** warden `make check` green on cff7bb9; agw changes are docs only (no `/review`, no code to deploy). PR #42 shows MERGED (GitHub saw the push), item 1565 closed via `warden abort`.
+
+## Wave 9 — zero-downtime deploys, fair lanes            <!-- status: active -->
+- [ ] A reload no longer waits for running jobs. Every OpenCode-harness session (dispatch in place or in a worktree, review angles, any other OC tool) is detached on drain and re-attached on boot, by the same state logic as Wave 4. Only `claude -p` sessions still drain or requeue. Prove it with `make reload` while a review with 3 OC angles and a dispatch run: both finish in their original sessions, and no queue stall shows in `/api/jobs/health` (measure the pending-time gap). This removes the ~25 min stalls Waves 6 and 7 hit.
+- [ ] A dedicated lane for single-shot IU calls (`triage`, `decide`, `review_router`, other non-session jobs). They no longer count against `AGENT_GATEWAY_JOB_CONCURRENCY`, and their own small cap is env-tunable. Prove it: a `decide` submitted while 3 reviews run starts within seconds.
+- [ ] Code health in the opencode path, measured with `fallow`/`make check`:
+  - Drop the v1 `provider` shape from `buildOpencodeServerConfig` and `scripts/sync-opencode-config.ts` (the server is 2.0.29; confirm v2-only loads in the live probe).
+  - Break the session-runner↔opencode-runner import cycle.
+  - Split `runOpencodeAttempt` / `runDispatch` hotspots.
+  - Add backoff to the GET retry.
+  - Move the test fixtures off 2.0.25.
+- [ ] **Warden revision cap hole (P1):** `revisions_left` (`warden/scripts/loop/work.py:2128`) counts only stalled rounds. A "converging" round, whose blocking findings are all new, is free, so review drift (a new narrower finding every round) revises without bound. Item 1565 (PR #42, a 71-line prune) reached revision_count 5 with stalled_rounds 2 after 2.5 h and was landed by hand. Add an absolute ceiling on `revision_count` (e.g. 6) next to the stalled-round rule. At the ceiling, a green PR whose remaining findings are all non-blocking-in-scope goes to the merge train, and otherwise the item lands in `needs_decision` with the findings listed. Make sure the review gate text (JOURNAL 1481) still holds. Tests plus a ledger replay of 1478/1480/1565.
+- [ ] Gate, deploy, verify (`make verify`, `scripts/opencode-live-probe.ts`, `scripts/opencode-v2-probe.ts`). Then run 10 warden-originated dispatches, including implement-tier, with no `session.opencode_error`. Grep the jsonl for `[GET … after Nms]`; if any appear, they are the ETIMEDOUT root cause, so fix it.
+**Left behind:**
+
+## Wave 10 — OpenCode throughout            <!-- status: pending -->
+- [ ] `check` on OpenCode: an `agw-check` agent whose shell may run the repo's check command (make/bun/uv/pytest) in the worktree, still read-only for edits. Bench it against today's `claude -p` Haiku 4.5 route on warden, agent-gateway and one TS repo (wall time, pass/fail agreement, cost). Move the route if it is equal or better.
+- [ ] Bench every remaining `claude`-harness route on OpenCode with the registry's candidates (Haiku 5.5 EU, flash, Pro; Sonnet-on-Max stays the fallback): `overview`, `narrative`, `review` (synthesis), `dispatch_editorial`, `otel`, `excalidraw`. Move each one that measures equal or better, with route history in `docs/routing-and-quota.md`. Keep a route on Claude only with a written, measured reason.
+- [ ] Put the whole machine on one OpenCode version. Interactive `oc` and `rd wave|fan --kind opencode` use agw's pinned build (`~/.local/share/agent-gateway/opencode-bin/<version>`) or a dotfiles-managed equivalent. Homebrew's 2.0.25 is unpinned/uninstalled, or explicitly shadowed on PATH. Verify that an `oc` pane gets a real reply on the pinned version and that `rd wave --kind opencode` works end to end.
+- [ ] Add an MCP tool `decide` + CLI `agw decide`, per `.claude/rules/mcp-tools.md`.
+- [ ] Gate, deploy, verify: one real job per moved route, plus `GET /api/routing`.
+**Left behind:**
+
+## Wave 11 — sharpen and close the loops            <!-- status: pending -->
+- [ ] Decision-model context iteration in warden `scripts/lifecycle/shadow.py`. Today 6 of 8 noise items are called `new`, the attach target is right 1 of 7 times, and confidence ≥ 0.95 is right only 11 of 16 times. Add the signals the LLM triage uses that the shadow context lacks: alert source/fingerprint history, why past items were ignored, and repo noise patterns. Re-run `scripts/shadow-replay.py` on a larger labelled set (≥ 100) and record the before/after table in `docs/decision-shadow.md`. Never promote by hand; the promotion rule stays the improve loop's.
+- [ ] Cost truth for Haiku above 100K: compare agw's computed per-message cost with what IU's usage/billing reports (Argo `/usage/records` or IU's own usage endpoint). Correct the registry rates if they differ, and record it.
+- [ ] Review angles A/B on real findings (`findings.json`), not regex hints. Decide whether `review_angle_frontend` moves off Sonnet-on-Max.
+- [ ] Regenerate the architecture diagrams with the archify skill from the code: shared OpenCode server, steer, re-attach, decide lane, single-shot lane. Update the jkrumm.com copy, and replace the hand-patched HTML.
+- [ ] Fix `/wave` in `~/SourceRoot/dotfiles/skills/wave/SKILL.md` (or wherever it lives; grep). A wave must never end its turn while waiting on a background monitor or shell (Waves 4 and 5 ended with "1 shell still running" and never chained or resumed). Bounded polling only, and the close-out spawns or stops explicitly. Also fix `wave-watch.sh`'s STALL heuristic, which fired twice on Wave 8 while it legitimately waited on warden's merge train: count warden/agw job activity for the wave as progress.
+- [ ] Final docs truth pass across agent-gateway, warden, dotfiles, brain, hermes-agent and jkrumm.com for everything Waves 8–11 changed. Gate, deploy, verify. Then hand the open list to warden's improve loop (`rd say warden-improve …`) and archive this plan to `docs/waves/archive/2026-10-opencode-v2.md`.
+**Left behind:**
