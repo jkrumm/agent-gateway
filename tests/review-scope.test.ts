@@ -14,6 +14,7 @@ import {
   assertSafeDefaultBranch,
   checkoutRefDiff,
   fallowBaseFor,
+  angleDiffInstruction,
   gitDiffCommand,
   REVIEW_OUTCOMES,
   REVIEW_SCHEMA_VERSION,
@@ -297,5 +298,20 @@ describe("GET /api/review-schema", () => {
     expect(body.output.type).toBe("object");
     expect(Object.keys(body.output.properties)).toContain("outcome");
     expect(Object.keys(body.output.properties)).toContain("schemaVersion");
+  });
+});
+
+describe("angleDiffInstruction", () => {
+  test("uncommitted gives the worker only allow-listed command starts, never an assignment", () => {
+    const text = angleDiffInstruction("uncommitted", gitDiffCommand("uncommitted"));
+    expect(text).toContain("`git diff HEAD`");
+    expect(text).toContain("`git ls-files --others --exclude-standard`");
+    expect(text).not.toContain("=$(");
+  });
+
+  test("every other scope passes the gather command through", () => {
+    expect(angleDiffInstruction("HEAD~2", "git diff HEAD~2 HEAD")).toBe(
+      "Run: `git diff HEAD~2 HEAD`",
+    );
   });
 });

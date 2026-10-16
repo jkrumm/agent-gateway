@@ -467,6 +467,20 @@ export function gitDiffCommand(scope: string): string {
   }
 }
 
+/** The diff instruction an angle WORKER gets. Not `gitDiffCommand` verbatim for `uncommitted`:
+ *  that one opens with a `diff=$(…)` assignment, which matches nothing in the OpenCode
+ *  `agw-readonly` shell allow-list (rules match the command's start), so every OpenCode angle
+ *  was denied its diff on an uncommitted-scope review. Each command here starts with an
+ *  allow-listed verb. `git diff HEAD` also shows staged and unstaged edits together, where the
+ *  handler's own gather prefers staged-only. */
+export function angleDiffInstruction(scope: string, diffCmd: string): string {
+  if (scope !== "uncommitted") return `Run: \`${diffCmd}\``;
+  return (
+    "Run: `git diff HEAD` (staged and unstaged changes), then `git ls-files --others " +
+    "--exclude-standard` and `cat` each untracked file it lists (new files are part of the change)."
+  );
+}
+
 function gitDiffFilesCommand(scope: string): string {
   switch (scope) {
     case "uncommitted":
@@ -1260,7 +1274,9 @@ export async function runReview(
           };
         }
 
-        prompt = prompt.replace("[GIT_DIFF_COMMAND]", `Run: \`${diffCmd}\``);
+        prompt = prompt.replace("[GIT_DIFF_COMMAND]", () =>
+          angleDiffInstruction(refMode ? "ref" : resolvedScope, diffCmd),
+        );
         prompt += contextBlock;
         prompt += researchBlock;
 
