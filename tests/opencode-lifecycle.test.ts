@@ -322,6 +322,43 @@ describe("driveOpencodeSession — a running shell tool part", () => {
     expect(result).toMatchObject({ finished: true, killReason: null });
   });
 
+  test("every message poll failing while the shell keeps printing does not kill the session", async () => {
+    const { client, drive } = setup();
+    client.script(shellTurn);
+    // The first activity poll sees the running shell; every later one times out (tolerated).
+    client.recentMessagesFault = (limit, call) =>
+      limit > 1 && call >= 1
+        ? new DOMException("The operation timed out.", "TimeoutError")
+        : undefined;
+    const realRead = client.shellOutputSize.bind(client);
+    client.shellOutputSize = async (id, dir) => {
+      // grows for 30 reads (≫ the 40 ms budget at 5 ms ticks), then goes quiet
+      if (client.shellReads.length < 30)
+        client.shellSizes.set("29", (client.shellReads.length + 1) * 6);
+      return realRead(id, dir);
+    };
+    const result = await drive();
+    expect(result.killReason).toBe("idle");
+    expect(client.shellReads.length).toBeGreaterThanOrEqual(30);
+  });
+
+  test("a shell the window shows finished stops counting: the idle kill still fires", async () => {
+    const { client, drive } = setup();
+    client.script(shellTurn);
+    client.shellSizes.set("29", 6);
+    client.onActivityPoll = (session, poll) => {
+      if (poll === 2) {
+        // OpenCode updates the part in place: the same shell part goes running -> completed.
+        for (const m of session.messages)
+          for (const b of m.content ?? [])
+            if (b.state?.status === "running") b.state.status = "completed";
+      }
+      if (poll > 2) client.shellSizes.set("29", poll * 6); // a stale size moving after completion
+    };
+    const result = await drive();
+    expect(result).toMatchObject({ finished: false, killReason: "idle" });
+  });
+
   test("a shell tool part without a shellID is not read", async () => {
     const { client, drive } = setup();
     client.script({

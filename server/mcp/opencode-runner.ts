@@ -289,12 +289,27 @@ export function opencodeActivityFingerprint(newestFirst: OpencodeMessage[]): str
 /** The shell ids of every tool part still `running`, from a NEWEST-FIRST window. A running shell
  *  prints without touching the message stream, so its output size is the only sign of life
  *  (measured 2.0.29: `state.metadata.shellID`, a number). `running` alone is not activity. */
-export function runningShellIds(newestFirst: OpencodeMessage[]): string[] {
+function runningShellIds(newestFirst: OpencodeMessage[]): string[] {
+  return shellIdsWhere(newestFirst, (status) => status === "running");
+}
+
+/** The shell ids of tool parts in the window that are no longer running (completed, error). */
+function finishedShellIds(newestFirst: OpencodeMessage[]): string[] {
+  return shellIdsWhere(
+    newestFirst,
+    (status) => status !== undefined && status !== "running" && status !== "pending",
+  );
+}
+
+function shellIdsWhere(
+  newestFirst: OpencodeMessage[],
+  keep: (status: string | undefined) => boolean,
+): string[] {
   const ids = new Set<string>();
   for (const m of newestFirst) {
     for (const b of m.content ?? []) {
-      if (b.type !== "tool" || b.state?.status !== "running") continue;
-      const id = b.state.metadata?.shellID;
+      if (b.type !== "tool" || !keep(b.state?.status)) continue;
+      const id = b.state?.metadata?.shellID;
       if (typeof id === "string" || typeof id === "number") ids.add(String(id));
     }
   }
@@ -592,27 +607,38 @@ export async function driveOpencodeSession(
       } catch (err) {
         tolerateSlowRequest(err, "activity_poll");
       }
-      let shellGrew = false;
+      // Tracked shells survive a failed poll and a message window that scrolled past them; one is
+      // dropped only when the window shows its part no longer running. A missed drop costs a read
+      // of an unchanging size (never activity); a missed shell would cost a false idle kill.
+      const ids = new Set(shellSizes.keys());
       if (recent) {
-        const next = new Map<string, number | null>();
-        for (const shellId of runningShellIds(recent)) {
-          const known = shellSizes.get(shellId) ?? null;
-          const size = await readShellSize(client, shellId, input, sessionId);
-          if (known !== null && size !== null && size > known) shellGrew = true;
-          next.set(shellId, size ?? known);
-        }
-        shellSizes = next;
+        for (const id of finishedShellIds(recent)) ids.delete(id);
+        for (const id of runningShellIds(recent)) ids.add(id);
       }
+      const reads = await Promise.all(
+        [...ids].map(
+          async (id) => [id, await readShellSize(client, id, input, sessionId)] as const,
+        ),
+      );
+      let shellGrew = false;
+      const next = new Map<string, number | null>();
+      for (const [id, size] of reads) {
+        const known = shellSizes.get(id) ?? null;
+        if (known !== null && size !== null && size > known) shellGrew = true;
+        next.set(id, size ?? known);
+      }
+      shellSizes = next;
       const fingerprint = recent ? opencodeActivityFingerprint(recent) : lastFingerprint;
-      if (recent && (fingerprint !== lastFingerprint || shellGrew)) {
+      if ((recent && fingerprint !== lastFingerprint) || shellGrew) {
         lastFingerprint = fingerprint;
         lastActivityAt = Date.now();
-        for (const m of recent) if (m.type === "assistant" && m.tokens) finishedTurns.add(m.id);
+        for (const m of recent ?? [])
+          if (m.type === "assistant" && m.tokens) finishedTurns.add(m.id);
         input.turnsRef.current = Math.max(input.turnsRef.current, finishedTurns.size);
         try {
           input.onActivity?.({
             turns: input.turnsRef.current,
-            lastAction: lastToolAction(recent) ?? "working",
+            lastAction: (recent && lastToolAction(recent)) ?? "working",
             lastActivityAt,
           });
         } catch {
