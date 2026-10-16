@@ -198,6 +198,67 @@ describe("driveOpencodeSession — idle watchdog", () => {
   });
 });
 
+describe("driveOpencodeSession — a running shell tool part", () => {
+  const shellTurn: FakeTurn = {
+    hang: true,
+    visibleNow: [{ content: [shellTool("pytest", "running", 29)], tokens: null }],
+  };
+
+  test("growing shell output is activity: a session quiet in the message stream is not killed", async () => {
+    const { client, drive } = setup();
+    client.script(shellTurn);
+    client.onActivityPoll = (session, poll) => {
+      // 30 polls x 5 ms >> the 40 ms budget, all of it with the message stream frozen.
+      client.shellSizes.set("29", (poll + 1) * 6);
+      if (poll === 30) {
+        session.messages.push(idleMessage("succeeded"));
+        session.releaseHang?.();
+      }
+    };
+    const result = await drive();
+    expect(result).toMatchObject({ finished: true, killReason: null });
+    expect(client.interrupts).toEqual([]);
+    expect(client.shellReads[0]).toEqual({ shellId: "29", directory: "/tmp" });
+  });
+
+  test("a running shell whose output size does not change is killed with the usual idle error", async () => {
+    const { client, drive } = setup();
+    client.script(shellTurn);
+    client.shellSizes.set("29", 12);
+    const result = await drive();
+    expect(result).toMatchObject({ finished: false, killReason: "idle" });
+    expect(result.idleMsAtKill).toBeGreaterThanOrEqual(40);
+    expect(client.shellReads.length).toBeGreaterThan(1);
+    expect(client.interrupts).toEqual([SESSION]);
+  });
+
+  test("a shell-output read that throws neither ends the session nor counts as activity", async () => {
+    const { client, drive, activity } = setup();
+    client.script(shellTurn);
+    client.shellSizes.set("29", 12);
+    client.onActivityPoll = (_session, poll) => {
+      // The first poll reads fine; every later read fails while the session stays quiet.
+      if (poll === 1) client.shellOutputError = new Error("opencode server answered HTTP 500");
+    };
+    const result = await drive();
+    expect(result).toMatchObject({ finished: false, killReason: "idle" });
+    expect(result.idleMsAtKill).toBeGreaterThanOrEqual(40);
+    // Only the first poll (empty fingerprint -> real one) counted as activity.
+    expect(activity).toHaveLength(1);
+  });
+
+  test("a shell tool part without a shellID is not read", async () => {
+    const { client, drive } = setup();
+    client.script({
+      hang: true,
+      visibleNow: [{ content: [shellTool("sleep 999", "running")], tokens: null }],
+    });
+    const result = await drive();
+    expect(result.killReason).toBe("idle");
+    expect(client.shellReads).toEqual([]);
+  });
+});
+
 describe("driveOpencodeSession — a wait that keeps answering 'not idle'", () => {
   test("the loop backs off (no busy loop), the watchdog still fires and the session is interrupted", async () => {
     const { client, drive } = setup();

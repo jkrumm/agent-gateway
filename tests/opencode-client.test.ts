@@ -267,6 +267,20 @@ describe("session, active, interrupt", () => {
     expect(path(seen[0] as Seen)).toBe("/api/session/ses_1");
   });
 
+  test("shellOutputSize() reads data.size from the shell output route with a one-byte page", async () => {
+    const { seen, client } = stub(() =>
+      ok({ data: { output: "t", cursor: 1, size: 24, truncated: true } }),
+    );
+    expect(await client.shellOutputSize("29", "/work/my repo")).toBe(24);
+    expect(path(seen[0] as Seen)).toBe(
+      "/api/shell/29/output?location%5Bdirectory%5D=%2Fwork%2Fmy%20repo&limit=1",
+    );
+    const bad = stub(() => new Response("nope", { status: 404 }));
+    await expect(bad.client.shellOutputSize("29", "/work")).rejects.toThrow(
+      "HTTP 404 on GET /api/shell/{id}/output",
+    );
+  });
+
   test("active() lists the session ids with a running turn", async () => {
     const { seen, client } = stub(() => ok({ data: { ses_a: {}, ses_b: {} } }));
     expect(await client.active()).toEqual(["ses_a", "ses_b"]);

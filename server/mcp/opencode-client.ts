@@ -70,6 +70,8 @@ const ContentBlockSchema = z.looseObject({
     .looseObject({
       status: z.string().optional(),
       input: z.record(z.string(), z.unknown()).optional(),
+      /** A shell tool part carries `{ shellID }` here (measured 2.0.29). */
+      metadata: z.record(z.string(), z.unknown()).optional().catch(undefined),
     })
     .optional(),
 });
@@ -107,6 +109,7 @@ const SessionInfoSchema = z.object({
     outcome: z.enum(["succeeded", "failed", "interrupted"]).optional(),
   }),
 });
+const ShellOutputSchema = z.object({ data: z.object({ size: z.number() }) });
 const ActiveSchema = z.object({ data: z.record(z.string(), z.unknown()) });
 
 // ── Port ────────────────────────────────────────────────────────────────────────────────
@@ -150,6 +153,10 @@ export interface OpencodeClient {
   /** Every message, oldest first — paginates until a page is empty. */
   allMessages(sessionId: string): Promise<OpencodeMessage[]>;
   session(sessionId: string): Promise<OpencodeSessionInfo>;
+  /** Total bytes a shell command has printed so far (`GET /api/shell/{id}/output`, `data.size`,
+   *  grows live while it runs). The idle watchdog's liveness signal for a long-running shell tool
+   *  part, which changes nothing in the message stream. `directory` is the session's. */
+  shellOutputSize(shellId: string, directory: string): Promise<number>;
   /** Best-effort stop; never throws (`{interrupted:false}` on an idle session). */
   interrupt(sessionId: string): Promise<OpencodeInterruptResult>;
   /** Session ids with a running turn. */
@@ -332,6 +339,15 @@ export function createOpencodeClient(
       const res = await call("GET", sessionPath(sessionId), { timeoutMs: REQUEST_TIMEOUT_MS });
       const { data } = await json(res, "GET /api/session/{id}", SessionInfoSchema);
       return { costUsd: data.cost, outcome: data.outcome };
+    },
+
+    async shellOutputSize(shellId, directory) {
+      const res = await call(
+        "GET",
+        `/api/shell/${encodeURIComponent(shellId)}/output?location%5Bdirectory%5D=${encodeURIComponent(directory)}&limit=1`,
+        { timeoutMs: REQUEST_TIMEOUT_MS },
+      );
+      return (await json(res, "GET /api/shell/{id}/output", ShellOutputSchema)).data.size;
     },
 
     interrupt: (sessionId) => interruptOpencodeSession(sessionId, fetchImpl),

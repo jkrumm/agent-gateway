@@ -274,8 +274,11 @@ export function summarizeOpencodeMessages(
  *  a tool changing state, token usage landing) over the NEWEST-FIRST window. Deliberately leaves
  *  out the provider-retry bookkeeping: a dead endpoint makes the server retry forever, and each
  *  retry must not look like progress to the idle watchdog. */
-export function opencodeActivityFingerprint(newestFirst: OpencodeMessage[]): string {
-  return JSON.stringify(
+export function opencodeActivityFingerprint(
+  newestFirst: OpencodeMessage[],
+  shellOutput?: { shellId: string; size: number | null },
+): string {
+  const messages = JSON.stringify(
     newestFirst.map((m) => [
       m.id,
       m.type,
@@ -284,6 +287,21 @@ export function opencodeActivityFingerprint(newestFirst: OpencodeMessage[]): str
       (m.content ?? []).map((b) => [b.type, b.text?.length, b.state?.status]),
     ]),
   );
+  return shellOutput ? `${messages}|${shellOutput.shellId}:${shellOutput.size}` : messages;
+}
+
+/** The shell id of the newest tool part still `running`, from a NEWEST-FIRST window. A running
+ *  shell prints without touching the message stream, so its output size is the only sign of life
+ *  (measured 2.0.29: `state.metadata.shellID`, a number). `running` alone is not activity. */
+export function runningShellId(newestFirst: OpencodeMessage[]): string | undefined {
+  for (const m of newestFirst) {
+    for (const b of (m.content ?? []).toReversed()) {
+      if (b.type !== "tool" || b.state?.status !== "running") continue;
+      const id = b.state.metadata?.shellID;
+      if (typeof id === "string" || typeof id === "number") return String(id);
+    }
+  }
+  return undefined;
 }
 
 // ── Endpoint preflight ──────────────────────────────────────────────────────────────
@@ -499,6 +517,8 @@ export async function driveOpencodeSession(
 
   let lastActivityAt = Date.now();
   let lastFingerprint = "";
+  /** The last output size read for the running shell: a failed read reuses it, so it is no change. */
+  let lastShell: { shellId: string; size: number | null } | undefined;
   const finishedTurns = new Set<string>();
 
   try {
@@ -547,7 +567,31 @@ export async function driveOpencodeSession(
       } catch (err) {
         tolerateSlowRequest(err, "activity_poll");
       }
-      const fingerprint = recent ? opencodeActivityFingerprint(recent) : lastFingerprint;
+      let shellOutput: typeof lastShell;
+      const shellId = recent ? runningShellId(recent) : undefined;
+      if (shellId) {
+        shellOutput = { shellId, size: lastShell?.shellId === shellId ? lastShell.size : null };
+        try {
+          shellOutput.size = await client.shellOutputSize(shellId, input.cwd);
+        } catch (err) {
+          // No activity, never a kill: the idle watchdog is the only thing that ends the session.
+          runnerLogger().warn(
+            {
+              event: "session.opencode_shell_read_failed",
+              project: input.cwd,
+              ...input.logContext,
+              sessionId,
+              shellId,
+              error: err instanceof Error ? err.message : String(err),
+            },
+            "opencode shell output read failed — counted as no activity",
+          );
+        }
+      }
+      lastShell = shellOutput;
+      const fingerprint = recent
+        ? opencodeActivityFingerprint(recent, shellOutput)
+        : lastFingerprint;
       if (recent && fingerprint !== lastFingerprint) {
         lastFingerprint = fingerprint;
         lastActivityAt = Date.now();

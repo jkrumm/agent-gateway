@@ -56,10 +56,18 @@ export interface FakeTurn {
 
 export const text = (value: string): OpencodeContentBlock => ({ type: "text", text: value });
 export const reasoning = (): OpencodeContentBlock => ({ type: "reasoning", text: "thinking" });
-export const shellTool = (command: string, status = "completed"): OpencodeContentBlock => ({
+export const shellTool = (
+  command: string,
+  status = "completed",
+  shellID?: number,
+): OpencodeContentBlock => ({
   type: "tool",
   name: "shell",
-  state: { status, input: { command } },
+  state: {
+    status,
+    input: { command },
+    ...(shellID === undefined ? {} : { metadata: { shellID } }),
+  },
 });
 
 let messageSeq = 0;
@@ -124,6 +132,12 @@ export class FakeOpencodeClient implements OpencodeClient {
   /** Every call, in order, for ordering assertions (`createSession` … `interrupt`). */
   readonly callLog: string[] = [];
   waitCalls = 0;
+  /** Output bytes per shell id — a test grows these to model a command that keeps printing. */
+  readonly shellSizes = new Map<string, number>();
+  /** Every `shellOutputSize` call, in order. */
+  readonly shellReads: Array<{ shellId: string; directory: string }> = [];
+  /** `shellOutputSize` rejects with this. */
+  shellOutputError?: Error;
   /** Count of `recentMessages` calls with limit > 1 — the activity polls (the finish check asks for 1). */
   activityPolls = 0;
 
@@ -263,6 +277,13 @@ export class FakeOpencodeClient implements OpencodeClient {
       costUsd: messages.reduce((sum, m) => sum + (m.cost ?? 0), 0),
       outcome: messages.findLast((m) => m.type === "idle")?.outcome,
     };
+  }
+
+  async shellOutputSize(shellId: string, directory: string): Promise<number> {
+    this.callLog.push("shellOutputSize");
+    this.shellReads.push({ shellId, directory });
+    if (this.shellOutputError) throw this.shellOutputError;
+    return this.shellSizes.get(shellId) ?? 0;
   }
 
   async interrupt(sessionId: string): Promise<OpencodeInterruptResult> {

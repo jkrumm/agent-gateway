@@ -152,7 +152,7 @@ started is re-checked until the newest message is a new `idle`. In-loop requests
 finish check, `wait`) that merely time out are tolerated — logged `session.opencode_poll_slow`
 and retried next tick, since a heavy tool can make the server answer a short request late — so
 the idle watchdog is the only kill; a refused connection or an HTTP/schema error still fails at
-once. Cancel and drain call the session's registered `stop` (`trackExternalSession`), which
+once. A running shell tool part changes nothing in the message stream, so while one is `running` (`state.metadata.shellID`, 2.0.29) the watchdog also reads `GET /api/shell/{id}/output?location[directory]=<dir>&limit=1` (`data.size`, grows live as the command prints); output growth counts as activity, an unchanged size or a failed read does not. Cancel and drain call the session's registered `stop` (`trackExternalSession`), which
 interrupts it.
 
 **Durability (Wave 4 for dispatch, Wave 9 for every session under a job).** A drain detaches an
