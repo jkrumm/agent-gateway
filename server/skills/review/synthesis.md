@@ -12,6 +12,10 @@ You have received findings from these sources (some may be empty):
 
 [FALLOW_RESULTS]
 
+### React Static Analysis (react-doctor)
+
+[REACT_DOCTOR_RESULTS]
+
 ### OpenCodeReview
 
 [OCR_RESULTS]
@@ -83,9 +87,10 @@ is discarded. Do any reasoning first, then emit the JSON as your final message a
 ## Rules
 
 - `line` is optional — omit if not identifiable from the original finding
-- `angle` is required — which reviewer caught it: `architect`, `senior-dev`, `frontend`, `backend`, `typescript`, `qa`, `security`, `performance`, `concurrency`, `data-migration`, `api-contract`, `resilience`, `adversary`, `fallow`, `ocr`
+- `angle` is required — which reviewer caught it: `architect`, `senior-dev`, `frontend`, `backend`, `typescript`, `qa`, `security`, `performance`, `concurrency`, `data-migration`, `api-contract`, `resilience`, `adversary`, `fallow`, `react-doctor`, `ocr`
 - Preserve specificity from the original finding — don't generalize
 - Empty arrays are fine — not every review has blocking issues
 - Bias toward `improvement` over `discussion` — if the fix is obvious and low-risk, it's an improvement
 - The summary should help a human quickly decide: read and move on (clean), delegate to implementation agent (actionable), or review discussions personally (needs-human)
+- For react-doctor findings: the block is advisory, diff-scoped static analysis (React rules only; complexity and export-style rules are already filtered out). Treat each line as a hypothesis to verify against the diff, not a verdict — open the file:line, confirm the pattern is really in the changed code and really a defect, and only then file it (credit `angle: "react-doctor"`). A line you cannot confirm is dropped, not carried. A `react-doctor failed` line is missing input, not approval.
 - For fallow findings: map verdict "fail" items to improvements, "warn" items to improvements only if they're concretely actionable

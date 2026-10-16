@@ -8,6 +8,7 @@ Deep code review via parallel specialist agents, synthesized into a single actio
 Phase 1 — Data Gathering (parallel shell, ~2s)
 ├── git diff (scope-aware; "uncommitted" also splices in untracked files)
 ├── fallow review --brief --quiet --base <scope-derived base> (static analysis)
+├── react-doctor (React repos only; `bunx`, diff-scoped, advisory — see below)
 └── package.json (test script detection)
 
 Phase 1b (parallel sidecar, started right after Phase 1, ~3-7 min) — OpenCodeReview
@@ -104,6 +105,13 @@ External tools run in parallel with agents:
 
 - **fallow review --brief** — dead code, complexity, duplication (if installed; needs a
   remote only when the scope has no explicit base to hand it — see `fallowBaseFor`)
+- **react-doctor** (`server/lib/react-doctor.ts`) — React-specific bugs/perf (refs mutated in
+  render, missing effect cleanup, re-render traps) via `bunx react-doctor@<pinned>
+--scope changed`, same base as fallow resolved to an OID. Runs only when a tracked
+  `package.json` lists `react` and `bunx` exists; never a gate; fed to synthesis only
+  (angles do not see it). `--no-telemetry` is mandatory (no repo data to their score API);
+  complexity/export-style rules are filtered because fallow owns complexity. A failure
+  renders an explicit `react-doctor failed` line.
 - **OpenCodeReview (`ocr`)** — cross-file consistency, config drift, precise line-anchored
   findings (if installed on PATH; `AGENT_GATEWAY_REVIEW_OCR=0` disables)
 

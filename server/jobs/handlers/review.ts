@@ -8,6 +8,13 @@ import { textComplete } from "../../lib/iu-openai.ts";
 import { dataBlock, newFenceNonce } from "../../lib/prompt-fence.ts";
 import { parseJsonLoose, singleShotJson } from "../../lib/single-shot.ts";
 import { runOcrReview, type RunOcrReviewResult } from "../../lib/ocr.ts";
+import {
+  REACT_DOCTOR_FAILED_PREFIX,
+  REACT_DOCTOR_TIMEOUT_MS,
+  parseReactDoctorResult,
+  reactDoctorCommand,
+  renderReactDoctorBlock,
+} from "../../lib/react-doctor.ts";
 import { isPathScope, splitRange } from "../../lib/scope.ts";
 import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
@@ -177,7 +184,7 @@ const FINDING = z.object({
   angle: z
     .string()
     .describe(
-      "Which reviewer caught this: architect | senior-dev | frontend | backend | typescript | qa | security | performance | concurrency | data-migration | api-contract | resilience | adversary | fallow | ocr",
+      "Which reviewer caught this: architect | senior-dev | frontend | backend | typescript | qa | security | performance | concurrency | data-migration | api-contract | resilience | adversary | fallow | react-doctor | ocr",
     ),
 });
 
@@ -1020,6 +1027,9 @@ export async function runReview(
   // exit (throw, all-angles-failed) never leaves `ocr` reading a worktree being torn down.
   let ocrAbort: AbortController | undefined;
   let ocrPromise: Promise<RunOcrReviewResult> | undefined;
+  // Same lifetime as `ocrPromise`: the `finally` awaits it so an early exit never leaves
+  // react-doctor scanning a ref-mode worktree that is being torn down.
+  let reactDoctorPromise: Promise<{ stdout: string; ok: boolean; elapsedMs: number }> | undefined;
   // A drain detached an angle session: the sessions keep running in `worktree`, so the `finally`
   // must leave it (and its restored-settings state) alone for the next boot's re-run to reopen.
   let detachedForRestart = false;
@@ -1033,6 +1043,7 @@ export async function runReview(
     let diffCmd: string;
     let filesCmd: string;
     let fallowCmd: string;
+    let reactDoctorCmd: string;
     // Hoisted so ref mode's resolved base can also seed OCR's `--from` after Phase 1 — see
     // where `ocrPromise` is started below. Stays `undefined` outside ref mode.
     let baseOid: string | undefined;
@@ -1068,6 +1079,7 @@ export async function runReview(
       diffCmd = refDiffCommand(baseOid);
       filesCmd = refDiffFilesCommand(baseOid);
       fallowCmd = fallowCommand({ kind: "base", ref: baseOid });
+      reactDoctorCmd = reactDoctorCommand({ kind: "base", ref: baseOid });
     } else {
       diffCmd = gitDiffCommand(resolvedScope);
       filesCmd = gitDiffFilesCommand(resolvedScope);
@@ -1075,6 +1087,8 @@ export async function runReview(
       // this direct-to-master repo resolves against `origin/master` and so audits nothing for
       // already-pushed commits. See `fallowBaseFor` for the `auto`/`skip` cases.
       fallowCmd = fallowCommand(fallowBaseFor(resolvedScope));
+      // Same base as fallow (shape and `-`-prefix sanitisation both come from `validateScope`).
+      reactDoctorCmd = reactDoctorCommand(fallowBaseFor(resolvedScope));
     }
 
     // Scope mode runs in the caller's LIVE checkout, which must never be stripped — another
@@ -1148,6 +1162,18 @@ export async function runReview(
       (err): RunOcrReviewResult => ({
         block: `OpenCodeReview: failed (${String(err)})`,
         ran: false,
+      }),
+    );
+
+    // Same shape as OCR: started once real changes are confirmed, awaited just before synthesis,
+    // so its ~5-10 s (120 s worst case) never delays the router + angle phases.
+    const reactDoctorStartMs = performance.now();
+    reactDoctorPromise = shell(reactDoctorCmd, effectiveCwd, REACT_DOCTOR_TIMEOUT_MS).then(
+      (r) => ({ ...r, elapsedMs: Math.round(performance.now() - reactDoctorStartMs) }),
+      (err) => ({
+        stdout: `${REACT_DOCTOR_FAILED_PREFIX}: ${String(err)}`,
+        ok: false,
+        elapsedMs: Math.round(performance.now() - reactDoctorStartMs),
       }),
     );
 
@@ -1374,6 +1400,23 @@ export async function runReview(
       },
       "ocr review resolved",
     );
+    const reactDoctorResult = await reactDoctorPromise;
+    const reactDoctorOutcome = parseReactDoctorResult(reactDoctorResult);
+    logger.info(
+      {
+        event: "review.react_doctor",
+        tool: "review",
+        project: cwd,
+        ran: reactDoctorOutcome.kind === "report",
+        outcome: reactDoctorOutcome.kind,
+        findings: reactDoctorOutcome.kind === "report" ? reactDoctorOutcome.findings.length : 0,
+        errors: reactDoctorOutcome.kind === "report" ? reactDoctorOutcome.errorCount : 0,
+        elapsedMs: reactDoctorResult.elapsedMs,
+        ok: reactDoctorResult.ok,
+        ...(reactDoctorOutcome.kind === "failed" ? { reason: reactDoctorOutcome.reason } : {}),
+      },
+      "react-doctor gathered",
+    );
     bump("synthesizing findings");
     const synthesisPrompt = await loadAnglePrompt("synthesis");
 
@@ -1389,6 +1432,7 @@ export async function runReview(
       .join("\n\n");
 
     const fallowBlock = renderFallowBlock(fallowResult.stdout);
+    const reactDoctorBlock = renderReactDoctorBlock(reactDoctorResult);
 
     // Function replacers, not string ones — `String.prototype.replace`'s string form treats
     // `$&`/`$1`/`$$` etc. in the replacement as special substitution patterns, and every one
@@ -1397,6 +1441,7 @@ export async function runReview(
     const finalPrompt = synthesisPrompt
       .replace("[ANGLE_RESULTS]", () => angleBlock)
       .replace("[FALLOW_RESULTS]", () => fallowBlock)
+      .replace("[REACT_DOCTOR_RESULTS]", () => reactDoctorBlock)
       .replace("[OCR_RESULTS]", () => ocrResult.block);
 
     // Same guard as the angles: an OpenCode synthesis session in a live checkout with its own
@@ -1535,6 +1580,9 @@ export async function runReview(
   } finally {
     ocrAbort?.abort();
     await ocrPromise;
+    // A detach keeps the worktree, so there is nothing to protect — don't hold the drain for
+    // up to REACT_DOCTOR_TIMEOUT_MS on a scan nobody will read.
+    if (!detachedForRestart) await reactDoctorPromise;
     // Torn down on every exit path, including a throw — same "the caller's own checkout is
     // never left holding this review's work" property dispatch's read tiers rely on
     // (dispatch-git.ts). The worktree and the fetch ref are two independent pieces of state

@@ -753,6 +753,18 @@ would otherwise be final and force the whole review to
 (logged `review.angle_retry`). Full pipeline docs, angle tables and cost
 profile: `server/skills/review/README.md`.
 
+**react-doctor:** an advisory phase-1 input like fallow's brief, never a gate
+(`server/lib/react-doctor.ts`, rendered into synthesis's `[REACT_DOCTOR_RESULTS]`,
+logged `review.react_doctor`). No repo installs it — the command pins
+`REACT_DOCTOR_VERSION` and runs `bunx react-doctor@<ver>` diff-scoped
+(`--scope changed`, the base from `fallowBaseFor` resolved to an OID, since it
+rejects `~`/`^`), and only when a tracked `package.json` lists `react`.
+**`--no-telemetry` is mandatory** (it skips their remote score API; the command
+also passes `--no-supply-chain`, which skips Socket.dev lookups) — never send repo
+data off the machine. Noisy/overlapping rules are filtered in code
+(`REACT_DOCTOR_DROPPED_RULES`); a crash or timeout renders an explicit
+`react-doctor failed` line, never silence. Angles do not receive it.
+
 **OpenCodeReview (OCR):** one more phase-1 input, started right after Phase 1
 confirms real changes and awaited only just before the synthesis prompt is
 built, so its ~2.5 minute wall time runs parallel with the router + angle
