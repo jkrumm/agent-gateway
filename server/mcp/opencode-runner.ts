@@ -274,11 +274,8 @@ export function summarizeOpencodeMessages(
  *  a tool changing state, token usage landing) over the NEWEST-FIRST window. Deliberately leaves
  *  out the provider-retry bookkeeping: a dead endpoint makes the server retry forever, and each
  *  retry must not look like progress to the idle watchdog. */
-export function opencodeActivityFingerprint(
-  newestFirst: OpencodeMessage[],
-  shellOutput?: { shellId: string; size: number | null },
-): string {
-  const messages = JSON.stringify(
+export function opencodeActivityFingerprint(newestFirst: OpencodeMessage[]): string {
+  return JSON.stringify(
     newestFirst.map((m) => [
       m.id,
       m.type,
@@ -287,7 +284,6 @@ export function opencodeActivityFingerprint(
       (m.content ?? []).map((b) => [b.type, b.text?.length, b.state?.status]),
     ]),
   );
-  return shellOutput ? `${messages}|${shellOutput.shellId}:${shellOutput.size}` : messages;
 }
 
 /** The shell id of the newest tool part still `running`, from a NEWEST-FIRST window. A running
@@ -302,6 +298,32 @@ export function runningShellId(newestFirst: OpencodeMessage[]): string | undefin
     }
   }
   return undefined;
+}
+
+/** The running shell's output size, or null when the read fails — logged, counted as no activity,
+ *  never a kill: the idle watchdog is the only thing that ends a session. */
+async function readShellSize(
+  client: OpencodeClient,
+  shellId: string,
+  input: { cwd: string; logContext?: Record<string, unknown> },
+  sessionId: string,
+): Promise<number | null> {
+  try {
+    return await client.shellOutputSize(shellId, input.cwd);
+  } catch (err) {
+    runnerLogger().warn(
+      {
+        event: "session.opencode_shell_read_failed",
+        project: input.cwd,
+        ...input.logContext,
+        sessionId,
+        shellId,
+        error: err instanceof Error ? err.message : String(err),
+      },
+      "opencode shell output read failed — counted as no activity",
+    );
+    return null;
+  }
 }
 
 // ── Endpoint preflight ──────────────────────────────────────────────────────────────
@@ -517,7 +539,8 @@ export async function driveOpencodeSession(
 
   let lastActivityAt = Date.now();
   let lastFingerprint = "";
-  /** The last output size read for the running shell: a failed read reuses it, so it is no change. */
+  /** The last KNOWN output size of the running shell. Only growth past it is activity: an unknown
+   *  size (a failed read, a failed message poll) never moves it and never counts. */
   let lastShell: { shellId: string; size: number | null } | undefined;
   const finishedTurns = new Set<string>();
 
@@ -567,32 +590,21 @@ export async function driveOpencodeSession(
       } catch (err) {
         tolerateSlowRequest(err, "activity_poll");
       }
-      let shellOutput: typeof lastShell;
-      const shellId = recent ? runningShellId(recent) : undefined;
-      if (shellId) {
-        shellOutput = { shellId, size: lastShell?.shellId === shellId ? lastShell.size : null };
-        try {
-          shellOutput.size = await client.shellOutputSize(shellId, input.cwd);
-        } catch (err) {
-          // No activity, never a kill: the idle watchdog is the only thing that ends the session.
-          runnerLogger().warn(
-            {
-              event: "session.opencode_shell_read_failed",
-              project: input.cwd,
-              ...input.logContext,
-              sessionId,
-              shellId,
-              error: err instanceof Error ? err.message : String(err),
-            },
-            "opencode shell output read failed — counted as no activity",
-          );
+      let shellGrew = false;
+      if (recent) {
+        const shellId = runningShellId(recent);
+        if (!shellId) {
+          lastShell = undefined;
+        } else {
+          const known = lastShell?.shellId === shellId ? lastShell.size : null;
+          const size = await readShellSize(client, shellId, input, sessionId);
+          shellGrew = known !== null && size !== null && size > known;
+          lastShell = { shellId, size: size ?? known };
         }
       }
-      lastShell = shellOutput;
-      const fingerprint = recent
-        ? opencodeActivityFingerprint(recent, shellOutput)
-        : lastFingerprint;
-      if (recent && fingerprint !== lastFingerprint) {
+      const fingerprint = recent ? opencodeActivityFingerprint(recent) : lastFingerprint;
+      const messagesChanged = recent !== undefined && fingerprint !== lastFingerprint;
+      if (recent && (messagesChanged || shellGrew)) {
         lastFingerprint = fingerprint;
         lastActivityAt = Date.now();
         for (const m of recent) if (m.type === "assistant" && m.tokens) finishedTurns.add(m.id);

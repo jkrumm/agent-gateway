@@ -247,6 +247,38 @@ describe("driveOpencodeSession — a running shell tool part", () => {
     expect(activity).toHaveLength(1);
   });
 
+  test("an unknown size becoming known (a failed read, then a good one) is not activity", async () => {
+    const { client, drive, activity } = setup();
+    client.script(shellTurn);
+    client.shellSizes.set("29", 12);
+    client.onActivityPoll = (_session, poll) => {
+      // Alternate failing and succeeding reads of an unchanged size: null -> 12 -> null -> 12 …
+      client.shellOutputError =
+        poll % 2 === 0 ? new Error("opencode server answered HTTP 500") : undefined;
+    };
+    const result = await drive();
+    expect(result).toMatchObject({ finished: false, killReason: "idle" });
+    expect(activity).toHaveLength(1);
+  });
+
+  test("a failed message poll keeps the known size: an unchanged shell after it is not activity", async () => {
+    const { client, drive, activity } = setup();
+    client.script(shellTurn);
+    client.shellSizes.set("29", 12);
+    // Every other activity poll times out (tolerated), and every shell read after the first fails:
+    // the size is never seen to change, so nothing after the first poll is activity.
+    client.recentMessagesFault = (limit, call) =>
+      limit > 1 && call % 2 === 1
+        ? new DOMException("The operation timed out.", "TimeoutError")
+        : undefined;
+    client.onActivityPoll = (_session, poll) => {
+      if (poll >= 1) client.shellOutputError = new Error("opencode server answered HTTP 500");
+    };
+    const result = await drive();
+    expect(result).toMatchObject({ finished: false, killReason: "idle" });
+    expect(activity).toHaveLength(1);
+  });
+
   test("a shell tool part without a shellID is not read", async () => {
     const { client, drive } = setup();
     client.script({
