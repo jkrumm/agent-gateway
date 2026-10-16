@@ -155,8 +155,10 @@ the idle watchdog is the only kill; a refused connection or an HTTP/schema error
 once. A running shell tool part changes nothing in the message stream, so while one is `running`
 (`state.metadata.shellID`, 2.0.29) the watchdog also reads `GET /api/shell/{id}/output?location[directory]=<dir>&limit=1`:
 `data.size` is cumulative and grows live as the command prints (measured to 4.5 MB, `truncated: false`).
-Growth past the last known size is activity; an unchanged size, an unknown one (a failed read or
-poll) is not. Cancel and drain call the session's registered `stop` (`trackExternalSession`), which
+Every running shell is tracked by id; growth of any one past its last known size is activity; an
+unchanged size, an unknown one (a failed read or poll) is not. A command that never exits but keeps
+printing (`tail -f`) therefore holds its lane until `job_cancel` — by design: output is the liveness
+rule and there is no volume or wall-clock ceiling (`dotfiles/rules/agent-limits.md`). Cancel and drain call the session's registered `stop` (`trackExternalSession`), which
 interrupts it.
 
 **Durability (Wave 4 for dispatch, Wave 9 for every session under a job).** A drain detaches an

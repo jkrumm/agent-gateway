@@ -279,6 +279,49 @@ describe("driveOpencodeSession — a running shell tool part", () => {
     expect(activity).toHaveLength(1);
   });
 
+  test("two running shells: growth of the older one alone keeps the session alive", async () => {
+    const { client, drive } = setup();
+    client.script({
+      hang: true,
+      visibleNow: [
+        {
+          content: [shellTool("pytest", "running", 29), shellTool("sleep 999", "running", 30)],
+          tokens: null,
+        },
+      ],
+    });
+    client.shellSizes.set("30", 5);
+    client.onActivityPoll = (session, poll) => {
+      client.shellSizes.set("29", (poll + 1) * 6);
+      if (poll === 30) {
+        session.messages.push(idleMessage("succeeded"));
+        session.releaseHang?.();
+      }
+    };
+    const result = await drive();
+    expect(result).toMatchObject({ finished: true, killReason: null });
+    expect(new Set(client.shellReads.map((r) => r.shellId))).toEqual(new Set(["29", "30"]));
+  });
+
+  test("growth after a failed message poll still counts: the baseline survives the failure", async () => {
+    const { client, drive } = setup();
+    client.script(shellTurn);
+    // Every other activity poll times out (tolerated) while the shell keeps printing.
+    client.recentMessagesFault = (limit, call) =>
+      limit > 1 && call % 2 === 1
+        ? new DOMException("The operation timed out.", "TimeoutError")
+        : undefined;
+    client.onActivityPoll = (session, poll) => {
+      client.shellSizes.set("29", (poll + 1) * 6);
+      if (poll === 30) {
+        session.messages.push(idleMessage("succeeded"));
+        session.releaseHang?.();
+      }
+    };
+    const result = await drive();
+    expect(result).toMatchObject({ finished: true, killReason: null });
+  });
+
   test("a shell tool part without a shellID is not read", async () => {
     const { client, drive } = setup();
     client.script({

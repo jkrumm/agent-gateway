@@ -286,18 +286,19 @@ export function opencodeActivityFingerprint(newestFirst: OpencodeMessage[]): str
   );
 }
 
-/** The shell id of the newest tool part still `running`, from a NEWEST-FIRST window. A running
- *  shell prints without touching the message stream, so its output size is the only sign of life
+/** The shell ids of every tool part still `running`, from a NEWEST-FIRST window. A running shell
+ *  prints without touching the message stream, so its output size is the only sign of life
  *  (measured 2.0.29: `state.metadata.shellID`, a number). `running` alone is not activity. */
-export function runningShellId(newestFirst: OpencodeMessage[]): string | undefined {
+export function runningShellIds(newestFirst: OpencodeMessage[]): string[] {
+  const ids = new Set<string>();
   for (const m of newestFirst) {
-    for (const b of (m.content ?? []).toReversed()) {
+    for (const b of m.content ?? []) {
       if (b.type !== "tool" || b.state?.status !== "running") continue;
       const id = b.state.metadata?.shellID;
-      if (typeof id === "string" || typeof id === "number") return String(id);
+      if (typeof id === "string" || typeof id === "number") ids.add(String(id));
     }
   }
-  return undefined;
+  return [...ids];
 }
 
 /** The running shell's output size, or null when the read fails — logged, counted as no activity,
@@ -305,7 +306,7 @@ export function runningShellId(newestFirst: OpencodeMessage[]): string | undefin
 async function readShellSize(
   client: OpencodeClient,
   shellId: string,
-  input: { cwd: string; logContext?: Record<string, unknown> },
+  input: Pick<OpencodeDriveInput, "cwd" | "logContext">,
   sessionId: string,
 ): Promise<number | null> {
   try {
@@ -539,9 +540,10 @@ export async function driveOpencodeSession(
 
   let lastActivityAt = Date.now();
   let lastFingerprint = "";
-  /** The last KNOWN output size of the running shell. Only growth past it is activity: an unknown
-   *  size (a failed read, a failed message poll) never moves it and never counts. */
-  let lastShell: { shellId: string; size: number | null } | undefined;
+  /** The last KNOWN output size of each running shell, by shell id. Only growth past it is
+   *  activity: an unknown size (a failed read, a failed message poll) never moves it and never
+   *  counts; a shell that stops running drops out. */
+  let shellSizes = new Map<string, number | null>();
   const finishedTurns = new Set<string>();
 
   try {
@@ -592,19 +594,17 @@ export async function driveOpencodeSession(
       }
       let shellGrew = false;
       if (recent) {
-        const shellId = runningShellId(recent);
-        if (!shellId) {
-          lastShell = undefined;
-        } else {
-          const known = lastShell?.shellId === shellId ? lastShell.size : null;
+        const next = new Map<string, number | null>();
+        for (const shellId of runningShellIds(recent)) {
+          const known = shellSizes.get(shellId) ?? null;
           const size = await readShellSize(client, shellId, input, sessionId);
-          shellGrew = known !== null && size !== null && size > known;
-          lastShell = { shellId, size: size ?? known };
+          if (known !== null && size !== null && size > known) shellGrew = true;
+          next.set(shellId, size ?? known);
         }
+        shellSizes = next;
       }
       const fingerprint = recent ? opencodeActivityFingerprint(recent) : lastFingerprint;
-      const messagesChanged = recent !== undefined && fingerprint !== lastFingerprint;
-      if (recent && (messagesChanged || shellGrew)) {
+      if (recent && (fingerprint !== lastFingerprint || shellGrew)) {
         lastFingerprint = fingerprint;
         lastActivityAt = Date.now();
         for (const m of recent) if (m.type === "assistant" && m.tokens) finishedTurns.add(m.id);
