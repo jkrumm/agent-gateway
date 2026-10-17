@@ -8,6 +8,7 @@
 # to exit 2, so the code cannot be read off `make reload`. Any other reload failure happens after
 # the old server was drained/killed, so it takes the same rollback path as a failed verify.
 # FORCE=1 is passed through to every reload (running jobs otherwise make reload refuse).
+# WAIT=1 is passed through likewise: the reload drains (new jobs queue as pending) instead of refusing.
 # Before the reload it also makes sure the shared OpenCode server's LaunchAgent is loaded
 # (verify fails without it) — installing it only when ABSENT, never restarting a loaded one: a
 # restart would kill the episodes attached to it. A failed install, or a server that is not ok

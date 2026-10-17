@@ -30,7 +30,11 @@ if [ -n "$tracked_exit" ] && [ -n "$live_exit" ] && [ "$tracked_exit" != "$live_
   exit "$REFUSED"
 fi
 
-if [ -z "${FORCE:-}" ]; then
+# WAIT=1 skips this refusal and lets the drain wait instead: an unforced POST /api/shutdown sets
+# `draining`, which refuses every pending → running promotion, so the in-flight jobs finish and
+# the reload gets its window. Without it, a busy server can starve a reload indefinitely — new
+# session jobs keep starting while a caller polls for zero refusals.
+if [ -z "${FORCE:-}" ] && [ -z "${WAIT:-}" ]; then
   # `reloadRefusals` (computed server-side next to `drainBlockers`, store.ts) is the number of
   # running session-lane jobs a reload cannot detach: `claude -p` sessions, check steps, jobs
   # between phases. A job whose only live work is OpenCode sessions is not one — the drain detaches
@@ -39,7 +43,7 @@ if [ -z "${FORCE:-}" ]; then
   # reload over. An older server without the field falls back to every running session-lane job.
   n=$(curl -sf --max-time 3 http://127.0.0.1:7705/api/jobs/health 2>/dev/null | jq -r '.reloadRefusals // .running // 0' 2>/dev/null || echo 0)
   if [ "${n:-0}" != "0" ]; then
-    echo "refusing to reload: $n job(s) running that a reload cannot detach (claude -p sessions, check steps) — waiting is normal (jobs commonly run minutes), or FORCE=1 make reload discards them. OpenCode sessions are not counted: they survive a reload."
+    echo "refusing to reload: $n job(s) running that a reload cannot detach (claude -p sessions, check steps) — waiting is normal (jobs commonly run minutes), WAIT=1 make reload drains instead (new jobs queue, running ones finish), or FORCE=1 make reload discards them. OpenCode sessions are not counted: they survive a reload."
     exit "$REFUSED"
   fi
 fi
