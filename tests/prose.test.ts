@@ -561,7 +561,7 @@ describe("proseSubmitRefusal — the submit gate", () => {
 describe("prose routes", () => {
   test("the writer rides the iu-anthropic transport and the reviewer the chat wire", () => {
     expect(routeFor("prose_write")).toMatchObject({
-      model: "claude-opus-4-6",
+      model: "claude-opus-5-5",
       transport: "iu-anthropic",
       backend: "iu",
     });
@@ -572,7 +572,7 @@ describe("prose routes", () => {
     const table = buildRoutingTable({ AGENT_GATEWAY_MODEL_PROSE_WRITE: "deepseek-v4.1-flash" });
     const refused = table.overrides.find((o) => o.tool === "prose_write" && o.refused);
     expect(refused?.refused).toContain("anthropic-wire");
-    expect(table.routes.prose_write.model).toBe("claude-opus-4-6");
+    expect(table.routes.prose_write.model).toBe("claude-opus-5-5");
   });
 
   test("an anthropic-wire writer override is accepted", () => {

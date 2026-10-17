@@ -296,14 +296,16 @@ const SINGLE_SHOT: ToolRoute = {
 };
 
 // PROSE_WRITE: the `prose` job's rewrite seat — one anthropic-wire Messages call over the IU native
-//   route (single-shot.ts `anthropicComplete`), no Max lane. Opus 4.6 (bench 2026-10-17: 6/6 ok, 0
-//   starved, modelpick `bench:writing`).
+//   route (single-shot.ts `anthropicComplete`), no Max lane. Opus 5.5 (owner decision 2026-10-17 —
+//   modelpick `bench:writing`: 6/6 ok, 0 starved, judges 4.10 vs Opus 4.6's 3.96; LMArena
+//   creative_writing #1 vs #4; $4/$20 vs $5/$25 per M; record: modelpick
+//   docs/decisions/writing-model.md).
 // PROSE_REVIEW: the review seat — a DIFFERENT lab from the writer (the job refuses the same-lab pair
 //   at submit). DeepSeek V4.1 Flash because it is the one non-Anthropic id verified on the exact
 //   single-shot JSON path (chat completions + json_object, probed 2026-10-02); gpt-6.1-sol is verified
 //   on the Responses wire only.
 const PROSE_WRITE: ToolRoute = {
-  model: "claude-opus-4-6",
+  model: "claude-opus-5-5",
   backend: "iu",
   fallback: null,
   transport: "iu-anthropic",
