@@ -16,6 +16,7 @@ import { appLogger as logger } from "../../logger.ts";
 import { parseParams } from "./util.ts";
 import { encodeProjectDir, truncate } from "../../lib/agents.ts";
 import { dataBlock, endOfData, fencePreamble, newFenceNonce } from "../../lib/prompt-fence.ts";
+import { readVoiceGuide } from "../../lib/voice.ts";
 import { JSON_ONLY_RETRY, loadSkillFile, unwrap } from "../../lib/worker-io.ts";
 
 // Writes or revises ONE project's narrative page for the Obsidian vault: what the project is,
@@ -32,8 +33,6 @@ const MIN_SESSION_FILE_BYTES = 4 * 1024;
 const SESSION_TAIL_BYTES = 1024 * 1024; // 1 MB — never read a whole (up to 16 MB) transcript
 const SESSIONS_MAX_BYTES = 40 * 1024;
 const COMMITS_MAX_BYTES = 30 * 1024;
-const VOICE_PATH = "/Users/jkrumm/SourceRoot/brain/voice.md";
-const VOICE_MAX_BYTES = 12 * 1024;
 const MIN_PROSE_BLOCK_CHARS = 200;
 const MAX_PROSE_BLOCKS_PER_SESSION = 3;
 
@@ -433,17 +432,6 @@ export async function loadSkillPrompt(): Promise<string> {
   return loadSkillFile(skillPath, "narrative");
 }
 
-async function readVoice(): Promise<string> {
-  try {
-    const file = Bun.file(VOICE_PATH);
-    if (!(await file.exists())) return "";
-    const text = await file.text();
-    return text.length > VOICE_MAX_BYTES ? text.slice(0, VOICE_MAX_BYTES) : text;
-  } catch {
-    return "";
-  }
-}
-
 // ── Deterministic gathering ──────────────────────────────────────────────────
 
 function bootstrapSinceIso(now = Date.now()): string {
@@ -657,7 +645,10 @@ export async function runNarrative(
     });
   }
 
-  const [voice, skill] = await Promise.all([readVoice(), loadSkillPrompt()]);
+  const [voice, skill] = await Promise.all([
+    readVoiceGuide({ required: false }),
+    loadSkillPrompt(),
+  ]);
   const nonce = newFenceNonce();
   const facts: NarrativeFacts = {
     project,

@@ -1,9 +1,10 @@
 import { Elysia, t } from "elysia";
 import { cancelJob, createJob, getJob, listJobs, queueStats } from "../jobs/store.ts";
-import { isJobTool } from "../jobs/types.ts";
+import { isJobTool, type JobTool } from "../jobs/types.ts";
 import { resolveDispatchTarget } from "../lib/dispatch-policy.ts";
 import { computeHealth } from "../lib/health.ts";
 import { dispatchSubmitRefusal } from "../jobs/handlers/dispatch.ts";
+import { proseSubmitRefusal } from "../jobs/handlers/prose.ts";
 import { isDecisionModel } from "../lib/decision.ts";
 import { validateModel } from "../lib/routing.ts";
 import { steerJob } from "../lib/steer.ts";
@@ -11,6 +12,16 @@ import { steerJob } from "../lib/steer.ts";
 // HTTP surface for the async job system. The MCP tools are thin clients of these
 // routes (server/mcp/job-client.ts). Hosted in the always-on HTTP server so jobs
 // outlive the ephemeral MCP process. See server/jobs/store.ts.
+
+// Everything knowable without running the episode that a tool's handler also checks: `dispatch`
+// (the repo/tier policy, malformed params, ...) and `prose` (a same-lab writer/reviewer pair, a
+// non-anthropic writer, an anthropic reviewer — see proseSubmitRefusal) refuse here, before a job
+// row exists.
+async function toolSubmitRefusal(tool: JobTool, params: unknown): Promise<string | null> {
+  if (tool === "dispatch") return dispatchSubmitRefusal((params ?? {}) as Record<string, unknown>);
+  if (tool === "prose") return proseSubmitRefusal(params);
+  return null;
+}
 
 export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
   // Submit a job — returns immediately with the job id. Execution starts when a
@@ -48,7 +59,9 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
       const isDecide = body.tool === "decide";
       if (
         typeof model === "string" &&
-        (isDecide ? !isDecisionModel(model) : !validateModel(model).ok)
+        (isDecide
+          ? !isDecisionModel(model)
+          : !validateModel(model, { singleShot: body.tool === "prose" }).ok)
       ) {
         set.status = 400;
         return {
@@ -60,12 +73,10 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
       // params, in-place and sensitive combinations, revisionOf shape, branch/prTitle validity,
       // a branch name already taken) refuses here too, so the caller gets a 400 now instead of a
       // job that is accepted and fails a moment later. The handler repeats each check.
-      if (body.tool === "dispatch") {
-        const refusal = await dispatchSubmitRefusal((body.params ?? {}) as Record<string, unknown>);
-        if (refusal) {
-          set.status = 400;
-          return { ok: false as const, error: refusal };
-        }
+      const refusal = await toolSubmitRefusal(body.tool, body.params);
+      if (refusal) {
+        set.status = 400;
+        return { ok: false as const, error: refusal };
       }
       const job = createJob(body.tool, body.params ?? {});
       return { ok: true as const, job };

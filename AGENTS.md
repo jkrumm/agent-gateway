@@ -123,7 +123,7 @@ Full forensic story (why BTM denies this specific label/executable):
 ## MCP Server
 
 agent-gateway exposes workflow tools (`check`, `review`, `dispatch`, `update_pr`, `decide`, `overview`,
-`narrative`, `triage`, `otel`) plus the synchronous multimodal tools (`read_image`,
+`narrative`, `triage`, `otel`, `prose`) plus the synchronous multimodal tools (`read_image`,
 `read_drawing`, `excalidraw_diagram`) plus the job-polling tools
 (`job_status`, `job_wait`, `job_steer`, `job_cancel`) as an MCP server — a **separate process** from the
 LaunchAgent, spawned on-demand by Claude Code via stdio transport.
@@ -169,7 +169,7 @@ MCP door — the CLI adds no capability, only reach.
 
 ### Async job model (durable, off the MCP transport)
 
-The long tools (`check`/`review`/`dispatch`/`overview`/`narrative`/`triage`/`decide`) do
+The long tools (`check`/`review`/`dispatch`/`overview`/`narrative`/`triage`/`decide`/`prose`) do
 **not** block the MCP call. A 13-minute worker run held open as a single MCP
 request destabilizes the stdio transport (and the SDK's 60s client timeout).
 Instead:
@@ -203,8 +203,8 @@ _large and still-growing_ `idleMs` means the session may be stuck — peek at
 Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on
 `/mcp` disconnect, but the HTTP server is launchd-managed. Jobs survive MCP
 reconnects; disk persistence survives an HTTP restart: on boot `recover()`
-re-queues an interrupted `check`/`overview`/`narrative`/`review`/`triage` **once**
-(all read-only and idempotent) and marks everything else `interrupted`
+re-queues an interrupted `check`/`overview`/`narrative`/`review`/`triage`/`decide`/`prose` **once**
+(all read-only; `prose` is not cost-idempotent — a crash after the writer's billed reply re-bills both calls) and marks everything else `interrupted`
 (`dispatch` is never auto re-run — an `implement` episode may already have
 pushed). A job whose OpenCode session(s) a drain **detached** is not a crash and is
 requeued whatever its attempts say — see _Durable and steerable OpenCode
@@ -302,6 +302,7 @@ in `failedLastHour`; an already-terminal job answers 409, which `job_cancel` ret
 too, so per the MCP-schema-change rule above, an already-connected client needs
 an `/mcp` reconnect (or session restart) before it can poll a cancelled job
 without its Zod validation silently stripping the field.
+A `prose` cancel lands after the in-flight writer call returns, as `cancelled`: `isCancelled` is checked between stages and after the writer, and no `AbortSignal` is threaded into the model call. A running prose job is a drain blocker, so `make reload` refuses while one runs.
 
 **Alerting (Wave 4).** `server/lib/health.ts` `computeHealth()` is the payload behind
 `/api/jobs/health` plus `pageable`/`pageReason` (`!ok` or any `degradedRoutes`) and
@@ -392,6 +393,29 @@ tool-less, Sonnet on Max as the reverse lane — measured equal to the Sonnet se
 Wave 10, `docs/routing-and-quota.md`). Caps
 enforced in code (`clampSections`), never trusted from the model. Full input/
 output contract and gathering rules: `docs/agent-overview-internals.md`.
+
+### prose — human-facing text, improved in a fixed pipeline
+
+The `prose` job (`server/jobs/handlers/prose.ts`, MCP `prose`) turns a draft (article section,
+vault page, landing or UI copy, docs, briefing) into clearer prose: LINT (`server/lib/prose-lint.ts`,
+pure code) → REVIEW (`prose_review`, a different lab, notes and scores only) → REWRITE (`prose_write`,
+the voice guide plus the review) → RE-LINT. The voice guide is read by `server/lib/voice.ts` from
+`AGENT_GATEWAY_VOICE_PATH` (default `~/SourceRoot/brain/voice.md`, capped at `VOICE_MAX_BYTES` = 16 KB with a
+warn when exceeded), shared with `narrative`; a missing file fails a prose job, while narrative runs without it.
+The rewrite is kept only if it carries over every fenced code block (exact text) and URL of the original AND no
+lint rule has more findings than in the original; otherwise the original comes back with `kept: "original"` and
+`keptReason`. The job runs on the **session lane** (up to three long calls on up to 60k chars would hold a
+single-shot slot and block the drain) and checks `isCancelled` between review and write and between writer retries. The writer is one anthropic-wire
+Messages call (`anthropicComplete`, single-shot.ts: 32000 max tokens, adaptive thinking at high effort; empty
+text on `max_tokens` is `starved`, text cut off by it is `truncated`; both are content failures that keep the
+original with the billed usage carried and a warn `prose.writer_content_failed`, while transport errors
+fail the job, and a hang-guard timeout is never retried). The
+findings, reviewer notes and `brief` ride in the user turn inside nonce-fenced data blocks with the draft
+(`fencePreamble` before, `endOfData` after, so attacker text is never the last thing read), never in the system prompt. The writer (anthropic wire) and reviewer (chat wire) must be different labs and
+the pair is refused at submit (`proseSubmitRefusal`, models from `resolveProseModels`; a non-string `model`/`reviewModel` too).
+The Opus ids are `singleShotOnly` in the registry: refused on every route but `prose_write` and on every
+other tool's per-job `model`; `AGENT_GATEWAY_MODEL_PROSE_WRITE` must name an anthropic-wire id (refused at startup otherwise). English lexicon
+rules never run on German text; a draft whose language cannot be told runs the language-agnostic rules only.
 
 Higher-order tools reuse capabilities at the **code level, not via MCP
 recursion**: `review` angle workers can validate external library/API claims

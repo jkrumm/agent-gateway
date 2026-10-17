@@ -35,9 +35,12 @@
 // (A proactive Max-quota-ceiling pre-check used to also feed the first lane — removed
 // 2026-09-08, see docs/routing-and-quota.md, do not re-add it.)
 //
-// `transport: "iu-openai"` marks the routes (`adversary`, `read_image`, `read_drawing`, and the
-// SINGLE_SHOT pair `triage`/`review_router`) that never reach `runSession` at all — a direct
-// IU OpenAI transport call consuming only `.model`. `transport: "external-iu"` marks `review_ocr`: an external CLI (`ocr`,
+// `transport: "iu-openai"` marks the routes (`adversary`, `read_image`, `read_drawing`, the
+// SINGLE_SHOT pair `triage`/`review_router` and `prose_review`) that never reach `runSession` at all —
+// a direct IU OpenAI transport call consuming only `.model`. `transport: "iu-anthropic"` marks
+// `prose_write`: one native Messages call (single-shot.ts `anthropicComplete`), the same
+// fixed-transport rules, plus a model override must be an anthropic-wire id (refused at startup, not
+// on every submit). `transport: "external-iu"` marks `review_ocr`: an external CLI (`ocr`,
 // alibaba/open-code-review) that talks to IU's Anthropic transport itself
 // (`server/lib/ocr.ts` sets `OCR_LLM_URL`/`OCR_LLM_TOKEN` from `getIuConfig()`), so it too
 // only ever consumes `.model` — there is no `runSession`/backend switch for a CLI agent-gateway
@@ -65,8 +68,10 @@
 // `AGENT_GATEWAY_THINKING_TOKENS_<TOOL>` that isn't a positive integer is refused the same way.
 // A `AGENT_GATEWAY_HARNESS_<TOOL>` value other than `claude`/`opencode` is refused, same as an
 // unknown backend name. Both harness/variant overrides are refused on a non-`session`
-// transport route (iu-openai, external-iu), same reasoning as the backend/thinking-token
-// overrides above — there is no `runSession` call for either to affect. AFTER every
+// transport route (iu-openai, iu-anthropic, external-iu), same reasoning as the backend/thinking-token
+// overrides above — there is no `runSession` call for either to affect. A registry entry flagged
+// `singleShotOnly` (the Opus ids: evidence covers the `prose_write` seat only) is refused on every
+// other route, env override or per-job `model`. AFTER every
 // per-field override, `buildRoutingTable` validates the resulting model/harness COMBINATION
 // against the registry: a model whose `harnesses` include `claude` but not the route's harness
 // (every Claude id except those that also list `opencode`, e.g. Haiku 5.5 EU) normalizes harness to
@@ -101,6 +106,10 @@ export const ROUTED_TOOLS = [
   "overview",
   "triage",
   "review_router",
+  // The `prose` job's two single-shot seats: `prose_write` (anthropic wire, native Messages) and
+  // `prose_review` (chat wire). Both are one tool-less call, no worker session.
+  "prose_write",
+  "prose_review",
   "narrative",
   "review",
   // Per-angle keys for the worker angle sessions that may be re-pointed independently of
@@ -136,10 +145,13 @@ export interface ToolRoute {
   fallback: RouteFallback | null;
   /** "session" (default): `runSession()` actually honors `backend`/`fallback`.
    *  "iu-openai": a direct IU OpenAI transport call (adversary, read_image,
-   *  read_drawing) that only ever consumes `.model` — see the module comment above.
+   *  read_drawing, triage, review_router, prose_review) that only ever consumes `.model` — see
+   *  the module comment above.
+   *  "iu-anthropic": one native Messages call (`prose_write`, single-shot.ts
+   *  `anthropicComplete`); its model must be an anthropic-wire id.
    *  "external-iu": an external CLI (review_ocr's `ocr`) that talks to IU's Anthropic
    *  transport itself, consuming only `.model` — see the module comment above. */
-  transport: "session" | "iu-openai" | "external-iu";
+  transport: "session" | "iu-openai" | "iu-anthropic" | "external-iu";
   /** A gateway model's reasoning budget on the IU leg — `session-runner.ts`'s
    *  `buildWorkerEnv` exports this as `MAX_THINKING_TOKENS` for any non-Claude model, the
    *  only control that reaches DeepSeek-V4-Flash's or DeepSeek-V4-Pro's thinking depth on
@@ -283,11 +295,35 @@ const SINGLE_SHOT: ToolRoute = {
   harness: "claude",
 };
 
+// PROSE_WRITE: the `prose` job's rewrite seat — one anthropic-wire Messages call over the IU native
+//   route (single-shot.ts `anthropicComplete`), no Max lane. Opus 4.6 (bench 2026-10-17: 6/6 ok, 0
+//   starved, modelpick `bench:writing`).
+// PROSE_REVIEW: the review seat — a DIFFERENT lab from the writer (the job refuses the same-lab pair
+//   at submit). DeepSeek V4.1 Flash because it is the one non-Anthropic id verified on the exact
+//   single-shot JSON path (chat completions + json_object, probed 2026-10-02); gpt-6.1-sol is verified
+//   on the Responses wire only.
+const PROSE_WRITE: ToolRoute = {
+  model: "claude-opus-4-6",
+  backend: "iu",
+  fallback: null,
+  transport: "iu-anthropic",
+  harness: "claude",
+};
+const PROSE_REVIEW: ToolRoute = {
+  model: DEEPSEEK_V41_FLASH,
+  backend: "iu",
+  fallback: null,
+  transport: "iu-openai",
+  harness: "claude",
+};
+
 const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
   check: CLASSIFY,
   overview: CLASSIFY,
   triage: SINGLE_SHOT,
   review_router: SINGLE_SHOT,
+  prose_write: PROSE_WRITE,
+  prose_review: PROSE_REVIEW,
   narrative: CLASSIFY,
   review: CLASSIFY,
   review_angle_senior_dev: ANGLE_OC,
@@ -342,8 +378,12 @@ export type ModelValidation = { ok: true; model: ModelEntry } | { ok: false; rea
 
 /** Registry gate for ANY route model: registered AND verified. Exported so a caller that
  *  accepts a per-job `model` (dispatch/review/overview/narrative submit paths) can refuse
- *  loudly at submit — `withModel` itself never throws, it silently keeps the route. */
-export function validateModel(id: string): ModelValidation {
+ *  loudly at submit — `withModel` itself never throws, it silently keeps the route. A
+ *  `singleShotOnly` id passes only with `{ singleShot: true }` (the `prose_write` seat). */
+export function validateModel(
+  id: string,
+  { singleShot = false }: { singleShot?: boolean } = {},
+): ModelValidation {
   const entry = getModel(id);
   if (!entry) {
     return {
@@ -355,6 +395,12 @@ export function validateModel(id: string): ModelValidation {
     return {
       ok: false,
       reason: `model "${id}" is registered but unverified — no probe evidence (server/lib/models.ts)`,
+    };
+  }
+  if (entry.singleShotOnly && !singleShot) {
+    return {
+      ok: false,
+      reason: `model "${id}" is single-shot only (the prose_write seat) — it has no evidence for any other route`,
     };
   }
   return { ok: true, model: entry };
@@ -388,6 +434,37 @@ export interface RoutingTable {
   overrides: RoutingOverride[];
 }
 
+const TRANSPORT_WHAT: Record<ToolRoute["transport"], string> = {
+  session: "a worker session (runSession)",
+  "iu-openai": "a fixed iu-openai transport (a direct fetch, not runSession)",
+  "iu-anthropic": "a fixed iu-anthropic transport (a direct Messages call, not runSession)",
+  "external-iu": "a fixed external-iu transport (an external CLI, not runSession)",
+};
+
+/** Why an override on a fixed (non-`session`) transport route is refused. */
+function fixedTransportRefusal(
+  tool: string,
+  transport: ToolRoute["transport"],
+  tail: string,
+): string {
+  return `${tool} runs over ${TRANSPORT_WHAT[transport]} — ${tail}`;
+}
+
+/** Why `entry` cannot take a model override on a fixed-transport route, or null. The
+ *  `iu-anthropic` route makes a Messages call, so only an anthropic-wire id can run on it. */
+function transportWireRefusal(
+  tool: string,
+  transport: ToolRoute["transport"],
+  entry: ModelEntry,
+): string | null {
+  if (transport !== "iu-anthropic" || entry.wire === "anthropic") return null;
+  return fixedTransportRefusal(
+    tool,
+    transport,
+    `${entry.id} is a ${entry.wire}-wire model; only an anthropic-wire id can run there`,
+  );
+}
+
 /** Pure: defaults + env overrides → the effective table. Exported for tests; the module
  *  singleton below is built once from `process.env`. */
 export function buildRoutingTable(env: Record<string, string | undefined>): RoutingTable {
@@ -399,12 +476,15 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
     const key = tool.toUpperCase();
     const modelOverride = env[`AGENT_GATEWAY_MODEL_${key}`]?.trim();
     if (modelOverride) {
-      const check = validateModel(modelOverride);
-      if (check.ok) {
+      const check = validateModel(modelOverride, { singleShot: tool === "prose_write" });
+      const refused = check.ok
+        ? transportWireRefusal(tool, base.transport, check.model)
+        : check.reason;
+      if (refused) {
+        overrides.push({ tool, field: "model", value: modelOverride, refused });
+      } else {
         model = modelOverride;
         overrides.push({ tool, field: "model", value: modelOverride });
-      } else {
-        overrides.push({ tool, field: "model", value: modelOverride, refused: check.reason });
       }
     }
     const backendOverride = env[`AGENT_GATEWAY_BACKEND_${key}`]?.trim();
@@ -414,10 +494,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
           tool,
           field: "backend",
           value: backendOverride,
-          refused:
-            base.transport === "iu-openai"
-              ? `${tool} runs over a fixed iu-openai transport (a direct fetch, not runSession) — a backend override has no effect`
-              : `${tool} runs over a fixed external-iu transport (an external CLI, not runSession) — a backend override has no effect`,
+          refused: fixedTransportRefusal(tool, base.transport, "a backend override has no effect"),
         });
       } else if (backendOverride !== "iu" && backendOverride !== "max") {
         overrides.push({
@@ -456,10 +533,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
           tool,
           field: "harness",
           value: harnessOverride,
-          refused:
-            base.transport === "iu-openai"
-              ? `${tool} runs over a fixed iu-openai transport (a direct fetch, not runSession) — a harness override has no effect`
-              : `${tool} runs over a fixed external-iu transport (an external CLI, not runSession) — a harness override has no effect`,
+          refused: fixedTransportRefusal(tool, base.transport, "a harness override has no effect"),
         });
       } else if (harnessOverride !== "claude" && harnessOverride !== "opencode") {
         overrides.push({
@@ -565,10 +639,11 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
           tool,
           field: "thinkingTokens",
           value: thinkingOverride,
-          refused:
-            base.transport === "iu-openai"
-              ? `${tool} runs over a fixed iu-openai transport (a direct fetch, not runSession) — the thinking budget only applies to session transport`
-              : `${tool} runs over a fixed external-iu transport (an external CLI, not runSession) — the thinking budget only applies to session transport`,
+          refused: fixedTransportRefusal(
+            tool,
+            base.transport,
+            "the thinking budget only applies to session transport",
+          ),
         });
       } else if (harness === "opencode") {
         overrides.push({
@@ -599,10 +674,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
           tool,
           field: "variant",
           value: variantOverride,
-          refused:
-            base.transport === "iu-openai"
-              ? `${tool} runs over a fixed iu-openai transport (a direct fetch, not runSession) — a variant override has no effect`
-              : `${tool} runs over a fixed external-iu transport (an external CLI, not runSession) — a variant override has no effect`,
+          refused: fixedTransportRefusal(tool, base.transport, "a variant override has no effect"),
         });
       } else if (harness === "claude") {
         overrides.push({
@@ -659,7 +731,7 @@ function assertDefaultRoutesValid(): void {
     const route = DEFAULT_ROUTES[tool];
     for (const id of [route.model, route.fallback?.model]) {
       if (id === undefined) continue;
-      const check = validateModel(id);
+      const check = validateModel(id, { singleShot: tool === "prose_write" });
       if (!check.ok) throw new Error(`default route "${tool}": ${check.reason}`);
     }
     const entry = requireModel(route.model);
@@ -731,8 +803,9 @@ export function routeForReviewAngle(angle: string): ToolRoute {
  *  model supports it; otherwise a claude-capable id (any Claude id, DeepSeek-V4-Flash)
  *  forces `claude` — opencode's providers have no code path to the Anthropic wire — and an
  *  id with neither is refused. `variant` is dropped once forced onto `claude` or when the
- *  new model does not expose it. Non-session transports (iu-openai, external-iu) have no
- *  harness, so theirs is left alone. */
+ *  new model does not expose it. Non-session transports (iu-openai, iu-anthropic, external-iu) have no
+ *  harness, so theirs is left alone. A `singleShotOnly` id is refused (the route is returned
+ *  unchanged): `prose` never goes through here. */
 export function withModel(route: ToolRoute, model: string | undefined): ToolRoute {
   if (!model || model === route.model) return route;
   const check = validateModel(model);

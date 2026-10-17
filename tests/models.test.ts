@@ -11,6 +11,8 @@ import {
   validateModel,
 } from "../server/lib/routing.ts";
 
+const IU_ONLY_CLAUDE = new Set(["claude-haiku-5-5-eu", "claude-opus-4-6", "claude-opus-5-5"]);
+
 describe("registry shape", () => {
   test("ids are unique and every entry carries limits, a dated rate with a source, and a wire/harness pairing", () => {
     const ids = listModels().map((m) => m.id);
@@ -40,9 +42,10 @@ describe("registry shape", () => {
 
   test("only Claude ids are Max-servable", () => {
     for (const m of listModels()) {
-      // `claude-haiku-5-5-eu` is the one Claude id Max cannot serve (Bedrock EU, IU-only).
+      // Claude ids Max cannot serve: Haiku 5.5 EU (Bedrock EU) and the Opus ids registered for the
+      // `prose` writer (IU Messages only, no Max route in routing.ts).
       expect(m.backends.includes("max"), m.id).toBe(
-        m.id.startsWith("claude") && m.id !== "claude-haiku-5-5-eu",
+        m.id.startsWith("claude") && !IU_ONLY_CLAUDE.has(m.id),
       );
     }
     expect(isClaudeModel("claude-sonnet-5[1m]")).toBe(true);
@@ -66,6 +69,8 @@ describe("verified", () => {
       [
         "claude-haiku-4-5",
         "claude-haiku-5-5-eu",
+        "claude-opus-4-6", // bench:writing 2026-10-17, 6/6 ok (prose writer seat)
+        "claude-opus-5-5", // bench:writing 2026-10-17, 6/6 ok
         "claude-sonnet-5",
         "claude-sonnet-5[1m]",
         "DeepSeek-V4-Flash",

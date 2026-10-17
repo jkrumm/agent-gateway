@@ -62,6 +62,9 @@ export interface ModelEntry {
   jsonObject: boolean;
   /** ISO date of probe evidence, or null. */
   verified: string | null;
+  /** Evidence covers only the anthropic-wire single-shot seat (`prose_write`), never an agent
+   *  loop or any other tool: routing refuses the id on every other route and per-job override. */
+  singleShotOnly?: boolean;
 }
 
 const OC_JSON_SOURCE = "dotfiles config/opencode/opencode.json (declared, never probed)";
@@ -98,6 +101,37 @@ const MODELS: readonly ModelEntry[] = [
     effort: [],
     jsonObject: false,
     verified: "2026-07-07",
+  },
+  // Opus 4.6 / 5.5 on the IU native Anthropic route, single-shot only (`prose_write`, anthropic-wire
+  // single-shot in single-shot.ts). Evidence: modelpick `bench:writing` 2026-10-17
+  // (docs/experiments/writing/2026-10-17/raw.json): 6/6 completions each, all `ok`, 0 starved,
+  // adaptive thinking at effort high with a 16000 budget. Rates: OpenRouter via modelpick
+  // metric_snapshot, 2026-10-17.
+  {
+    id: "claude-opus-4-6",
+    name: "Claude Opus 4.6",
+    wire: "anthropic",
+    harnesses: ["claude"],
+    backends: ["iu"],
+    limit: { context: 200_000, output: 64_000, minOutput: MIN_OUTPUT_PLAIN },
+    rate: { in: 5, out: 25, source: "modelpick metric_snapshot (OpenRouter)", date: "2026-10-17" },
+    effort: [],
+    jsonObject: false,
+    verified: "2026-10-17",
+    singleShotOnly: true,
+  },
+  {
+    id: "claude-opus-5-5",
+    name: "Claude Opus 5.5",
+    wire: "anthropic",
+    harnesses: ["claude"],
+    backends: ["iu"],
+    limit: { context: 200_000, output: 64_000, minOutput: MIN_OUTPUT_PLAIN },
+    rate: { in: 4, out: 20, source: "modelpick metric_snapshot (OpenRouter)", date: "2026-10-17" },
+    effort: [],
+    jsonObject: false,
+    verified: "2026-10-17",
+    singleShotOnly: true,
   },
   {
     id: "claude-haiku-4-5",

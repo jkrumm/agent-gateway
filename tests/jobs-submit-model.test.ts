@@ -110,6 +110,28 @@ describe("`model` refusal beyond dispatch", () => {
   });
 });
 
+describe("single-shot-only models (the Opus ids)", () => {
+  test("a per-job Opus model on review is refused: evidence covers the prose writer only", async () => {
+    const { status, body } = await post({
+      tool: "review",
+      params: { cwd: "/tmp/x", model: "claude-opus-4-6" },
+    });
+    expect(status).toBe(400);
+    expect(body.error).toBe(
+      "review refused: model claude-opus-4-6 is not a verified registry model",
+    );
+  });
+
+  test("prose accepts an Opus writer", async () => {
+    const { status, body } = await post({
+      tool: "prose",
+      params: { text: "A draft.", medium: "article", model: "claude-opus-5-5" },
+    });
+    expect(status).toBe(200);
+    expect(body.ok).toBe(true);
+  });
+});
+
 describe("decide `model`", () => {
   test("a decision-model id passes the submit route (its handler validates it)", async () => {
     const { status, body } = await post({

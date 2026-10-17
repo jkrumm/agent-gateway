@@ -12,6 +12,7 @@ import {
 import { registerNarrativeTool } from "./narrative.ts";
 import { registerOtelTool } from "./otel.ts";
 import { registerOverviewTool } from "./overview.ts";
+import { registerProseTool } from "./prose.ts";
 import { registerReadDrawingTool } from "./read-drawing.ts";
 import { registerReadImageTool } from "./read-image.ts";
 import { registerReviewTool } from "./review.ts";
@@ -34,6 +35,7 @@ export const MCP_TOOLS: ReadonlyArray<{ name: string; register: (server: McpServ
   { name: "narrative", register: registerNarrativeTool },
   { name: "otel", register: registerOtelTool },
   { name: "overview", register: registerOverviewTool },
+  { name: "prose", register: registerProseTool },
   { name: "read_drawing", register: registerReadDrawingTool },
   { name: "read_image", register: registerReadImageTool },
   { name: "review", register: registerReviewTool },

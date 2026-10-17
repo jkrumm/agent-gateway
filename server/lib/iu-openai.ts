@@ -78,6 +78,12 @@ interface IuConfig {
 
 let configCache: IuConfig | null = null;
 
+/** Test-only: drop the memoized IU config, so a test that sets `IU_BASE_URL` is not served a config
+ *  an earlier test file resolved from the Keychain (bun runs test files in one process). */
+export function __resetIuConfigForTests(): void {
+  configCache = null;
+}
+
 async function keychain(service: string): Promise<string | null> {
   try {
     const proc = Bun.spawn(["security", "find-generic-password", "-s", service, "-w"], {

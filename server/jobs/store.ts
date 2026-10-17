@@ -58,6 +58,8 @@ const MAX_CONCURRENT = parseInt(process.env.AGENT_GATEWAY_JOB_CONCURRENCY ?? "3"
 // Single-shot lane: `triage`/`decide` are one non-agentic IU request each (no worker session, no
 // tool loop), so they neither load the endpoint like a session does nor deserve to wait behind a
 // 10-minute `review`. They are admitted against their own cap and do NOT count in MAX_CONCURRENT.
+// `prose` is NOT one of them: up to three long calls on up to 60k chars would hold a single-shot
+// slot (and block the drain, which waits for single-shot jobs) — it runs on the session lane.
 const MAX_SINGLE_SHOT = parseInt(process.env.AGENT_GATEWAY_SINGLE_SHOT_CONCURRENCY ?? "6", 10);
 
 export type JobLane = "single_shot" | "session";
@@ -407,6 +409,7 @@ const REQUEUE_ON_RECOVER: ReadonlySet<JobTool> = new Set<JobTool>([
   "review",
   "triage",
   "decide",
+  "prose",
 ]);
 const MAX_RECOVER_ATTEMPTS = 2;
 
@@ -1348,7 +1351,7 @@ export function dispatchRecoveryDecision(
  *  BEFORE the ordinary requeue/interrupt logic below ever sees it — an operator asked for this
  *  job to stop, and the process dying between the SIGTERM and `execute()`'s catch observing it
  *  must never look like an ordinary crash-recovery candidate. Without this check a
- *  `REQUEUE_ON_RECOVER` tool (check/overview/narrative/review/triage) would silently resume the exact
+ *  `REQUEUE_ON_RECOVER` tool (check/overview/narrative/review/triage/decide/prose) would silently resume the exact
  *  job the cancel was trying to stop.
  *
  *  A row with `detached_at` was left by a drain that DETACHED its OpenCode session(s): nothing
