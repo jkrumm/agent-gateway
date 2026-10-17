@@ -110,10 +110,47 @@ describe("defaultProseDeps().review", () => {
     const perJob = "gemini-3.8-flash";
     expect(resolveProseModels({ reviewModel: perJob }).reviewer).toBe(perJob);
 
-    const out = await defaultProseDeps("prose").review({ model: perJob, prompt: "review it" });
+    const out = await defaultProseDeps("prose").review({
+      model: perJob,
+      prompt: "review it",
+      verdictFirst: true,
+    });
 
     expect(out.data.scores.verdict_first).toBe(3);
     expect(calls).toHaveLength(1);
     expect(calls[0]?.body.model).toBe(perJob);
+  });
+
+  test("a review without verdict_first is valid only when the draft opts out of it", async () => {
+    const { verdict_first: _omitted, ...scores } = JSON.parse(REVIEW_JSON).scores;
+    const withoutVerdict = JSON.stringify({ ...JSON.parse(REVIEW_JSON), scores });
+    const model = "gemini-3.8-flash";
+
+    queue.push(sse(withoutVerdict));
+    const out = await defaultProseDeps("prose").review({
+      model,
+      prompt: "review it",
+      verdictFirst: false,
+    });
+    expect(out.data.scores.verdict_first).toBeUndefined();
+
+    queue.push(sse(withoutVerdict), sse(withoutVerdict));
+    await expect(
+      defaultProseDeps("prose").review({ model, prompt: "review it", verdictFirst: true }),
+    ).rejects.toThrow();
+  });
+
+  test("a note about invented_content is a valid reviewer note", async () => {
+    const review = {
+      ...JSON.parse(REVIEW_JSON),
+      notes: [{ criterion: "invented_content", note: "x" }],
+    };
+    queue.push(sse(JSON.stringify(review)));
+    const out = await defaultProseDeps("prose").review({
+      model: "gemini-3.8-flash",
+      prompt: "review it",
+      verdictFirst: true,
+    });
+    expect(out.data.notes[0]?.criterion).toBe("invented_content");
   });
 });

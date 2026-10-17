@@ -153,7 +153,7 @@ describe("runProsePipeline — keep or fall back", () => {
       deps({ write: async () => ({ text: DIRTY, usage }) }),
     );
     expect(out.kept).toBe("original");
-    expect(out.usage).toEqual(usage);
+    expect(out.usageByCall.writer).toEqual({ ...usage, costUsd: expect.any(Number) });
   });
 
   test("falls back when the writer returns empty text", async () => {
@@ -461,7 +461,7 @@ describe("runProsePipeline — cancellation and writer failures", () => {
       }),
     );
     expect(out.kept).toBe("original");
-    expect(out.usage).toEqual(usage);
+    expect(out.usageByCall.writer).toEqual({ ...usage, costUsd: expect.any(Number) });
   });
 });
 

@@ -402,7 +402,7 @@ pure code) → REVIEW (`prose_review`, a different lab, notes and scores only) �
 the voice guide plus the review) → RE-LINT. The voice guide is read by `server/lib/voice.ts` from
 `AGENT_GATEWAY_VOICE_PATH` (default `~/SourceRoot/brain/voice.md`, capped at `VOICE_MAX_BYTES` = 16 KB with a
 warn when exceeded), shared with `narrative`; a missing file fails a prose job, while narrative runs without it.
-The rewrite is kept only if it carries over every fenced code block (exact text) and URL of the original AND no
+The rewrite is kept only if it stays in the draft's format (`html` when the prose has block-level tags, else `markdown`; an html rewrite may carry no markdown `> [visual:` line, table or heading), carries over every fenced code block (exact text) and URL of the original (html `href`/`src` values included) AND no
 lint rule has more findings than in the original; otherwise the original comes back with `kept: "original"` and
 `keptReason`. The job runs on the **session lane** (up to three long calls on up to 60k chars would hold a
 single-shot slot and block the drain) and checks `isCancelled` between review and write and between writer retries. The writer is one anthropic-wire
@@ -414,7 +414,7 @@ findings, reviewer notes and `brief` ride in the user turn inside nonce-fenced d
 (`fencePreamble` before, `endOfData` after, so attacker text is never the last thing read), never in the system prompt. The writer (anthropic wire) and reviewer (chat wire) must be different labs and
 the pair is refused at submit (`proseSubmitRefusal`, models from `resolveProseModels`; a non-string `model`/`reviewModel` too).
 The Opus ids are `singleShotOnly` in the registry: refused on every route but `prose_write` and on every
-other tool's per-job `model`; `AGENT_GATEWAY_MODEL_PROSE_WRITE` must name an anthropic-wire id (refused at startup otherwise). English lexicon
+other tool's per-job `model`; `AGENT_GATEWAY_MODEL_PROSE_WRITE` must name an anthropic-wire id (refused at startup otherwise). `verdictFirst: false` (an author who builds criteria → candidates → verdict) keeps the section order and drops the `verdict_first` score (stripped in code); the writer's hard rule is to add no recommendation, claim or fact the source lacks (the reviewer flags it as an `invented_content` note); `context` (≤8000 chars, the surrounding outline) rides in its own nonce-fenced read-only block to both calls. The output carries `format`, `mediumNote` (the `MEDIUM_NOTE` table, also printed in the writer's system prompt) and a flat `usage` total plus `usageByCall: {writer, reviewer}`, each with `costUsd` = the gateway's own figure, else `usageCostUsd` (models.ts: registry rates, cache reads at `rate.cacheRead` or 0.1x `in`). English lexicon
 rules never run on German text; a draft whose language cannot be told runs the language-agnostic rules only.
 
 Higher-order tools reuse capabilities at the **code level, not via MCP

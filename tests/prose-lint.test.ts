@@ -5,7 +5,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   addedContent,
+  detectFormat,
   detectLanguage,
+  formatViolation,
   lintProse,
   leftFenceOpen,
   lostContent,
@@ -186,7 +188,7 @@ describe("German rules", () => {
 
   test("ordinary German below the threshold is not flagged as Nominalstil", () => {
     const text =
-      Array.from({ length: 70 }, (_, i) => (i % 14 === 0 ? "Lösung" : "die")).join(" ") + ".";
+      Array.from({ length: 70 }, (_, i) => (i % 24 === 0 ? "Lösung" : "die")).join(" ") + ".";
     expect(rules(text, "de")).not.toContain("nominalstil");
   });
 });
@@ -476,5 +478,146 @@ describe("sentence rules skip structural lines", () => {
 
   test("lexicon rules still run on list items and headings", () => {
     expect(rules("# We delve in\n- It is robust", "en")).toEqual(["banned-delve", "banned-robust"]);
+  });
+});
+
+// A deliberately sloppy German draft: one sentence per rule, all in a single document.
+const SLOPPY_DE = [
+  "Die Durchführung der Bereitstellung erfolgt durch die Nutzung der vorhandenen Pipeline.",
+  "Dabei wurde zunächst der Cache geleert und die Konfiguration durchgeführt, danach wird der Service neu gestartet, umgesetzt und muss von allen Teams berücksichtigt werden.",
+  "Das Vorgehen ist nicht nur schnell, sondern auch sicher.",
+  "Im Anschluss erfolgt die Überprüfung der Ergebnisse durch das Team, und die Dokumentation der Änderungen wird im Wiki ergänzt, sodass alle Beteiligten den Stand nachvollziehen können, ohne dass weitere Rückfragen nötig sind, weil jede Entscheidung schriftlich festgehalten ist und jederzeit eingesehen werden kann.",
+  "Die Überprüfung der Ergebnisse erfolgt durch das Team.",
+  "Die Überprüfung der Ergebnisse erfolgt durch das Team.",
+].join("\n");
+
+const CLEAN_DE = [
+  "Das Deployment läuft über die Pipeline. Der Cache wird danach geleert.",
+  "Der Endpoint antwortet, der Release-Build ist grün, die PR ist offen.",
+  "Der Commit enthält den Fix, und der Rollback bleibt als Option erhalten.",
+  "Wir mergen morgen früh und prüfen dann die Logs im Dashboard.",
+  "Das Team testet die neue Version auf Staging, bevor sie live geht.",
+].join("\n");
+
+describe("German coverage — a sloppy draft fires every German rule", () => {
+  test("the fixture reads as German", () => {
+    expect(detectLanguage(SLOPPY_DE)).toBe("de");
+  });
+
+  test.each([
+    ["nominalstil", undefined],
+    ["passive-chain", 2],
+    ["negative-parallelism", 3],
+    ["long-sentence", 4],
+    ["repeated-sentence", 6],
+  ] as const)("%s fires", (rule, line) => {
+    const hit = lintProse(SLOPPY_DE, "de").find((f) => f.rule === rule);
+    expect(hit).toBeDefined();
+    if (line !== undefined) expect(hit?.line).toBe(line);
+  });
+
+  test("a clean German paragraph with English tech terms stays at zero", () => {
+    expect(detectLanguage(CLEAN_DE)).toBe("de");
+    expect(lintProse(CLEAN_DE, "de")).toEqual([]);
+  });
+});
+
+describe("unquoted html link attributes", () => {
+  test("an unquoted relative href or src that the rewrite drops is lost", () => {
+    expect(lostContent("<p><a href=/guide>Guide</a></p>", "<p>Guide</p>")).toContain("/guide");
+    expect(lostContent("<p><img src=images/logo.png></p>", "<p>Logo</p>")).toContain(
+      "images/logo.png",
+    );
+  });
+});
+
+describe("detectFormat", () => {
+  test("block-level html tags make an html draft", () => {
+    for (const tag of ["<p>Hi</p>", "<h2>Title</h2>", "<table><tr><td>x</td></tr></table>"]) {
+      expect(detectFormat(tag)).toBe("html");
+    }
+    expect(detectFormat('<div class="note">x</div>')).toBe("html");
+    expect(detectFormat("<ul><li>a</li></ul>")).toBe("html");
+    expect(detectFormat("<section>x</section>")).toBe("html");
+  });
+
+  test("markdown, inline tags and tags inside code are markdown", () => {
+    expect(detectFormat("# Title\n\nSome *text* with <b>bold</b>.")).toBe("markdown");
+    expect(detectFormat("Use `<div>` here.\n\n```html\n<p>x</p>\n```")).toBe("markdown");
+    expect(detectFormat("a < b and c > d")).toBe("markdown");
+    expect(detectFormat("<pre>x</pre>")).toBe("markdown");
+    expect(
+      detectFormat(
+        "<p>Intro.</p>\n<ul>\n  <li>one</li>\n  <li>two</li>\n  <li>three</li>\n</ul>\nTrailing words.",
+      ),
+    ).toBe("html");
+    expect(
+      detectFormat(
+        '<div align="center"><img src="logo.png"></div>\n\n# Title\n\nIntro line.\n\n- a\n- b\n\nMore text.',
+      ),
+    ).toBe("markdown");
+  });
+});
+
+describe("formatViolation", () => {
+  const HTML = "<h2>Title</h2><p>Body.</p>";
+
+  test("a rewrite in the same format passes", () => {
+    expect(
+      formatViolation("html", "<p>Better body.</p>\n<!-- visual: table — the options -->"),
+    ).toBe(null);
+    expect(formatViolation("markdown", "# Title\n\nBetter body.\n\n> [visual: table — x]")).toBe(
+      null,
+    );
+  });
+
+  test("switching format in either direction is a violation", () => {
+    expect(formatViolation("html", "Plain paragraph.\n\nAnother one.")).toContain(
+      "from html to markdown",
+    );
+    expect(formatViolation("html", "# Title\n\nBody.")).toContain("markdown heading");
+    expect(formatViolation("markdown", HTML)).toContain("from markdown to html");
+  });
+
+  test("an html rewrite may not carry a markdown visual line, table or heading", () => {
+    expect(formatViolation("html", `${HTML}\n> [visual: diagram — flow]`)).toContain("[visual:");
+    expect(formatViolation("html", `${HTML}\n\n| a | b |\n|---|---|\n| 1 | 2 |`)).toContain(
+      "markdown table",
+    );
+    expect(formatViolation("html", `${HTML}\n\n## Heading`)).toContain("markdown heading");
+  });
+
+  test("markdown inside a fenced block of an html rewrite is code, not syntax", () => {
+    expect(formatViolation("html", `${HTML}\n\`\`\`md\n## Heading\n\`\`\``)).toBeNull();
+  });
+});
+
+describe("html URLs in the keep gate", () => {
+  const ORIGINAL =
+    '<p>See <a href="https://example.com/docs">docs</a> <img src="https://cdn.example.com/a.png"></p>';
+
+  test("href and src URLs count as URLs: dropping one is a loss", () => {
+    expect(
+      lostContent(ORIGINAL, '<p>See <a href="https://example.com/docs">docs</a></p>'),
+    ).toContain("https://cdn.example.com/a.png");
+  });
+
+  test("an added href/src URL is an addition", () => {
+    expect(addedContent(ORIGINAL, `${ORIGINAL}<a href="https://evil.example/x">x</a>`)).toContain(
+      "https://evil.example/x",
+    );
+  });
+
+  test("a rewrite keeping every attribute URL loses and adds nothing", () => {
+    const rewrite =
+      '<p><img src="https://cdn.example.com/a.png"> Docs: <a href="https://example.com/docs">here</a></p>';
+    expect(lostContent(ORIGINAL, rewrite)).toBeNull();
+    expect(addedContent(ORIGINAL, rewrite)).toBeNull();
+  });
+
+  test("relative and anchor links are links too", () => {
+    const original = '<p><a href="/guide/setup">setup</a> <a href="#faq">faq</a></p>';
+    expect(lostContent(original, '<p><a href="/guide/setup">setup</a></p>')).toContain("#faq");
+    expect(lostContent(original, original)).toBeNull();
   });
 });

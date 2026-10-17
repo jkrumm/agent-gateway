@@ -67,8 +67,10 @@ const EN_SIGNIFICANCE_PARTICIPLE =
 
 const DE_PASSIVE_AUX = /\b(wird|werden|wurde|wurden|worden)\b/gi;
 const DE_NOMINAL_SUFFIX = /\b\p{L}+(ung|heit|keit)(en|e|er|es|n|s)?\b/giu;
-/** Per 100 words over which the -ung/-heit/-keit density is flagged. */
-const NOMINAL_DENSITY_PER_100 = 8;
+/** Per 100 words over which the -ung/-heit/-keit density is flagged. Lowered 8 → 7 (2026-10-17):
+ *  a clearly sloppy 100-word German paragraph measured 7.8 and slipped through, while the German
+ *  notes of the vault top out at 6.8 (median 1.7). */
+const NOMINAL_DENSITY_PER_100 = 7;
 const NOMINAL_MIN_WORDS = 60;
 const MAX_SENTENCE_WORDS = 30;
 const REPEAT_JACCARD = 0.8;
@@ -295,6 +297,49 @@ export function lintProse(text: string, language: ProseLanguage): LintFinding[] 
   return findings.toSorted((a, b) => a.line - b.line);
 }
 
+// ── Format — what the draft is written in, and what a rewrite must stay in ────────────────
+//
+// A draft is `html` when its prose (fences and inline code excluded) contains a block-level HTML
+// tag, else `markdown`. The writer must return the same format: an html draft rewritten into
+// markdown (or the reverse) is discarded, and an html rewrite may not smuggle in markdown syntax —
+// a `> [visual: …]` blockquote, a pipe table or a `#` heading. In html a visual placeholder is a
+// comment, `<!-- visual: <kind> — <what it shows> -->`.
+
+export type ProseFormat = "markdown" | "html";
+
+// Opening or closing block-level tags, incl. the line-level ones a pretty-printed draft is mostly
+// made of (`<li>`, `<tr>`, `<td>`), so a `<p>` + `<ul>` draft is not misread as markdown.
+const HTML_BLOCK_TAG =
+  /<\/?(?:p|h[1-6]|table|thead|tbody|tfoot|tr|td|th|ul|ol|li|dl|dt|dd|div|section|article|aside|header|footer|nav|main|blockquote|figure|figcaption)(?:\s[^>]*)?\/?>/i;
+const MD_VISUAL_QUOTE = /^\s*>\s*\[visual:/i;
+const MD_HEADING = /^\s{0,3}#{1,6}\s+\S/;
+const MD_TABLE_SEPARATOR = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
+
+/** `html` when block-level tags (<p>, <h1>–<h6>, <table>, <ul>, <ol>, <div>, <section>) carry the
+ *  document — at least half its non-empty prose lines contain one — else `markdown`. A markdown
+ *  README with one `<div>` banner or `<details>` block stays markdown; its rewrite must too. */
+export function detectFormat(text: string): ProseFormat {
+  const lines = proseLines(text).filter((l) => l.text.trim());
+  if (lines.length === 0) return "markdown";
+  const tagged = lines.filter((l) => HTML_BLOCK_TAG.test(l.text)).length;
+  return tagged * 2 >= lines.length ? "html" : "markdown";
+}
+
+/** Why `candidate` is not in the `format` of the draft, or null: it switched format, or (html) it
+ *  carries markdown syntax. */
+export function formatViolation(format: ProseFormat, candidate: string): string | null {
+  // The specific markdown-in-html reason first: a markdown table can tip the line ratio too.
+  if (format === "html") {
+    for (const { text } of proseLines(candidate)) {
+      if (MD_VISUAL_QUOTE.test(text)) return "html rewrite contains a markdown `> [visual:` line";
+      if (MD_HEADING.test(text)) return "html rewrite contains a markdown heading";
+      if (MD_TABLE_SEPARATOR.test(text)) return "html rewrite contains a markdown table";
+    }
+  }
+  const actual = detectFormat(candidate);
+  return actual === format ? null : `rewrite switched the format from ${format} to ${actual}`;
+}
+
 // ── Content integrity — what a rewrite must carry over, and must not invent ───────────────
 //
 // The lint gate only compares findings, and lint skips fenced code, so a rewrite could drop a code
@@ -411,9 +456,19 @@ function urlToken(url: string): string {
   return parts ? parts[1].toLowerCase() + parts[2] : url;
 }
 
-/** Every http(s) / `www.` URL in `text`, in order and with repeats, as comparison tokens. */
+/** `href="…"` / `src='…'` values: the quoted value is the whole URL, so it is read exactly. */
+const HTML_URL_ATTRIBUTE = /\b(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi;
+
+/** Every http(s) / `www.` URL in `text`, in order and with repeats, as comparison tokens. An html
+ *  `href`/`src` value that is not an absolute URL (a relative path, `#anchor`, `mailto:`) is a link
+ *  too, tokenised as `attr:<value>`; absolute ones are already caught by the URL run. */
 function urlsOf(text: string): string[] {
-  return (text.match(URL_RUN) ?? []).map(trimUrl).filter(Boolean).map(urlToken);
+  const absolute = (text.match(URL_RUN) ?? []).map(trimUrl).filter(Boolean).map(urlToken);
+  const relative = [...text.matchAll(HTML_URL_ATTRIBUTE)]
+    .map((m) => (m[1] ?? m[2] ?? m[3] ?? "").trim())
+    .filter((value) => value && !/^(?:https?:\/\/|www\.)/i.test(value))
+    .map((value) => `attr:${value}`);
+  return [...absolute, ...relative];
 }
 
 function counts(keys: string[]): Map<string, number> {

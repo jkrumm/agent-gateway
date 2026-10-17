@@ -386,6 +386,9 @@ const MODELS: readonly ModelEntry[] = [
   },
 ];
 
+/** A missing `rate.cacheRead` bills cache reads at this fraction of `rate.in` (see `ModelEntry`). */
+const CACHE_READ_FACTOR = 0.1;
+
 const BY_ID: ReadonlyMap<string, ModelEntry> = new Map(MODELS.map((m) => [m.id, m]));
 
 export function getModel(id: string): ModelEntry | undefined {
@@ -399,4 +402,34 @@ export function isVerified(id: string): boolean {
 
 export function listModels(): readonly ModelEntry[] {
   return MODELS;
+}
+
+/** Token counts the pricing needs. `inputTokens` INCLUDES `cacheReadTokens` (a subset), the
+ *  convention of `IuUsage`; thinking tokens bill at the output rate. */
+export interface PricedUsage {
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens?: number;
+  cacheReadTokens?: number;
+  /** The gateway's own reported cost; wins over a computed one. */
+  costUsd?: number | null;
+}
+
+/** USD for one call: the gateway's reported cost when it gave one, else the registry rates
+ *  (uncached input at `rate.in`, cache reads at `rate.cacheRead` or 0.1x `in`, output + thinking at
+ *  `rate.out`, the long-context tier when the prompt exceeds it). Null for an unregistered id. */
+export function usageCostUsd(modelId: string, usage: PricedUsage): number | null {
+  if (usage.costUsd != null) return usage.costUsd;
+  const rate = getModel(modelId)?.rate;
+  if (!rate) return null;
+  const tier =
+    rate.longContext && usage.inputTokens > rate.longContext.above ? rate.longContext : rate;
+  const cacheRead = Math.min(usage.cacheReadTokens ?? 0, usage.inputTokens);
+  const cacheRate = tier.cacheRead ?? tier.in * CACHE_READ_FACTOR;
+  const usd =
+    ((usage.inputTokens - cacheRead) * tier.in +
+      cacheRead * cacheRate +
+      (usage.outputTokens + (usage.reasoningTokens ?? 0)) * tier.out) /
+    1_000_000;
+  return Math.round(usd * 1e8) / 1e8;
 }
