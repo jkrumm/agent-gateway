@@ -317,14 +317,20 @@ export function summarizeArm(arm: string, cells: CellRecord[]): ArmSummary {
 // ── Gateway client ─────────────────────────────────────────────────────────────
 
 /** Review params for one arm: the item's recorded inputs, with `model` set for a model arm and
- *  removed for baseline so the route default applies. */
+ *  removed for baseline so the route default applies. A recorded `scope` is relative to whatever
+ *  HEAD is now (`head`, `HEAD~3`, `origin/main..HEAD`), so it is pinned to the frozen
+ *  `baseSha..headSha` — every arm then reviews the same diff even if the repo moves mid-run. */
 export function reviewParams(
   recorded: Record<string, unknown>,
   model: string | null,
+  pin?: { baseSha: string; headSha: string },
 ): Record<string, unknown> {
   const params: Record<string, unknown> = {};
   for (const key of REVIEW_PARAM_KEYS) {
     if (key !== "model" && recorded[key] !== undefined) params[key] = recorded[key];
+  }
+  if (params.scope !== undefined && pin?.baseSha && pin.headSha) {
+    params.scope = `${pin.baseSha}..${pin.headSha}`;
   }
   if (model !== null) params.model = model;
   return params;
@@ -558,7 +564,7 @@ async function runCell(
   const started = Date.now();
   let record: CellRecord;
   try {
-    const submitted = await submitReview(base, reviewParams(item.params, model));
+    const submitted = await submitReview(base, reviewParams(item.params, model, item));
     if (!submitted.ok) {
       record = {
         itemJobId: item.jobId,

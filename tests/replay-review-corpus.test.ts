@@ -197,6 +197,12 @@ describe("reviewParams and armModel", () => {
     const recorded = { cwd: "/r", pr: 4, model: "stale", angles: ["qa"], kind: "pr" };
     expect(reviewParams(recorded, null)).toEqual({ cwd: "/r", pr: 4, angles: ["qa"] });
     expect(reviewParams(recorded, "m")).toEqual({ cwd: "/r", pr: 4, angles: ["qa"], model: "m" });
+    const pin = { baseSha: "aaa1111", headSha: "bbb2222" };
+    expect(reviewParams({ cwd: "/r", scope: "HEAD~3" }, null, pin)).toEqual({
+      cwd: "/r",
+      scope: "aaa1111..bbb2222",
+    });
+    expect(reviewParams(recorded, null, pin)).toEqual({ cwd: "/r", pr: 4, angles: ["qa"] });
   });
 });
 
