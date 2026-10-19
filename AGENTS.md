@@ -157,6 +157,7 @@ MCP:
 agw dispatch --repo warden --tier implement --workspace in-place 'the brief'
 agw check --repo agent-gateway          # submit + wait, progress on stderr
 agw review --pr 42 --json          # stdout carries ONLY the result JSON
+agw prose draft.md --medium vault --out draft.md   # text on stdout/--out, summary + notes on stderr
 agw jobs --running · status|wait|cancel <jobId> · steer <jobId> <text> · routing · policy · health
 ```
 
@@ -166,6 +167,13 @@ ceiling (`.claude/rules/agent-limits.md`). Exit codes: **0** done · **1**
 failed/interrupted/cancelled · **2** usage error or `dispatch refused: …` ·
 **3** server unreachable. Same policy, same queue, same concurrency cap as the
 MCP door — the CLI adds no capability, only reach.
+
+`agw prose [<file>|-] [--medium <m>] [--language en|de] [--register <r>] [--brief <text>] [--context <file>] [--no-verdict-first] [--out <file>] [--json]`
+submits a `prose` job (flags map 1:1 onto `PROSE_INPUT`; `--context` reads a file; `--medium` defaults to
+`docs` because the schema requires one), waits with no ceiling, and writes the resulting text (the rewrite,
+or the original when the keep gate declined) to stdout or `--out`. stderr gets one summary line (kept, reason,
+language, format, cost, duration) plus the reviewer notes; `--json` prints the full result instead of the text.
+Exit 0 whenever the job finished, even if it kept the original.
 
 ### Async job model (durable, off the MCP transport)
 

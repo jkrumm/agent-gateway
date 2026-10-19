@@ -3,7 +3,7 @@
 // pure JSON — all against exported pure functions plus one mocked-fetch round trip, so no
 // test spawns a server.
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test, afterAll } from "bun:test";
@@ -11,7 +11,12 @@ import {
   exitCodeFor,
   formatDuration,
   parseArgs,
+  PROSE_LANGUAGES,
+  PROSE_MEDIUMS,
+  PROSE_REGISTERS,
+  proseRequestBody,
   renderCheckResult,
+  renderProseSummary,
   renderVerdictResult,
   requestBody,
   decideRequestBody,
@@ -24,6 +29,7 @@ import {
   type JobCommand,
   type RequestBody,
 } from "../bin/agw.ts";
+import { PROSE_INPUT } from "../server/jobs/handlers/prose.ts";
 
 function bodyFor(argv: string[], cwd = "/repo"): RequestBody {
   const { command } = parseArgs(argv);
@@ -1017,5 +1023,231 @@ describe("update-pr command", () => {
     });
     expect(err).toContain("update_pr refused");
     expect(code).toBe(2);
+  });
+});
+
+// ── prose: a draft in (file or stdin), the improved text out ───────────────────────
+
+describe("prose command", () => {
+  const dir = mkdtempSync(join(tmpdir(), "agent-gateway-cli-prose-"));
+  const draftFile = join(dir, "draft.md");
+  const contextFile = join(dir, "context.md");
+  writeFileSync(draftFile, "# Title\n\nThe draft.");
+  writeFileSync(contextFile, "outline of the doc");
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  const PROSE_RESULT = {
+    text: "# Title\n\nThe rewrite.",
+    kept: "rewrite",
+    language: "en",
+    format: "markdown",
+    review: {
+      scores: {},
+      notes: [{ criterion: "concision", note: "Cut the second paragraph." }],
+    },
+    usage: { costUsd: 0.0421 },
+  };
+  const PROSE_KEPT = {
+    ...PROSE_RESULT,
+    text: "# Title\n\nThe draft.",
+    kept: "original",
+    keptReason: "rewrite lost 1 URL",
+  };
+  const proseJob = (result: unknown) => ({
+    ...DONE_JOB,
+    tool: "prose",
+    result,
+    elapsedMs: 41_000,
+  });
+  const submitRoutes = (result: unknown, onPost?: (body: string) => void) => ({
+    "POST /api/jobs": (init?: RequestInit) => {
+      onPost?.(init?.body as string);
+      return { body: { ok: true, job: { id: "j1" } } };
+    },
+    "GET /api/jobs/j1": () => ({ body: { ok: true, job: proseJob(result) } }),
+  });
+
+  test("the CLI's enums are exactly PROSE_INPUT's", () => {
+    expect([...PROSE_MEDIUMS]).toEqual([...PROSE_INPUT.shape.medium.options]);
+    expect([...PROSE_LANGUAGES]).toEqual([...PROSE_INPUT.shape.language.removeDefault().options]);
+    expect([...PROSE_REGISTERS]).toEqual([...PROSE_INPUT.shape.register.unwrap().options]);
+  });
+
+  test("parses file, stdin and every flag; rejects bad enums and extra positionals", () => {
+    expect(parseArgs(["prose", "f.md", "--medium", "vault", "--no-verdict-first"]).command).toEqual(
+      {
+        kind: "prose",
+        file: "f.md",
+        medium: "vault",
+        verdictFirst: false,
+      },
+    );
+    expect(parseArgs(["prose", "-"]).command).toEqual({
+      kind: "prose",
+      medium: "docs",
+      verdictFirst: true,
+    });
+    expect(
+      parseArgs([
+        "prose",
+        "--language=de",
+        "--register",
+        "broad",
+        "--brief",
+        "for oncall",
+        "--context",
+        "c.md",
+        "--out",
+        "o.md",
+      ]).command,
+    ).toEqual({
+      kind: "prose",
+      medium: "docs",
+      verdictFirst: true,
+      language: "de",
+      register: "broad",
+      brief: "for oncall",
+      contextFile: "c.md",
+      out: "o.md",
+    });
+    expect(() => parseArgs(["prose", "--medium", "poem"])).toThrow(/--medium must be one of/);
+    expect(() => parseArgs(["prose", "--language", "fr"])).toThrow(/--language must be one of/);
+    expect(() => parseArgs(["prose", "--register", "x"])).toThrow(/--register must be one of/);
+    expect(() => parseArgs(["prose", "a", "b"])).toThrow(/one <file>/);
+    expect(() => parseArgs(["prose", "--bogus"])).toThrow(/unknown flag/);
+  });
+
+  test("proseRequestBody maps flags onto PROSE_INPUT field names", () => {
+    const { command } = parseArgs([
+      "prose",
+      "--medium",
+      "article",
+      "--language",
+      "de",
+      "--register",
+      "personal",
+      "--brief",
+      "b",
+      "--context",
+      "c",
+      "--no-verdict-first",
+    ]);
+    const body = proseRequestBody(command as never, {
+      read: (p) => `file:${p}`,
+      readStdin: () => "from stdin",
+    });
+    expect(body).toEqual({
+      tool: "prose",
+      params: {
+        text: "from stdin",
+        medium: "article",
+        language: "de",
+        register: "personal",
+        brief: "b",
+        context: "file:c",
+        verdictFirst: false,
+      },
+    });
+    expect(PROSE_INPUT.safeParse(body.params).success).toBe(true);
+  });
+
+  test("an empty or unreadable input is a usage error (exit 2)", async () => {
+    const empty = await runWith(["prose"], {}, { readStdin: () => "  \n" });
+    expect(empty.code).toBe(2);
+    expect(empty.err).toContain("empty");
+    const missing = await runWith(["prose", join(dir, "nope.md")], {});
+    expect(missing.code).toBe(2);
+    expect(missing.err).toContain("could not read input file");
+  });
+
+  test("a rewrite: text on stdout, summary + notes on stderr, exit 0", async () => {
+    let posted = "";
+    const { code, out, err } = await runWith(
+      ["prose", draftFile, "--medium", "vault", "--context", contextFile],
+      submitRoutes(PROSE_RESULT, (b) => (posted = b)),
+    );
+    expect(code).toBe(0);
+    expect(out).toBe("# Title\n\nThe rewrite.\n");
+    expect(err).toContain("prose: kept rewrite · en · markdown · $0.0421 · 41s");
+    expect(err).toContain("[concision] Cut the second paragraph.");
+    expect(JSON.parse(posted)).toEqual({
+      tool: "prose",
+      params: { text: "# Title\n\nThe draft.", medium: "vault", context: "outline of the doc" },
+    });
+  });
+
+  test("stdin when no file is given", async () => {
+    let posted = "";
+    const { code } = await runWith(
+      ["prose", "-"],
+      submitRoutes(PROSE_RESULT, (b) => (posted = b)),
+      { readStdin: () => "piped draft" },
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(posted).params.text).toBe("piped draft");
+  });
+
+  test("a kept original still exits 0 and names the reason on stderr", async () => {
+    const { code, out, err } = await runWith(["prose", draftFile], submitRoutes(PROSE_KEPT));
+    expect(code).toBe(0);
+    expect(out).toBe("# Title\n\nThe draft.\n");
+    expect(err).toContain("kept original (rewrite lost 1 URL)");
+  });
+
+  test("--out writes the file and keeps stdout empty", async () => {
+    const outFile = join(dir, "out.md");
+    const { code, out } = await runWith(
+      ["prose", draftFile, "--out", outFile],
+      submitRoutes(PROSE_RESULT),
+    );
+    expect(code).toBe(0);
+    expect(out).toBe("");
+    expect(readFileSync(outFile, "utf8")).toBe("# Title\n\nThe rewrite.\n");
+  });
+
+  test("--json prints the full job result instead of the text", async () => {
+    const { code, out, err } = await runWith(
+      ["prose", draftFile, "--json"],
+      submitRoutes(PROSE_RESULT),
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual(PROSE_RESULT);
+    expect(err).toContain("prose: kept rewrite");
+  });
+
+  test("a failed job exits 1 with the error on stderr and nothing on stdout", async () => {
+    const { code, out, err } = await runWith(["prose", draftFile], {
+      "POST /api/jobs": () => ({ body: { ok: true, job: { id: "j1" } } }),
+      "GET /api/jobs/j1": () => ({
+        body: { ok: true, job: { ...DONE_JOB, status: "failed", result: null, error: "boom" } },
+      }),
+    });
+    expect(code).toBe(1);
+    expect(out).toBe("");
+    expect(err).toContain("boom");
+  });
+
+  test("a submit-time refusal exits 2", async () => {
+    const { code, err } = await runWith(["prose", draftFile], {
+      "POST /api/jobs": () => ({
+        status: 400,
+        body: { ok: false, error: "prose refused: writer x must be an anthropic-wire model" },
+      }),
+    });
+    expect(code).toBe(2);
+    expect(err).toContain("prose refused");
+  });
+
+  test("renderProseSummary caps the notes", () => {
+    const notes = Array.from({ length: 10 }, (_, i) => ({
+      criterion: "clarity" as const,
+      note: `n${i}`,
+    }));
+    const summary = renderProseSummary(
+      { ...PROSE_RESULT, review: { scores: {}, notes } } as never,
+      1000,
+    );
+    expect(summary).toContain("… 2 more note(s)");
+    expect(summary.split("\n")).toHaveLength(1 + 8 + 1);
   });
 });

@@ -9,12 +9,13 @@
 // only I/O here is fetch, the git-root probe, and `--context @file` reads.
 
 import "../server/lib/load-env.ts";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { isTerminal, type JobStatus } from "../server/jobs/types";
 import type { DispatchOutput } from "../server/jobs/handlers/dispatch-verdict.ts";
 import type { CheckOutput } from "../server/jobs/handlers/check.ts";
 import type { ReviewOutput } from "../server/jobs/handlers/review.ts";
+import type { ProseOutput } from "../server/jobs/handlers/prose.ts";
 
 const DEFAULT_URL = "http://127.0.0.1:7705";
 const POLL_MS = 2000;
@@ -130,6 +131,40 @@ export interface DecideCommand {
   model?: string;
 }
 
+// Mirrors PROSE_INPUT's enums (server/jobs/handlers/prose.ts); tests/cli.test.ts pins them equal,
+// so the CLI stays a plain HTTP client without importing the handler at runtime.
+export const PROSE_MEDIUMS = [
+  "article",
+  "vault",
+  "landing",
+  "ui",
+  "chat",
+  "docs",
+  "briefing",
+] as const;
+export type ProseMedium = (typeof PROSE_MEDIUMS)[number];
+export const PROSE_LANGUAGES = ["en", "de", "auto"] as const;
+export type ProseLanguage = (typeof PROSE_LANGUAGES)[number];
+export const PROSE_REGISTERS = ["peer-technical", "broad", "personal"] as const;
+export type ProseRegister = (typeof PROSE_REGISTERS)[number];
+/** `PROSE_INPUT.medium` is required; the CLI's default when `--medium` is omitted. */
+export const PROSE_DEFAULT_MEDIUM: ProseMedium = "docs";
+
+export interface ProseCommand {
+  kind: "prose";
+  /** The draft's file; absent or `-` reads stdin. */
+  file?: string;
+  medium: ProseMedium;
+  language?: ProseLanguage;
+  register?: ProseRegister;
+  brief?: string;
+  /** A file holding the surrounding-document outline (`context`). */
+  contextFile?: string;
+  verdictFirst: boolean;
+  /** Write the text here instead of stdout. */
+  out?: string;
+}
+
 export interface JobsCommand {
   kind: "jobs";
   running: boolean;
@@ -164,6 +199,7 @@ export type ParsedCommand =
   | UpdatePrCommand
   | TriageCommand
   | DecideCommand
+  | ProseCommand
   | JobsCommand
   | JobRefCommand
   | SteerCommand
@@ -249,6 +285,8 @@ export function parseArgs(argv: string[]): Parsed {
       return { command: parseTriage(rest.slice(1)), options };
     case "decide":
       return { command: parseDecide(rest.slice(1)), options };
+    case "prose":
+      return { command: parseProse(rest.slice(1)), options };
     case "update-pr":
       return { command: parseUpdatePr(rest.slice(1)), options };
     case "jobs":
@@ -526,6 +564,58 @@ function parseDecide(args: string[]): DecideCommand {
   return { kind: "decide", stateFile, questionsFile, ...(model !== undefined && { model }) };
 }
 
+function enumFlag<T extends string>(
+  flags: Map<string, string | true>,
+  name: string,
+  allowed: readonly T[],
+): T | undefined {
+  const value = flagValue(flags, name);
+  if (value === undefined) return undefined;
+  if (!(allowed as readonly string[]).includes(value)) {
+    throw new CliUsageError(
+      `agw prose: ${name} must be one of ${allowed.join("|")}, got: ${value}`,
+    );
+  }
+  return value as T;
+}
+
+function parseProse(args: string[]): ProseCommand {
+  const { flags, positionals } = parseFlags(
+    args,
+    {
+      "--medium": "value",
+      "--language": "value",
+      "--register": "value",
+      "--brief": "value",
+      "--context": "value",
+      "--no-verdict-first": "boolean",
+      "--out": "value",
+    },
+    "prose",
+  );
+  if (positionals.length > 1) {
+    throw new CliUsageError("agw prose takes one <file> (or - for stdin)");
+  }
+  const command: ProseCommand = {
+    kind: "prose",
+    medium: enumFlag(flags, "--medium", PROSE_MEDIUMS) ?? PROSE_DEFAULT_MEDIUM,
+    verdictFirst: !flags.has("--no-verdict-first"),
+  };
+  const [file] = positionals;
+  if (file !== undefined && file !== "-") command.file = file;
+  const language = enumFlag(flags, "--language", PROSE_LANGUAGES);
+  if (language !== undefined) command.language = language;
+  const register = enumFlag(flags, "--register", PROSE_REGISTERS);
+  if (register !== undefined) command.register = register;
+  const brief = flagValue(flags, "--brief");
+  if (brief !== undefined) command.brief = brief;
+  const contextFile = flagValue(flags, "--context");
+  if (contextFile !== undefined) command.contextFile = contextFile;
+  const out = flagValue(flags, "--out");
+  if (out !== undefined) command.out = out;
+  return command;
+}
+
 function parseJobs(args: string[]): JobsCommand {
   const { flags, positionals } = parseFlags(args, { "--running": "boolean" }, "jobs");
   if (positionals.length > 0) throw new CliUsageError("agw jobs takes no positional arguments");
@@ -537,7 +627,7 @@ function parseJobs(args: string[]): JobsCommand {
 export type JobCommand = DispatchCommand | CheckCommand | ReviewCommand | UpdatePrCommand;
 
 export interface RequestBody {
-  tool: "dispatch" | "check" | "review" | "triage" | "decide" | "update_pr";
+  tool: "dispatch" | "check" | "review" | "triage" | "decide" | "prose" | "update_pr";
   params: Record<string, unknown>;
 }
 
@@ -630,6 +720,34 @@ export function decideRequestBody(
   const params: Record<string, unknown> = { state, questions };
   if (command.model !== undefined) params.model = command.model;
   return { tool: "decide", params };
+}
+
+/** The POST /api/jobs body for `prose`: the draft (file text, or stdin when no file) and the
+ *  optional context file's text, mapped onto PROSE_INPUT's own field names. Needs no cwd. */
+export function proseRequestBody(
+  command: ProseCommand,
+  io: { read: (path: string) => string; readStdin: () => string },
+): RequestBody {
+  const readFile = (path: string, what: string): string => {
+    try {
+      return io.read(path);
+    } catch (err) {
+      throw new CliUsageError(
+        `could not read ${what} ${path}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+  const text = command.file === undefined ? io.readStdin() : readFile(command.file, "input file");
+  if (text.trim().length === 0) throw new CliUsageError("agw prose: the input text is empty");
+  const params: Record<string, unknown> = { text, medium: command.medium };
+  if (command.language !== undefined) params.language = command.language;
+  if (command.register !== undefined) params.register = command.register;
+  if (command.brief !== undefined) params.brief = command.brief;
+  if (command.contextFile !== undefined) {
+    params.context = readFile(command.contextFile, "--context file");
+  }
+  if (!command.verdictFirst) params.verdictFirst = false;
+  return { tool: "prose", params };
 }
 
 export interface RepoResolution {
@@ -734,6 +852,27 @@ export function renderReviewResult(r: ReviewOutput): string {
   for (const finding of r.blocking.slice(0, 8)) {
     lines.push(`  - [blocking] ${finding.file}: ${finding.message}`);
   }
+  return lines.join("\n");
+}
+
+const NOTE_LINE_MAX = 160;
+const NOTE_LINES_MAX = 8;
+
+/** The stderr report for a finished prose job: one summary line, then the reviewer's notes
+ *  compactly (one truncated line each, capped). */
+export function renderProseSummary(r: ProseOutput, elapsedMs: number): string {
+  const kept = r.kept === "original" && r.keptReason ? `original (${r.keptReason})` : r.kept;
+  const cost = r.usage.costUsd === null ? "n/a" : `$${r.usage.costUsd.toFixed(4)}`;
+  const lines = [
+    `prose: kept ${kept} · ${r.language} · ${r.format} · ${cost} · ${formatDuration(elapsedMs)}`,
+  ];
+  for (const { criterion, note } of r.review.notes.slice(0, NOTE_LINES_MAX)) {
+    const flat = note.replace(/\s+/g, " ").trim();
+    const short = flat.length > NOTE_LINE_MAX ? `${flat.slice(0, NOTE_LINE_MAX - 1)}…` : flat;
+    lines.push(`  [${criterion}] ${short}`);
+  }
+  const hidden = r.review.notes.length - NOTE_LINES_MAX;
+  if (hidden > 0) lines.push(`  … ${hidden} more note(s)`);
   return lines.join("\n");
 }
 
@@ -921,6 +1060,8 @@ export interface CliIo {
 
 export interface CliContext {
   fetchFn: FetchLike;
+  /** The draft for `agw prose` without a file; defaults to reading fd 0. */
+  readStdin?: () => string;
   gitRoot: (cwd: string) => string | null;
   cwd: string;
   env: Record<string, string | undefined>;
@@ -987,6 +1128,8 @@ async function execute(
       }
       return waitForJob(ctx, io, base, jobId, options);
     }
+    case "prose":
+      return executeProse(command, options, ctx, io, base);
     case "wait":
       return waitForJob(ctx, io, base, command.jobId, options);
     case "status": {
@@ -1068,6 +1211,40 @@ async function execute(
   }
 }
 
+/** `agw prose`: submit, wait without a ceiling (a run takes 20-90 s), then write the text — the
+ *  rewrite, or the original when the keep gate declined — to stdout or `--out`, the summary to
+ *  stderr. `--json` prints the whole job result instead of the text. */
+async function executeProse(
+  command: ProseCommand,
+  options: GlobalOptions,
+  ctx: CliContext,
+  io: CliIo,
+  base: string,
+): Promise<number> {
+  const body = proseRequestBody(command, {
+    read: (p) => readFileSync(p, "utf8"),
+    readStdin: ctx.readStdin ?? (() => readFileSync(0, "utf8")),
+  });
+  const jobId = await submitJob(ctx.fetchFn, base, body);
+  if (options.noWait) {
+    io.out(options.json ? `${JSON.stringify({ jobId }, null, 2)}\n` : `${jobId}\n`);
+    return 0;
+  }
+  return waitForJob(ctx, io, base, jobId, options, (job) => {
+    if (job.status !== "done") return exitCodeFor(job.status, job.error);
+    const result = job.result as ProseOutput | null;
+    if (result === null || typeof result !== "object" || typeof result.text !== "string") {
+      throw new CliServerError(`job ${job.id} finished without a prose result`);
+    }
+    io.err(`${renderProseSummary(result, job.elapsedMs)}\n`);
+    const text = result.text.endsWith("\n") ? result.text : `${result.text}\n`;
+    if (command.out !== undefined) writeFileSync(command.out, text);
+    if (options.json) io.out(`${JSON.stringify(result, null, 2)}\n`);
+    else if (command.out === undefined) io.out(text);
+    return 0;
+  });
+}
+
 async function resolveCwd(ctx: CliContext, base: string, command: JobCommand): Promise<string> {
   if (command.repo.kind !== "name") {
     return resolveRepoSpec(command.repo, { cwd: ctx.cwd, roots: [], gitRoot: ctx.gitRoot });
@@ -1086,6 +1263,8 @@ async function waitForJob(
   base: string,
   jobId: string,
   options: GlobalOptions,
+  /** Replaces the default result printing and exit code once the job is terminal. */
+  finish?: (job: JobView) => number,
 ): Promise<number> {
   const start = Date.now();
   const wait = ctx.sleepFn ?? sleep;
@@ -1146,6 +1325,7 @@ async function waitForJob(
       if (job.status !== "done" && job.error !== null) {
         io.err(`agw: job ${job.id} ${job.status}: ${job.error}\n`);
       }
+      if (finish) return finish(job);
       if (options.json) io.out(`${JSON.stringify(job.result, null, 2)}\n`);
       else io.out(`${renderResult(job.result)}\n`);
       return exitCodeFor(job.status, job.error);
@@ -1230,6 +1410,8 @@ Usage:
   agw update-pr [--repo R] --pr N        rebase a dispatch/* PR onto the latest base, re-check, push
   agw triage --prompt-file F --schema-file F   one tool-less model call → JSON
   agw decide --state-file F --questions-file F [--model M]   one decision-model call → typed answers
+  agw prose [<file>|-] [--medium <m>] [--language en|de] [--register <r>] [--brief <text>] [--context <file>] [--no-verdict-first] [--out <file>] [--json]
+                                         lint → cross-lab review → rewrite → keep gate on a draft
   agw jobs [--running]                   list recent jobs
   agw status <jobId>                     one-shot job state
   agw wait <jobId>                       block until a job reaches a terminal state
@@ -1241,7 +1423,7 @@ Usage:
 
 Global flags (any subcommand):
   --json          emit only JSON on stdout, nothing else
-  --no-wait       submit and print the jobId, exit 0 (dispatch/check/review/update-pr/triage/decide)
+  --no-wait       submit and print the jobId, exit 0 (dispatch/check/review/update-pr/triage/decide/prose)
   --quiet         suppress the progress lines on stderr
   --timeout <s>   stop waiting after N seconds (default: no ceiling)
   -h, --help      show help
@@ -1306,12 +1488,30 @@ const DECIDE_HELP = `agw decide --state-file <file> --questions-file <file> [--m
   \`.answers\` maps each question id to its typed answer with a calibrated confidence.
 `;
 
+const PROSE_HELP = `agw prose [<file>|-] [--medium <m>] [--language en|de] [--register <r>] [--brief <text>] [--context <file>] [--no-verdict-first] [--out <file>] [--json]
+
+  <file>|-            the draft; stdin when omitted or -
+  --medium <m>        ${PROSE_MEDIUMS.join(" | ")} (default ${PROSE_DEFAULT_MEDIUM})
+  --language <l>      en | de | auto (default auto: detected by stopword count)
+  --register <r>      ${PROSE_REGISTERS.join(" | ")} (default from the medium)
+  --brief <text>      audience or goal, e.g. "the on-call engineer deciding whether to roll back"
+  --context <file>    outline/TLDR of the surrounding document, read-only consistency data
+  --no-verdict-first  the author builds criteria → candidates → verdict on purpose
+  --out <file>        write the text there instead of stdout
+  --json              print the full job result JSON on stdout instead of the text
+  Waits for the job (20-90 s typical; no ceiling unless --timeout). stdout carries the result text
+  — the rewrite, or the original when the keep gate declined it — and stderr one summary line
+  (kept rewrite|original + reason, language, format, cost, duration) plus the reviewer notes.
+  Exit 0 when the job finished, even if it kept the original.
+`;
+
 function helpText(topic: string | undefined): string {
   if (topic === "dispatch") return DISPATCH_HELP;
   if (topic === "check") return CHECK_HELP;
   if (topic === "review") return REVIEW_HELP;
   if (topic === "triage") return TRIAGE_HELP;
   if (topic === "decide") return DECIDE_HELP;
+  if (topic === "prose") return PROSE_HELP;
   if (topic === "update-pr") return UPDATE_PR_HELP;
   return USAGE;
 }
