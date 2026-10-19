@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { Elysia, t } from "elysia";
 import { cancelJob, createJob, getJob, listJobs, queueStats } from "../jobs/store.ts";
 import { isJobTool, type JobTool } from "../jobs/types.ts";
@@ -18,6 +19,13 @@ import { steerJob } from "../lib/steer.ts";
 // non-anthropic writer, an anthropic reviewer — see proseSubmitRefusal) refuse here, before a job
 // row exists.
 async function toolSubmitRefusal(tool: JobTool, params: unknown): Promise<string | null> {
+  // A `cwd` that does not exist is the caller's mistake (a deleted worktree, a typo), not a job
+  // failure: as a job it would count toward `failedLastHour` and could fail a correct deploy's
+  // verify (measured 2026-10-19: 14 replayed reviews of deleted worktrees in one second rolled
+  // a deploy back). Every handler that takes `cwd` repeats this check.
+  const cwd = (params as Record<string, unknown> | undefined)?.cwd;
+  if (typeof cwd === "string" && !existsSync(cwd))
+    return `${tool} refused: directory not found: ${cwd}`;
   if (tool === "dispatch") return dispatchSubmitRefusal((params ?? {}) as Record<string, unknown>);
   if (tool === "prose") return proseSubmitRefusal(params);
   return null;
