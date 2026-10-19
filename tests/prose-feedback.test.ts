@@ -124,6 +124,15 @@ describe("the writer's hard rules", () => {
     }
   });
 
+  test("wikilink targets stay wikilinks", async () => {
+    const { deps, seen } = harness();
+    await runProsePipeline(params(), MODELS, deps);
+    expect(seen.system).toContain(
+      "Keep every Obsidian wikilink target ([[t]], [[t|alias]], ![[embed]]) as a wikilink",
+    );
+    expect(seen.system).toContain("never turn one into a markdown link, and add no wikilink");
+  });
+
   test("explicit brief instructions override the voice guide's defaults", async () => {
     const { deps, seen } = harness();
     await runProsePipeline(params({ brief: "Keep it formal." }), MODELS, deps);

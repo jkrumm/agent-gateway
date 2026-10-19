@@ -1227,6 +1227,15 @@ describe("prose command", () => {
     expect(err).toContain("boom");
   });
 
+  test("a done job without text or usage is a server error, not a TypeError", async () => {
+    for (const result of [null, {}, { text: "x" }, { ...PROSE_RESULT, usage: undefined }]) {
+      const { code, out, err } = await runWith(["prose", draftFile], submitRoutes(result));
+      expect(code).toBe(1);
+      expect(out).toBe("");
+      expect(err).toContain("finished without a prose result");
+    }
+  });
+
   test("a submit-time refusal exits 2", async () => {
     const { code, err } = await runWith(["prose", draftFile], {
       "POST /api/jobs": () => ({

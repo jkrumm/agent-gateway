@@ -403,8 +403,12 @@ enforced in code (`clampSections`), never trusted from the model. After renderin
 is polished in-process by `runProsePipeline` (medium `vault`, language auto; `polishPage`): the YAML
 frontmatter is stripped before and reattached verbatim after, and a prose throw, an unusable setup (no
 voice file) or a declined rewrite returns the unpolished page — prose never fails a narrative job (only a
-cancel propagates). `polish: false` skips it; the result's `prose` carries `{kept, keptReason?, costUsd}`
-(`sections` stays the worker's unpolished data). Full input/output contract and gathering rules:
+cancel propagates). Polish is on by default and adds one reviewer + one writer call (~$0.05, 20-90 s)
+to every run; `polish: false` opts out. It runs with `verdictFirst: false` and a brief that lists the
+page's headings, and a rewrite whose heading lines differ from the original's is declined. The result's
+`prose` carries `{status: polished|declined|errored, kept, keptReason?, costUsd}` (`sections` stays the
+worker's unpolished data). `narrative` is in `REQUEUE_ON_RECOVER`, so a crash after the writer call
+re-bills the polish on recovery (accepted). Full input/output contract and gathering rules:
 `docs/agent-overview-internals.md`.
 
 ### prose — human-facing text, improved in a fixed pipeline

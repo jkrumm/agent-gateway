@@ -880,6 +880,22 @@ function isDispatchOutput(r: Record<string, unknown>): r is DispatchOutput {
   return typeof r.verdict === "string";
 }
 
+/** The fields `agw prose` reads off a done job: the text, and the usage and notes the summary
+ *  line dereferences. A server ahead of or behind the CLI fails this rather than a TypeError. */
+function isProseOutput(r: unknown): r is ProseOutput {
+  if (r === null || typeof r !== "object") return false;
+  const o = r as Record<string, unknown>;
+  const review = o.review as { notes?: unknown } | null | undefined;
+  return (
+    typeof o.text === "string" &&
+    typeof o.usage === "object" &&
+    o.usage !== null &&
+    typeof review === "object" &&
+    review !== null &&
+    Array.isArray(review.notes)
+  );
+}
+
 function isCheckOutput(r: Record<string, unknown>): r is CheckOutput {
   return typeof r.passed === "boolean" && Array.isArray(r.steps);
 }
@@ -1232,8 +1248,8 @@ async function executeProse(
   }
   return waitForJob(ctx, io, base, jobId, options, (job) => {
     if (job.status !== "done") return exitCodeFor(job.status, job.error);
-    const result = job.result as ProseOutput | null;
-    if (result === null || typeof result !== "object" || typeof result.text !== "string") {
+    const result: unknown = job.result;
+    if (!isProseOutput(result)) {
       throw new CliServerError(`job ${job.id} finished without a prose result`);
     }
     io.err(`${renderProseSummary(result, job.elapsedMs)}\n`);

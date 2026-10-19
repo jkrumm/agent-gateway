@@ -662,4 +662,15 @@ describe("lostContent / addedContent — wikilinks", () => {
   test("plain brackets are not wikilinks", () => {
     expect(lostContent("a [b] and [c](d)", "nothing")).toBeNull();
   });
+
+  test("a backslash-escaped opener is text, not a wikilink", () => {
+    expect(lostContent("literal \\[[A]] here", "nothing")).toBeNull();
+    expect(addedContent("nothing", "literal \\[[A]] here")).toBeNull();
+    expect(lostContent("real [[A]] and \\[[B]]", "real [[A]]")).toBeNull();
+  });
+
+  test("empty targets are not protected", () => {
+    expect(lostContent("[[ ]] and [[|alias]] and ![[ ]]", "nothing")).toBeNull();
+    expect(addedContent("nothing", "[[ ]] and [[|alias]]")).toBeNull();
+  });
 });

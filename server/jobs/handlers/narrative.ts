@@ -130,8 +130,16 @@ export const NARRATIVE_OUTPUT = z.object({
     .max(SUMMARY_MAX_CHARS)
     .nullable()
     .describe("The delta in one sentence, for a briefing. Null when unchanged."),
-  page: z.string().nullable().describe("Full markdown incl. frontmatter. Null when unchanged."),
-  sections: NARRATIVE_SECTIONS.nullable(),
+  page: z
+    .string()
+    .nullable()
+    .describe(
+      "Full markdown incl. frontmatter, ready for the vault; the body is the polished rewrite " +
+        "when `prose.status` is `polished`. Null when unchanged.",
+    ),
+  sections: NARRATIVE_SECTIONS.nullable().describe(
+    "The worker's structured data, unpolished — never rewritten by the prose pass.",
+  ),
   inputs: z.object({
     commits: z.number().describe("Commits included in the prompt, after the 30 KB cap."),
     sessions: z.number().describe("Session transcripts included in the prompt, after the cap."),
@@ -147,6 +155,12 @@ export const NARRATIVE_OUTPUT = z.object({
     .describe("Worker auth backend actually used for this run — see overview's OVERVIEW_OUTPUT."),
   prose: z
     .object({
+      status: z
+        .enum(["polished", "declined", "errored"])
+        .describe(
+          "polished: the rewrite replaced the body. declined: the original body came back (keep " +
+            "gate, changed headings, nothing to polish). errored: prose failed or refused the input.",
+        ),
       kept: z.enum(["rewrite", "original"]),
       keptReason: z
         .string()
@@ -347,7 +361,10 @@ export function renderNarrativePage(input: RenderNarrativePageInput): string {
 
 // ── Prose polish ─────────────────────────────────────────────────────────────────
 
-const FRONTMATTER_RE = /^---\n[\s\S]*?\n---\n/;
+// A block is `---\n`, optional content lines, `---\n`: an empty block is frontmatter, a leading
+// `---` with no closing delimiter line is not.
+const FRONTMATTER_RE = /^---\n(?:[\s\S]*?\n)?---\n/;
+const HEADING_LINE_RE = /^#{1,6} .*$/gm;
 
 /** Splits a page into its YAML frontmatter (delimiters and trailing newline included, "" when
  *  there is none) and the body after it. */
@@ -357,6 +374,8 @@ export function splitFrontmatter(page: string): { frontmatter: string; body: str
 }
 
 export type NarrativeProse = NonNullable<NarrativeOutput["prose"]>;
+
+const headingLines = (markdown: string): string[] => markdown.match(HEADING_LINE_RE) ?? [];
 
 export interface PolishOptions {
   /** The job's `polish` param: false returns the page untouched without calling prose. */
@@ -378,31 +397,63 @@ export async function polishPage(
   if (!polish) return { page };
   const { frontmatter, body } = splitFrontmatter(page);
   if (body.trim().length === 0) {
-    return { page, prose: { kept: "original", keptReason: "no body to polish", costUsd: null } };
+    return {
+      page,
+      prose: {
+        status: "declined",
+        kept: "original",
+        keptReason: "no body to polish",
+        costUsd: null,
+      },
+    };
   }
   try {
     onStart?.();
-    const params = PROSE_INPUT.parse({ text: body.trim(), medium: "vault" });
+    const original = body.trim();
+    const headings = headingLines(original);
+    const params = PROSE_INPUT.parse({
+      text: original,
+      medium: "vault",
+      verdictFirst: false,
+      ...(headings.length > 0
+        ? {
+            brief:
+              "Keep the page's headings verbatim and in this order, none added, dropped or " +
+              `reworded:\n${headings.join("\n")}`,
+          }
+        : {}),
+    });
     const refusal = proseSubmitRefusal(params);
     if (refusal) throw new Error(refusal);
     const out = await runProsePipeline(params, resolveProseModels(params), deps, { isCancelled });
-    const prose: NarrativeProse = {
-      kept: out.kept,
-      ...(out.keptReason ? { keptReason: out.keptReason } : {}),
-      costUsd: out.usage.costUsd,
+    const costUsd = out.usage.costUsd;
+    if (out.kept === "original") {
+      const keptReason = out.keptReason ? { keptReason: out.keptReason } : {};
+      return { page, prose: { status: "declined", kept: "original", ...keptReason, costUsd } };
+    }
+    if (headingLines(out.text).join("\n") !== headings.join("\n")) {
+      const keptReason = "rewrite changed the page headings";
+      return { page, prose: { status: "declined", kept: "original", keptReason, costUsd } };
+    }
+    return {
+      page: `${frontmatter}${frontmatter ? "\n" : ""}${out.text}\n`,
+      prose: { status: "polished", kept: "rewrite", costUsd },
     };
-    if (out.kept === "original") return { page, prose };
-    return { page: `${frontmatter}${frontmatter ? "\n" : ""}${out.text}\n`, prose };
   } catch (err) {
     if (err instanceof SingleShotCancelledError) throw err;
     const message = err instanceof Error ? err.message : String(err);
     logger.warn(
-      { event: "narrative.polish_failed", tool: "narrative", error: message },
+      { event: "narrative.polish_failed", tool: "narrative", err },
       "narrative prose polish failed — returning the unpolished page",
     );
     return {
       page,
-      prose: { kept: "original", keptReason: `prose failed: ${message}`, costUsd: null },
+      prose: {
+        status: "errored",
+        kept: "original",
+        keptReason: `prose failed: ${message}`,
+        costUsd: null,
+      },
     };
   }
 }

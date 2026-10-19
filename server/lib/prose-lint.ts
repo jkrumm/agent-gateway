@@ -471,16 +471,19 @@ function urlsOf(text: string): string[] {
   return [...absolute, ...relative];
 }
 
-/** Obsidian `[[target]]`, `[[target|alias]]` and `![[embed]]`. */
-const WIKILINK = /(!?)\[\[([^[\]\n]+?)\]\]/g;
+/** Obsidian `[[target]]`, `[[target|alias]]` and `![[embed]]`; a backslash-escaped opener is text. */
+const WIKILINK = /(?<!\\)(!?)\[\[([^[\]\n]+?)\]\]/g;
 
 /** Every wikilink in `text`, in order and with repeats, as `[[target]]` (`![[target]]` for an
  *  embed). The comparison token is the target alone, heading/block anchor included: an alias or an
- *  embed's size after the first (optionally `\|`-escaped) pipe is display text the rewrite may change. */
+ *  embed's size after the first (optionally `\|`-escaped) pipe is display text the rewrite may
+ *  change. A link with an empty target has nothing to protect and yields no token. */
 function wikilinksOf(text: string): string[] {
-  return [...text.matchAll(WIKILINK)]
-    .map((m) => `${m[1]}[[${m[2].replace(/\\?\|[\s\S]*$/, "").trim()}]]`)
-    .filter((token) => token !== "[[]]" && token !== "![[]]");
+  return [...text.matchAll(WIKILINK)].flatMap((m) => {
+    const target = m[2].replace(/\\?\|[\s\S]*$/, "").trim();
+    if (!target) return [];
+    return [`${m[1]}[[${target}]]`];
+  });
 }
 
 function counts(keys: string[]): Map<string, number> {

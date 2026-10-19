@@ -11,6 +11,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ProseDeps } from "../server/jobs/handlers/prose.ts";
 import { SingleShotCancelledError } from "../server/lib/single-shot.ts";
+import { PROSE_INPUT } from "../server/jobs/handlers/prose.ts";
 import {
   NARRATIVE_INPUT,
   polishPage,
@@ -405,18 +406,24 @@ describe("polishPage", () => {
     notes: [],
     visualSuggestions: [],
   };
+  const BODY = splitFrontmatter(PAGE).body.trim();
+  const polishedBody = BODY.replace("surf spots.", "surf spots, polished.");
   const proseDeps = (over: Partial<ProseDeps> = {}): ProseDeps => ({
     loadVoice: async () => "## Voice",
-    review: async ({ model }) => ({ data: REVIEW, model }),
-    write: async () => ({ text: "# weatherorb\n\nA weather service for surf spots." }),
+    review: async ({ model, verdictFirst }) => {
+      seenVerdictFirst.push(verdictFirst);
+      return { data: REVIEW, model };
+    },
+    write: async () => ({ text: BODY }),
     ...over,
   });
   const seen: string[] = [];
+  const seenVerdictFirst: boolean[] = [];
   const recording = (): ProseDeps =>
     proseDeps({
       write: async ({ prompt }) => {
         seen.push(prompt);
-        return { text: "# weatherorb\n\nA weather service for surf spots, polished." };
+        return { text: polishedBody };
       },
     });
 
@@ -433,26 +440,74 @@ describe("polishPage", () => {
     expect(splitFrontmatter("# plain\n")).toEqual({ frontmatter: "", body: "# plain\n" });
   });
 
+  test("splitFrontmatter accepts an empty block", () => {
+    expect(splitFrontmatter("---\n---\n# body\n")).toEqual({
+      frontmatter: "---\n---\n",
+      body: "# body\n",
+    });
+  });
+
+  test("splitFrontmatter does not treat a leading --- with no closing delimiter as frontmatter", () => {
+    for (const page of ["---\n# body\n", "---\ntitle: x\n---bar\n\ntext\n", "---\n"]) {
+      expect(splitFrontmatter(page)).toEqual({ frontmatter: "", body: page });
+    }
+  });
+
   test("a kept rewrite is reattached under the verbatim frontmatter and reports its outcome", async () => {
     seen.length = 0;
+    seenVerdictFirst.length = 0;
     const out = await polishPage(PAGE, { polish: true, deps: recording() });
+    expect(out.prose?.status).toBe("polished");
     expect(out.prose?.kept).toBe("rewrite");
     expect(out.page.startsWith(frontmatter)).toBe(true);
-    expect(out.page).toBe(
-      `${frontmatter}\n# weatherorb\n\nA weather service for surf spots, polished.\n`,
-    );
+    expect(out.page).toBe(`${frontmatter}\n${polishedBody}\n`);
     // The frontmatter never reaches the model.
     expect(seen.join("")).not.toContain("generated_by");
+    // The page is not argued toward a verdict, and its headings are listed for the writer.
+    expect(seenVerdictFirst).toEqual([false]);
+    for (const heading of ["# weatherorb", "## Where it stands", "## How it got here"]) {
+      expect(seen.join("")).toContain(heading);
+    }
+    expect(seen.join("")).toContain("headings verbatim and in this order");
+  });
+
+  test("a rewrite that changes the page headings is declined with the original page", async () => {
+    for (const text of [
+      polishedBody.replace("## Where it stands", "## Status"),
+      polishedBody.replace("## Open questions", "## Open questions\n\n## Extra"),
+      polishedBody.replace("## Where it stands\n", ""),
+    ]) {
+      const out = await polishPage(PAGE, {
+        polish: true,
+        deps: proseDeps({ write: async () => ({ text }) }),
+      });
+      expect(out.page).toBe(PAGE);
+      expect(out.prose?.status).toBe("declined");
+      expect(out.prose?.keptReason).toBe("rewrite changed the page headings");
+    }
+  });
+
+  test("reordered headings are declined", async () => {
+    const text = BODY.replace("## Where it stands", "## @@")
+      .replace("## How it got here", "## Where it stands")
+      .replace("## @@", "## How it got here");
+    const out = await polishPage(PAGE, {
+      polish: true,
+      deps: proseDeps({ write: async () => ({ text }) }),
+    });
+    expect(out.page).toBe(PAGE);
+    expect(out.prose?.keptReason).toBe("rewrite changed the page headings");
   });
 
   test("a declined rewrite returns the original page byte for byte, with the reason", async () => {
     const out = await polishPage(PAGE, {
       polish: true,
       deps: proseDeps({
-        write: async () => ({ text: "# weatherorb\n\nSee https://example.com/invented." }),
+        write: async () => ({ text: `${BODY}\n\nSee https://example.com/invented.` }),
       }),
     });
     expect(out.page).toBe(PAGE);
+    expect(out.prose?.status).toBe("declined");
     expect(out.prose?.kept).toBe("original");
     expect(out.prose?.keptReason).toContain("rewrite added the URL");
   });
@@ -468,6 +523,7 @@ describe("polishPage", () => {
     });
     expect(out.page).toBe(PAGE);
     expect(out.prose).toEqual({
+      status: "errored",
       kept: "original",
       keptReason: "prose failed: reviewer exploded",
       costUsd: null,
@@ -485,6 +541,51 @@ describe("polishPage", () => {
       deps: proseDeps({ loadVoice: bump, review: bump, write: bump }),
     });
     expect(out).toEqual({ page: PAGE });
+    expect(calls).toBe(0);
+  });
+
+  test("a whitespace-only body keeps the original and never calls prose", async () => {
+    let calls = 0;
+    const bump = async (): Promise<never> => {
+      calls++;
+      throw new Error("must not be called");
+    };
+    let started = false;
+    const page = `${frontmatter}\n  \n\n`;
+    const out = await polishPage(page, {
+      polish: true,
+      deps: proseDeps({ loadVoice: bump, review: bump, write: bump }),
+      onStart: () => (started = true),
+    });
+    expect(out.page).toBe(page);
+    expect(out.prose).toEqual({
+      status: "declined",
+      kept: "original",
+      keptReason: "no body to polish",
+      costUsd: null,
+    });
+    expect(calls).toBe(0);
+    expect(started).toBe(false);
+  });
+
+  test("a body over the prose input limit returns the original as errored, not a failed job", async () => {
+    const max = PROSE_INPUT.shape.text.maxLength ?? 0;
+    expect(max).toBeGreaterThan(0);
+    let calls = 0;
+    const bump = async (): Promise<never> => {
+      calls++;
+      throw new Error("must not be called");
+    };
+    const page = `${frontmatter}\n${"x".repeat(max + 1)}\n`;
+    const out = await polishPage(page, {
+      polish: true,
+      deps: proseDeps({ loadVoice: bump, review: bump, write: bump }),
+    });
+    expect(out.page).toBe(page);
+    expect(out.prose?.status).toBe("errored");
+    expect(out.prose?.kept).toBe("original");
+    expect(out.prose?.keptReason).toStartWith("prose failed:");
+    expect(out.prose?.costUsd).toBeNull();
     expect(calls).toBe(0);
   });
 
