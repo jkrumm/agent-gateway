@@ -9,7 +9,12 @@
 // here, same convention as overview's runOverview / dispatch's runDispatch.
 
 import { describe, expect, test } from "bun:test";
+import type { ProseDeps } from "../server/jobs/handlers/prose.ts";
+import { SingleShotCancelledError } from "../server/lib/single-shot.ts";
 import {
+  NARRATIVE_INPUT,
+  polishPage,
+  splitFrontmatter,
   buildNarrativePrompt,
   clampSections,
   clampToWordBoundary,
@@ -371,5 +376,124 @@ describe("renderNarrativePage", () => {
     const page = renderNarrativePage({ ...base, sections: sections() });
     expect(page).toContain("## Open questions");
     expect(page).toContain("- Should a third provider be added?");
+  });
+});
+
+// ── polishPage — the prose pass over the rendered page ─────────────────────────
+
+describe("polishPage", () => {
+  const PAGE = renderNarrativePage({
+    project: "weatherorb",
+    cwd: "/Users/jkrumm/SourceRoot/weatherorb",
+    since: null,
+    timestamp: "2026-10-19",
+    sections: sections({ whatItIs: "A weather service for surf spots." }),
+  });
+  const { frontmatter } = splitFrontmatter(PAGE);
+  const REVIEW = {
+    scores: {
+      verdict_first: 4,
+      structure: 4,
+      no_repetition: 4,
+      concision: 4,
+      precision: 4,
+      clarity: 4,
+      visual_fit: 4,
+      naturalness: 4,
+      engagement: 4,
+    },
+    notes: [],
+    visualSuggestions: [],
+  };
+  const proseDeps = (over: Partial<ProseDeps> = {}): ProseDeps => ({
+    loadVoice: async () => "## Voice",
+    review: async ({ model }) => ({ data: REVIEW, model }),
+    write: async () => ({ text: "# weatherorb\n\nA weather service for surf spots." }),
+    ...over,
+  });
+  const seen: string[] = [];
+  const recording = (): ProseDeps =>
+    proseDeps({
+      write: async ({ prompt }) => {
+        seen.push(prompt);
+        return { text: "# weatherorb\n\nA weather service for surf spots, polished." };
+      },
+    });
+
+  test("NARRATIVE_INPUT.polish defaults to true", () => {
+    const base = { cwd: "/r", project: "p", previousPage: null, since: null };
+    expect(NARRATIVE_INPUT.parse(base).polish).toBe(true);
+    expect(NARRATIVE_INPUT.parse({ ...base, polish: false }).polish).toBe(false);
+  });
+
+  test("splitFrontmatter separates the YAML block; a page without one has an empty frontmatter", () => {
+    expect(frontmatter.startsWith("---\ntitle:")).toBe(true);
+    expect(frontmatter.endsWith("---\n")).toBe(true);
+    expect(frontmatter + splitFrontmatter(PAGE).body).toBe(PAGE);
+    expect(splitFrontmatter("# plain\n")).toEqual({ frontmatter: "", body: "# plain\n" });
+  });
+
+  test("a kept rewrite is reattached under the verbatim frontmatter and reports its outcome", async () => {
+    seen.length = 0;
+    const out = await polishPage(PAGE, { polish: true, deps: recording() });
+    expect(out.prose?.kept).toBe("rewrite");
+    expect(out.page.startsWith(frontmatter)).toBe(true);
+    expect(out.page).toBe(
+      `${frontmatter}\n# weatherorb\n\nA weather service for surf spots, polished.\n`,
+    );
+    // The frontmatter never reaches the model.
+    expect(seen.join("")).not.toContain("generated_by");
+  });
+
+  test("a declined rewrite returns the original page byte for byte, with the reason", async () => {
+    const out = await polishPage(PAGE, {
+      polish: true,
+      deps: proseDeps({
+        write: async () => ({ text: "# weatherorb\n\nSee https://example.com/invented." }),
+      }),
+    });
+    expect(out.page).toBe(PAGE);
+    expect(out.prose?.kept).toBe("original");
+    expect(out.prose?.keptReason).toContain("rewrite added the URL");
+  });
+
+  test("a prose failure falls back to the original page and never throws", async () => {
+    const out = await polishPage(PAGE, {
+      polish: true,
+      deps: proseDeps({
+        review: async () => {
+          throw new Error("reviewer exploded");
+        },
+      }),
+    });
+    expect(out.page).toBe(PAGE);
+    expect(out.prose).toEqual({
+      kept: "original",
+      keptReason: "prose failed: reviewer exploded",
+      costUsd: null,
+    });
+  });
+
+  test("polish:false returns the page untouched and never calls prose", async () => {
+    let calls = 0;
+    const bump = async (): Promise<never> => {
+      calls++;
+      throw new Error("must not be called");
+    };
+    const out = await polishPage(PAGE, {
+      polish: false,
+      deps: proseDeps({ loadVoice: bump, review: bump, write: bump }),
+    });
+    expect(out).toEqual({ page: PAGE });
+    expect(calls).toBe(0);
+  });
+
+  test("a cancel is not swallowed", async () => {
+    const run = polishPage(PAGE, {
+      polish: true,
+      deps: proseDeps(),
+      isCancelled: () => true,
+    });
+    await expect(run).rejects.toBeInstanceOf(SingleShotCancelledError);
   });
 });

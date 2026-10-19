@@ -17,12 +17,23 @@ import { parseParams } from "./util.ts";
 import { encodeProjectDir, truncate } from "../../lib/agents.ts";
 import { dataBlock, endOfData, fencePreamble, newFenceNonce } from "../../lib/prompt-fence.ts";
 import { readVoiceGuide } from "../../lib/voice.ts";
+import { SingleShotCancelledError } from "../../lib/single-shot.ts";
+import {
+  PROSE_INPUT,
+  defaultProseDeps,
+  proseSubmitRefusal,
+  resolveProseModels,
+  runProsePipeline,
+  type ProseDeps,
+} from "./prose.ts";
 import { JSON_ONLY_RETRY, loadSkillFile, unwrap } from "../../lib/worker-io.ts";
 
 // Writes or revises ONE project's narrative page for the Obsidian vault: what the project is,
 // where it stands, how it got here — business terms, never a changelog. Prompt-only, no tools,
 // same nonce-fence hardening as overview.ts. See AGENTS.md's `### narrative` section for the
-// operational summary.
+// operational summary. The rendered page is then polished in-process by the `prose` pipeline
+// (medium "vault", frontmatter set aside); prose can degrade the page to the unpolished original
+// but never fails the job.
 
 // ── Bounds ───────────────────────────────────────────────────────────────────
 
@@ -72,9 +83,19 @@ export const NARRATIVE_INPUT = z.object({
     .string()
     .optional()
     .describe(
-      `Override worker model. Default: "${routeFor("narrative").model}" — the reasoning tier, since this is ` +
-        "editorial judgment over a prompt, not mechanical classification. Any model id routes " +
-        "through the same worker backend as every other agent-gateway job.",
+      `Override worker model. Default: "${routeFor("narrative").model}" — the CLASSIFY tier: a cheap, ` +
+        "fast model run tool-less on the OpenCode harness (see GET /api/routing). The prose " +
+        "pass that follows is a separate stage with its own writer and reviewer models. Any " +
+        "model id routes through the same worker backend as every other agent-gateway job.",
+    ),
+  polish: z
+    .boolean()
+    .default(true)
+    .describe(
+      "Run the rendered page through the `prose` pipeline (lint → cross-lab review → rewrite → " +
+        "keep gate, medium vault) before returning it; frontmatter is kept verbatim. false skips " +
+        "it: faster and cheaper, the page is exactly what the worker's sections render to. A " +
+        "failing or declined polish never fails the job.",
     ),
 });
 export type NarrativeParams = z.infer<typeof NARRATIVE_INPUT>;
@@ -124,6 +145,20 @@ export const NARRATIVE_OUTPUT = z.object({
     .enum(["iu", "max"])
     .optional()
     .describe("Worker auth backend actually used for this run — see overview's OVERVIEW_OUTPUT."),
+  prose: z
+    .object({
+      kept: z.enum(["rewrite", "original"]),
+      keptReason: z
+        .string()
+        .optional()
+        .describe("Why the unpolished page came back: the keep gate's reason, or the prose error."),
+      costUsd: z.number().nullable().describe("Prose writer + reviewer cost; null when unknown."),
+    })
+    .optional()
+    .describe(
+      "Outcome of the prose polish of `page`. Absent when `polish` was false or nothing changed. " +
+        "`sections` stays the worker's structured data and is not rewritten.",
+    ),
 });
 export type NarrativeOutput = z.infer<typeof NARRATIVE_OUTPUT>;
 
@@ -308,6 +343,68 @@ export function renderNarrativePage(input: RenderNarrativePageInput): string {
   }
 
   return `${lines.join("\n")}\n`;
+}
+
+// ── Prose polish ─────────────────────────────────────────────────────────────────
+
+const FRONTMATTER_RE = /^---\n[\s\S]*?\n---\n/;
+
+/** Splits a page into its YAML frontmatter (delimiters and trailing newline included, "" when
+ *  there is none) and the body after it. */
+export function splitFrontmatter(page: string): { frontmatter: string; body: string } {
+  const frontmatter = FRONTMATTER_RE.exec(page)?.[0] ?? "";
+  return { frontmatter, body: page.slice(frontmatter.length) };
+}
+
+export type NarrativeProse = NonNullable<NarrativeOutput["prose"]>;
+
+export interface PolishOptions {
+  /** The job's `polish` param: false returns the page untouched without calling prose. */
+  polish: boolean;
+  deps: ProseDeps;
+  isCancelled?: () => boolean;
+  /** Called once, just before the prose pipeline starts. */
+  onStart?: () => void;
+}
+
+/** The polish stage: runs the page body through the prose pipeline (medium vault, language
+ *  auto) and reattaches the frontmatter verbatim. Any failure, a declined rewrite or an empty
+ *  body returns the original page — prose never fails a narrative job. A cancel is the one
+ *  exception: it is not a failure of prose, so it propagates and the job lands cancelled. */
+export async function polishPage(
+  page: string,
+  { polish, deps, isCancelled, onStart }: PolishOptions,
+): Promise<{ page: string; prose?: NarrativeProse }> {
+  if (!polish) return { page };
+  const { frontmatter, body } = splitFrontmatter(page);
+  if (body.trim().length === 0) {
+    return { page, prose: { kept: "original", keptReason: "no body to polish", costUsd: null } };
+  }
+  try {
+    onStart?.();
+    const params = PROSE_INPUT.parse({ text: body.trim(), medium: "vault" });
+    const refusal = proseSubmitRefusal(params);
+    if (refusal) throw new Error(refusal);
+    const out = await runProsePipeline(params, resolveProseModels(params), deps, { isCancelled });
+    const prose: NarrativeProse = {
+      kept: out.kept,
+      ...(out.keptReason ? { keptReason: out.keptReason } : {}),
+      costUsd: out.usage.costUsd,
+    };
+    if (out.kept === "original") return { page, prose };
+    return { page: `${frontmatter}${frontmatter ? "\n" : ""}${out.text}\n`, prose };
+  } catch (err) {
+    if (err instanceof SingleShotCancelledError) throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn(
+      { event: "narrative.polish_failed", tool: "narrative", error: message },
+      "narrative prose polish failed — returning the unpolished page",
+    );
+    return {
+      page,
+      prose: { kept: "original", keptReason: `prose failed: ${message}`, costUsd: null },
+    };
+  }
 }
 
 // ── Pure: transcript prose extraction ───────────────────────────────────────────
@@ -701,15 +798,24 @@ export async function runNarrative(
 
   const clamped = clampSections(sanitizeSections(data.sections));
   const timestamp = new Date().toISOString().slice(0, 10);
-  const page = renderNarrativePage({ project, cwd, since, timestamp, sections: clamped });
+  const rendered = renderNarrativePage({ project, cwd, since, timestamp, sections: clamped });
+  const cancelled = jobId !== undefined && isCancelled ? () => isCancelled(jobId) : undefined;
+  const polished = await polishPage(rendered, {
+    polish: params.polish,
+    deps: defaultProseDeps("narrative", cancelled),
+    isCancelled: cancelled,
+    onStart: () =>
+      onProgress?.({ turns: 1, lastAction: "narrative: polishing", lastActivityAt: Date.now() }),
+  });
 
   return NARRATIVE_OUTPUT.parse({
     project,
     changed: true,
     reason: truncate(data.reason, REASON_MAX_CHARS),
     summary: data.summary ? truncate(data.summary, SUMMARY_MAX_CHARS) : null,
-    page,
+    page: polished.page,
     sections: clamped,
+    prose: polished.prose,
     inputs,
     model: resolvedModel,
     backend,

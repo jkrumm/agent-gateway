@@ -217,8 +217,8 @@ cron across tracked projects (or on an explicit "update this project's
 narrative"), never inline in an interactive session.
 
 - **Contract is fixed — Hermes builds against it.** Input `{ cwd, project,
-  previousPage, since, model? }`; output `{ project, changed, reason,
-  summary, page, sections, inputs, model, backend? }`. `previousPage` is the
+  previousPage, since, model?, polish? }`; output `{ project, changed, reason,
+  summary, page, sections, inputs, model, backend?, prose? }`. `previousPage` is the
   full existing markdown (or `null` on a first run); `since` is an ISO cutoff
   (`null` bootstraps from history). `page` and `summary` are `null` when
   `changed` is `false` — that is success, not a degraded result.
@@ -278,14 +278,20 @@ narrative"), never inline in an interactive session.
   contains a colon-space, which breaks an unquoted YAML flow scalar. The
   `## Open questions` section is omitted entirely when the model returned
   none — not an empty heading.
-- **Model/backend come from `routeFor("narrative")`** — a Claude model
-  on Max (a flat subscription, free at the margin; id: `GET /api/routing`), same model on IU as the
-  reverse fallback lane — this is editorial judgment over a prompt, not
-  classification, the opposite reasoning from `overview`'s cheap tier. A daily
-  cron pass across several projects spends real tokens, so callers should not
+- **Model/backend come from `routeFor("narrative")`** — the CLASSIFY tier: a cheap, fast model run
+  tool-less on the OpenCode harness, with the Max lane as the reverse fallback (ids: `GET
+  /api/routing`). The worker only fills structured sections; the prose quality comes from the polish
+  pass below. A daily cron pass across several projects spends real tokens, so callers should not
   invoke it speculatively.
+- **Polish pass** (`polishPage`, default on, `polish: false` skips): after `renderNarrativePage`, the
+  body (frontmatter set aside, never shown to a model) goes through `runProsePipeline` in-process —
+  medium `vault`, language auto, the `prose_review`/`prose_write` routes — and the frontmatter is
+  reattached verbatim. The keep gate (fences, URLs, wikilink targets, lint) can decline the rewrite;
+  any prose error, or a declined rewrite, returns the unpolished page. The result's `prose` is
+  `{ kept, keptReason?, costUsd }`; `sections` is not rewritten, so it can differ from `page`. A cancel
+  is the one thing that propagates.
 - Pure units (`clampSections`, `stripInventedLinks`, `extractSessionProse`,
-  `buildNarrativePrompt`, `renderNarrativePage`) are covered by
+  `buildNarrativePrompt`, `renderNarrativePage`, `polishPage` with injected prose deps) are covered by
   `tests/narrative.test.ts` — no subprocess, no mocks, mutation-verified on
   the `howItGotHere` recency cap, the wikilink strip, and the tool-result/
   user-line exclusion in prose extraction, same convention as

@@ -399,8 +399,13 @@ changelog; `changed: false` with no page is a correct default answer, not a
 failure. Model/backend from `routeFor("narrative")` (Haiku 5.5 EU on OpenCode,
 tool-less, Sonnet on Max as the reverse lane — measured equal to the Sonnet seat in
 Wave 10, `docs/routing-and-quota.md`). Caps
-enforced in code (`clampSections`), never trusted from the model. Full input/
-output contract and gathering rules: `docs/agent-overview-internals.md`.
+enforced in code (`clampSections`), never trusted from the model. After rendering, the page body
+is polished in-process by `runProsePipeline` (medium `vault`, language auto; `polishPage`): the YAML
+frontmatter is stripped before and reattached verbatim after, and a prose throw, an unusable setup (no
+voice file) or a declined rewrite returns the unpolished page — prose never fails a narrative job (only a
+cancel propagates). `polish: false` skips it; the result's `prose` carries `{kept, keptReason?, costUsd}`
+(`sections` stays the worker's unpolished data). Full input/output contract and gathering rules:
+`docs/agent-overview-internals.md`.
 
 ### prose — human-facing text, improved in a fixed pipeline
 
