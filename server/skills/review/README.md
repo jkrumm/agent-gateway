@@ -135,20 +135,40 @@ External tools run in parallel with agents:
 
 ### Three-Tier Action Classification
 
-| Category       | Meaning                                                                | Who acts                               |
-| -------------- | ---------------------------------------------------------------------- | -------------------------------------- |
-| `blocking`     | Bugs, security, type errors, data loss                                 | Must fix — implementation agent        |
-| `improvements` | Code quality, readability, design opinions                             | Recommended fix — implementation agent |
-| `discussions`  | Owner-only decisions (product, irreversible data, spend, other people) | Human decides                          |
-| `testGaps`     | Missing test coverage                                                  | Implementation agent writes tests      |
+| Category       | Meaning                                                                | Who acts                          |
+| -------------- | ---------------------------------------------------------------------- | --------------------------------- |
+| `blocking`     | Demonstrated defect in the changed lines, confirmed at `file:line`     | Must fix — implementation agent   |
+| `improvements` | Code quality, readability, design opinions (ranked, at most 5)         | Optional follow-up                |
+| `discussions`  | Owner-only decisions (product, irreversible data, spend, other people) | Human decides                     |
+| `testGaps`     | Missing test coverage                                                  | Implementation agent writes tests |
 
 ### Outcome Values
 
+The outcome is **derived in code** from the lists after the synthesis JSON is parsed
+(`deriveOutcome`/`applyVerdictRules` in `server/jobs/handlers/review.ts`); the prompt asks for the
+same rules, but a differing model outcome is overridden and logged `review.outcome_override`.
+
 | Outcome       | Means                                                                  | Action                          |
 | ------------- | ---------------------------------------------------------------------- | ------------------------------- |
-| `clean`       | Zero findings                                                          | Ship it                         |
-| `actionable`  | Has blocking/improvements/testGaps, no discussions                     | Apply fixes, then ship          |
+| `clean`       | No blocking findings, no discussions, every reviewer ran               | Ship it (improvements optional) |
+| `actionable`  | At least one blocking finding, no discussions                          | Fix the blocking items, ship    |
 | `needs-human` | Has owner-only discussions, or a reviewer failed (after its one retry) | Human reviews discussions first |
+
+`clean` does NOT mean zero findings: improvements and test gaps are optional follow-ups and never
+justify a re-review. Improvements are capped at 5 (synthesis ranks by value; code keeps the first 5
+and appends "+N lower-value improvements omitted" to the summary).
+
+**Blocking bar.** A demonstrated defect (wrong behaviour, crash, data loss, security hole, type
+error) in the CHANGED lines, confirmed by the synthesizer opening the cited `file:line`. Copy,
+formatting/whitespace, naming, style, hypothetical edge cases without a trigger and pre-existing
+issues outside the diff are improvements or dropped.
+
+**Adversary claims.** The adversary reads only the diff. Synthesis must open the cited `file:line`
+before filing an adversary claim as blocking; an unconfirmed claim is dropped or at most an
+improvement prefixed `Unverified:`, never a discussion (that would force `needs-human`).
+
+`REVIEW_SCHEMA_VERSION` stays 2: the shape is unchanged, only the meaning of `clean` widened.
+warden pins the version window and confirms on `clean` or an empty `blocking`, so it needs no change.
 
 ## Rule Loading
 

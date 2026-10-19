@@ -204,15 +204,17 @@ const SYNTHESIS_OUTPUT = z.object({
   outcome: z
     .enum(REVIEW_OUTCOMES)
     .describe(
-      'Review verdict. "clean" = no findings. "actionable" = items for implementation agent. "needs-human" = has owner-only decisions requiring human input (or a reviewer failed).',
+      'Review verdict (the harness re-derives it from the lists). "clean" = no blocking findings and no discussions (improvements and test gaps are optional follow-ups). "actionable" = at least one blocking finding, no discussions. "needs-human" = has owner-only decisions requiring human input (or a reviewer failed).',
     ),
   blocking: z
     .array(FINDING)
-    .describe("Bugs, security issues, type errors, data loss — must fix before merging."),
+    .describe(
+      "Demonstrated defects in the changed lines (wrong behaviour, crash, security hole, data loss, type error), confirmed against the cited file:line — must fix before merging.",
+    ),
   improvements: z
     .array(FINDING)
     .describe(
-      "Code quality, readability, small refactors, and design opinions a senior developer can act on — recommended fixes the implementation agent should apply.",
+      "Optional follow-ups: code quality, readability, small refactors, and design opinions a senior developer can act on. Ranked by value, at most 5 (the harness truncates).",
     ),
   discussions: z
     .array(FINDING)
@@ -250,6 +252,67 @@ export const REVIEW_OUTPUT = SYNTHESIS_OUTPUT.extend({
         "you and should be a loud refusal, not a best-effort parse.",
     ),
 });
+
+/** Improvements the verdict keeps; the synthesis prompt asks for the same cap. */
+export const MAX_IMPROVEMENTS = 5;
+
+/** The verdict's outcome, derived from its lists — never trusted from the model. `needs-human`
+ *  when an owner decision is pending or a reviewer did not run; else `actionable` only for a
+ *  blocking finding; else `clean`. Improvements and test gaps are optional follow-ups, so they
+ *  never keep a review from being clean (a "fix and re-review until clean" loop must terminate). */
+export function deriveOutcome(
+  verdict: { blocking: readonly unknown[]; discussions: readonly unknown[] },
+  failedAngleCount: number,
+): (typeof REVIEW_OUTCOMES)[number] {
+  if (failedAngleCount > 0 || verdict.discussions.length > 0) return "needs-human";
+  return verdict.blocking.length > 0 ? "actionable" : "clean";
+}
+
+/** Keeps the first `MAX_IMPROVEMENTS` improvements (the synthesis ranks by value) and notes the
+ *  rest in the summary. Mutates `verdict`; returns how many were dropped. */
+export function capImprovements(verdict: { improvements: unknown[]; summary: string }): number {
+  const dropped = verdict.improvements.length - MAX_IMPROVEMENTS;
+  if (dropped <= 0) return 0;
+  verdict.improvements.length = MAX_IMPROVEMENTS;
+  verdict.summary = `${verdict.summary} +${dropped} lower-value improvement${dropped === 1 ? "" : "s"} omitted`;
+  return dropped;
+}
+
+/** Applies the code-side verdict rules after the synthesis JSON is parsed: the improvements cap,
+ *  then the outcome derived by `deriveOutcome` overrides the model's. A failed reviewer always
+ *  gets its `(review pipeline)` discussion (the marker warden reads) and a "Partial review"
+ *  summary lead, whatever outcome the model reported. Mutates `verdict`; returns the model's
+ *  outcome → derived outcome when they differ (the caller logs `review.outcome_override`). */
+export function applyVerdictRules(
+  verdict: {
+    outcome: (typeof REVIEW_OUTCOMES)[number];
+    blocking: unknown[];
+    improvements: unknown[];
+    discussions: { file: string; message: string; angle: string }[];
+    summary: string;
+  },
+  failedAngles: readonly { angle: string; failureReason?: string }[],
+  totalReviewers: number,
+): { from: string; to: string } | null {
+  capImprovements(verdict);
+  const from = verdict.outcome;
+  const to = deriveOutcome(verdict, failedAngles.length);
+  const missing = failedAngles.filter(
+    (f) => !verdict.discussions.some((d) => d.file === "(review pipeline)" && d.angle === f.angle),
+  );
+  for (const f of missing) {
+    verdict.discussions.push({
+      file: "(review pipeline)",
+      message: `${f.angle} session failed: ${f.failureReason} — this angle did not actually review the diff.`,
+      angle: f.angle,
+    });
+  }
+  if (failedAngles.length > 0 && !verdict.summary.startsWith("Partial review")) {
+    verdict.summary = `Partial review: ${failedAngles.length}/${totalReviewers} reviewers failed (${failedAngles.map((r) => r.angle).join(", ")}). ${verdict.summary}`;
+  }
+  verdict.outcome = to;
+  return from === to ? null : { from, to };
+}
 
 /** The category rides only on `needs-human`; anything else drops it rather than failing a 12-minute run.
  *  Mutates `data` — that is the whole contract. */
@@ -1546,18 +1609,26 @@ export async function runReview(
 
     const data = synthesisResult.data;
 
-    // Safety net: synthesis must not return "clean" when one or more angles failed.
-    if (failedAngles.length > 0 && data.outcome === "clean") {
-      data.outcome = "needs-human";
-      data.escalationCategory = "blocker";
-      for (const f of failedAngles) {
-        data.discussions.push({
-          file: "(review pipeline)",
-          message: `${f.angle} session failed: ${f.failureReason} — this angle did not actually review the diff.`,
-          angle: f.angle,
-        });
-      }
-      data.summary = `Partial review: ${failedAngles.length}/${totalReviewers} reviewers failed (${failedAngles.map((r) => r.angle).join(", ")}). ${data.summary}`;
+    // The outcome is derived from the lists here, not trusted from the model: a failed reviewer
+    // or an owner-only discussion is needs-human, a blocking finding is actionable, anything
+    // else is clean (improvements and test gaps never block). Also caps improvements at 5.
+    const override = applyVerdictRules(data, failedAngles, totalReviewers);
+    // A failed reviewer is the `blocker` reason unless the model already named an owner reason.
+    if (failedAngles.length > 0 && !data.escalationCategory) data.escalationCategory = "blocker";
+    if (override) {
+      logger.info(
+        {
+          event: "review.outcome_override",
+          tool: "review",
+          project: cwd,
+          from: override.from,
+          to: override.to,
+          blocking: data.blocking.length,
+          discussions: data.discussions.length,
+          failedAngles: failedAngles.length,
+        },
+        `review outcome overridden: ${override.from} -> ${override.to}`,
+      );
     }
 
     normalizeEscalationCategory(data);

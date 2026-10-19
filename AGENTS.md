@@ -786,7 +786,13 @@ security/performance/concurrency/data-migration/api-contract/resilience
 against an ISO 25010 checklist, plus a non-agentic adversary
 critic) → synthesis (the `review` route's model — Haiku 5.5 EU on OpenCode by default, Sonnet on Max as fallback; classifies into
 `blocking`/`improvements`/`discussions`/`testGaps`). `outcome`: `"clean"` /
-`"actionable"` / `"needs-human"`. Each angle session gets **one pipeline-level
+`"actionable"` / `"needs-human"`, **derived in code after the synthesis JSON is parsed**
+(`applyVerdictRules`, review.ts; a differing model outcome is logged `review.outcome_override`):
+`needs-human` on any discussion or failed angle, else `actionable` iff `blocking` is non-empty,
+else `clean` — improvements (capped at 5, the rest noted in the summary) and test gaps are
+optional follow-ups, never a reason to re-review. Blocking means a demonstrated defect in the
+changed lines that the synthesizer confirmed at the cited `file:line`; an unconfirmed
+adversary claim is dropped or an `Unverified:` improvement. Each angle session gets **one pipeline-level
 retry** on failure (`ANGLE_MAX_ATTEMPTS = 2`), because `session-runner` retries
 only transport-class errors — an idle-watchdog kill on a session route
 would otherwise be final and force the whole review to
@@ -867,7 +873,9 @@ the 60s SDK timeout. Billed IU per-token, zero Max.
   by usage-tracker's `agent-gateway-iu` collector. Reasoning tokens (Gemini bills
   thinking spend outside `completion_tokens`) are derived via
   `normalizeUsage`, not reported by the gateway — dropping this understated
-  cost several-fold.
+  cost several-fold. `cost_usd` is written only when the gateway reports `usage.cost`;
+  otherwise it stays null and usage-tracker prices the row from its own table (off-peak
+  aware) — it treats any numeric `cost_usd` as reported, so never write an estimate here.
 
 ```bash
 # Register at user scope — handled by `make setup` in ~/SourceRoot/dotfiles.

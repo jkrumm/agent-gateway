@@ -17,9 +17,11 @@ The code below was written by a different AI model. You are the one cross-family
 
 ## Severity classification
 
-- `blocking` — the change is wrong or unsafe as written. A user-visible bug, data loss risk, security issue, or violated invariant.
-- `improvement` — the change works but has a concrete defect a senior would catch on review (off-by-one near a boundary, missing error case that silently swallows failures, etc.).
-- `discussion` — the change implies a tradeoff or design choice that needs a human decision, not a fix.
+- `blocking` — reserve this for a **concrete defect with a trigger**: you can state the input, state or call sequence that makes the changed code misbehave, crash, lose data or open a security hole. If you cannot name the trigger, it is not blocking. Copy/wording, formatting, whitespace, naming, style, a hypothetical edge case without a trigger, and anything outside the changed lines are never blocking.
+- `improvement` — the change works but has a real weakness a senior would catch on review (a boundary case near the changed code, an error case that silently swallows failures, etc.), or a suspicion you cannot back with a trigger.
+- `discussion` — only a tradeoff or design choice that needs a human decision, not a fix. Use it sparingly: it stops an automated review loop.
+
+You see only the diff — you cannot open files or run code. A synthesis step will open the cited `file:line` and drop what it cannot confirm, so cite the exact line and state the trigger; a claim about code you cannot see in the diff (an import, a flag's semantics) should be an `improvement` phrased as a question to verify, not a `blocking` assertion.
 
 [CONTEXT_BLOCK]
 
