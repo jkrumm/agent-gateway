@@ -471,6 +471,18 @@ function urlsOf(text: string): string[] {
   return [...absolute, ...relative];
 }
 
+/** Obsidian `[[target]]`, `[[target|alias]]` and `![[embed]]`. */
+const WIKILINK = /(!?)\[\[([^[\]\n]+?)\]\]/g;
+
+/** Every wikilink in `text`, in order and with repeats, as `[[target]]` (`![[target]]` for an
+ *  embed). The comparison token is the target alone, heading/block anchor included: an alias or an
+ *  embed's size after the first (optionally `\|`-escaped) pipe is display text the rewrite may change. */
+function wikilinksOf(text: string): string[] {
+  return [...text.matchAll(WIKILINK)]
+    .map((m) => `${m[1]}[[${m[2].replace(/\\?\|[\s\S]*$/, "").trim()}]]`)
+    .filter((token) => token !== "[[]]" && token !== "![[]]");
+}
+
 function counts(keys: string[]): Map<string, number> {
   const out = new Map<string, number>();
   for (const k of keys) out.set(k, (out.get(k) ?? 0) + 1);
@@ -495,21 +507,23 @@ function describeBlock(block: FenceBlock): string {
 
 const identity = (s: string) => s;
 
-/** What `candidate` lost from `original`: a fenced block or a URL it has fewer of than the original
- *  (one of two identical blocks gone is a loss). A URL counts as kept only as the same whole token
- *  (an extended URL is a different link). Null when everything survived. Names the first loss of
- *  each kind. */
+/** What `candidate` lost from `original`: a fenced block, a URL or a wikilink target it has fewer of
+ *  than the original (one of two identical blocks gone is a loss). A URL counts as kept only as the
+ *  same whole token (an extended URL is a different link); a wikilink as the same target (its alias
+ *  may change). Null when everything survived. Names the first loss of each kind. */
 export function lostContent(original: string, candidate: string): string | null {
   const lost: string[] = [];
   const block = firstExcess(parseFences(original), blockKey, parseFences(candidate));
   if (block) lost.push(describeBlock(block));
   const url = firstExcess(urlsOf(original), identity, urlsOf(candidate));
   if (url) lost.push(`the URL ${url}`);
+  const link = firstExcess(wikilinksOf(original), identity, wikilinksOf(candidate));
+  if (link) lost.push(`the wikilink ${link}`);
   return lost.length > 0 ? lost.join(" and ") : null;
 }
 
-/** What `candidate` added that `original` does not have: a fenced block or a URL it has more of
- *  than the original (a duplicate counts). Null when nothing was added. Names the first addition of
+/** What `candidate` added that `original` does not have: a fenced block, a URL or a wikilink target
+ *  it has more of than the original (a duplicate counts). Null when nothing was added. Names the first addition of
  *  each kind. */
 export function addedContent(original: string, candidate: string): string | null {
   const added: string[] = [];
@@ -517,5 +531,7 @@ export function addedContent(original: string, candidate: string): string | null
   if (block) added.push(describeBlock(block));
   const url = firstExcess(urlsOf(candidate), identity, urlsOf(original));
   if (url) added.push(`the URL ${url}`);
+  const link = firstExcess(wikilinksOf(candidate), identity, wikilinksOf(original));
+  if (link) added.push(`the wikilink ${link}`);
   return added.length > 0 ? added.join(" and ") : null;
 }

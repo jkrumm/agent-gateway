@@ -621,3 +621,45 @@ describe("html URLs in the keep gate", () => {
     expect(lostContent(original, original)).toBeNull();
   });
 });
+
+describe("lostContent / addedContent — wikilinks", () => {
+  const note =
+    "Builds on [[Deploy Pipeline]] and [[Caching#Keys|the key rules]]. ![[diagram.png|400]]";
+
+  test("an unchanged set of targets passes, even in another order or with new alias text", () => {
+    const rewritten =
+      "![[diagram.png]] First, [[Caching#Keys|key rules]]; then [[Deploy Pipeline|pipeline]].";
+    expect(lostContent(note, rewritten)).toBeNull();
+    expect(addedContent(note, rewritten)).toBeNull();
+  });
+
+  test("a dropped target is named as lost", () => {
+    expect(lostContent(note, "Builds on [[Deploy Pipeline]]. ![[diagram.png]]")).toBe(
+      "the wikilink [[Caching#Keys]]",
+    );
+  });
+
+  test("a dropped embed is lost; turning an embed into a link is a different target", () => {
+    expect(lostContent(note, "[[Deploy Pipeline]] [[Caching#Keys]]")).toBe(
+      "the wikilink ![[diagram.png]]",
+    );
+    expect(lostContent("![[a]]", "[[a]]")).toBe("the wikilink ![[a]]");
+    expect(addedContent("![[a]]", "[[a]]")).toBe("the wikilink [[a]]");
+  });
+
+  test("an invented target, a changed anchor and a duplicate count as added", () => {
+    expect(addedContent(note, `${note} See [[Other Page]].`)).toBe("the wikilink [[Other Page]]");
+    expect(addedContent("[[Caching#Keys]]", "[[Caching#Ttl]]")).toBe(
+      "the wikilink [[Caching#Ttl]]",
+    );
+    expect(addedContent("[[A]]", "[[A]] and [[A]]")).toBe("the wikilink [[A]]");
+  });
+
+  test("a table-escaped alias pipe still compares by target", () => {
+    expect(lostContent("| [[A\\|alias]] |", "| [[A]] |")).toBeNull();
+  });
+
+  test("plain brackets are not wikilinks", () => {
+    expect(lostContent("a [b] and [c](d)", "nothing")).toBeNull();
+  });
+});

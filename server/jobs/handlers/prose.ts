@@ -31,7 +31,7 @@ import { parseParams } from "./util.ts";
 // loop: LINT (pure code) → REVIEW (one call on a different lab, notes only) → REWRITE (one call,
 // the voice guide + rubric in the system prompt; findings, notes, brief and draft fenced in the
 // user turn) → RE-LINT (keep the rewrite only if it carries over every fenced code block and URL
-// of the original, adds none, stays in the draft's format (markdown or html), and no lint rule has
+// and wikilink target of the original, adds none, stays in the draft's format (markdown or html), and no lint rule has
 // more findings than in the original).
 // Execution lives here; the MCP door is server/mcp/tools/prose.ts.
 
@@ -595,7 +595,7 @@ async function attemptRewrite(
 }
 
 /** Whether a rewrite may replace the draft: it stays in the draft's format, keeps every fenced
- *  block and URL, adds none, and no lint rule got worse. `reason` is the `keptReason` when it may not. */
+ *  block, URL and wikilink target, adds none, and no lint rule got worse. `reason` is the `keptReason` when it may not. */
 function judgeRewrite(
   original: string,
   candidate: string,

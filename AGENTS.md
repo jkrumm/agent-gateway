@@ -410,7 +410,7 @@ pure code) → REVIEW (`prose_review`, a different lab, notes and scores only) �
 the voice guide plus the review) → RE-LINT. The voice guide is read by `server/lib/voice.ts` from
 `AGENT_GATEWAY_VOICE_PATH` (default `~/SourceRoot/brain/voice.md`, capped at `VOICE_MAX_BYTES` = 16 KB with a
 warn when exceeded), shared with `narrative`; a missing file fails a prose job, while narrative runs without it.
-The rewrite is kept only if it stays in the draft's format (`html` when the prose has block-level tags, else `markdown`; an html rewrite may carry no markdown `> [visual:` line, table or heading), carries over every fenced code block (exact text) and URL of the original (html `href`/`src` values included) AND no
+The rewrite is kept only if it stays in the draft's format (`html` when the prose has block-level tags, else `markdown`; an html rewrite may carry no markdown `> [visual:` line, table or heading), carries over every fenced code block (exact text), URL (html `href`/`src` values included) and Obsidian wikilink target (`[[t]]`, `[[t|alias]]`, `![[embed]]`; compared as a multiset by target, the alias may change) of the original, adds none, AND no
 lint rule has more findings than in the original; otherwise the original comes back with `kept: "original"` and
 `keptReason`. The job runs on the **session lane** (up to three long calls on up to 60k chars would hold a
 single-shot slot and block the drain) and checks `isCancelled` between review and write and between writer retries. The writer is one anthropic-wire

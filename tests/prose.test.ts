@@ -284,6 +284,40 @@ describe("runProsePipeline — content integrity", () => {
     expect(out.keptReason).toContain("fenced code block");
   });
 
+  test("a rewrite that loses a wikilink target keeps the original and names it", async () => {
+    const vault =
+      "The deploy pipeline runs nightly. See [[Deploy Pipeline|the pipeline]] and [[Caching]].";
+    const out = await runProsePipeline(
+      params({ text: vault, medium: "vault" }),
+      MODELS,
+      deps({
+        write: async () => ({ text: "The deploy pipeline runs nightly; see [[Deploy Pipeline]]." }),
+      }),
+    );
+    expect(out.kept).toBe("original");
+    expect(out.text).toBe(vault);
+    expect(out.keptReason).toBe("rewrite lost the wikilink [[Caching]]");
+  });
+
+  test("a rewrite that adds a wikilink target is rejected; a new alias is not", async () => {
+    const vault = "The deploy pipeline runs nightly. See [[Deploy Pipeline]].";
+    const added = await runProsePipeline(
+      params({ text: vault, medium: "vault" }),
+      MODELS,
+      deps({ write: async () => ({ text: `${vault} Also [[Invented]].` }) }),
+    );
+    expect(added.kept).toBe("original");
+    expect(added.keptReason).toBe("rewrite added the wikilink [[Invented]]");
+    const aliased = await runProsePipeline(
+      params({ text: vault, medium: "vault" }),
+      MODELS,
+      deps({
+        write: async () => ({ text: "The pipeline runs nightly: [[Deploy Pipeline|deploys]]." }),
+      }),
+    );
+    expect(aliased.kept).toBe("rewrite");
+  });
+
   test("a rewrite that drops the link keeps the original and names the URL", async () => {
     const out = await runProsePipeline(
       params({ text: SOURCE }),
