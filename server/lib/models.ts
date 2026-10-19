@@ -314,7 +314,8 @@ const MODELS: readonly ModelEntry[] = [
       in: 2,
       out: 12,
       cacheRead: 0.2,
-      source: "Requesty list openai/gpt-5.6-terra (= azure eastus2); route probed, rate not invoiced",
+      source:
+        "Requesty list openai/gpt-5.6-terra (= azure eastus2); route probed, rate not invoiced",
       date: "2026-10-19",
     },
     effort: ["low", "high", "max"],
