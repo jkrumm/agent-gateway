@@ -52,10 +52,10 @@ describe("registry shape", () => {
     expect(isClaudeModel("DeepSeek-V4-Flash")).toBe(false);
   });
 
-  test("the open deepseek-v4.1-flash rate conflict is recorded in its source string", () => {
+  test("deepseek-v4.1-flash carries the settled peak list rate, off-peak noted in its source", () => {
     const m = getModel("deepseek-v4.1-flash");
-    expect(m?.rate).toMatchObject({ in: 0.15, out: 0.6, cacheRead: 0.003 });
-    expect(m?.rate.source).toContain("CONFLICTS with modelpick");
+    expect(m?.rate).toMatchObject({ in: 0.3, out: 1.2, cacheRead: 0.006 });
+    expect(m?.rate.source).toContain("off-peak");
   });
 });
 

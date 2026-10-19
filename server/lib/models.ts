@@ -198,9 +198,13 @@ const MODELS: readonly ModelEntry[] = [
   },
   // deepseek-v4.1-flash over the OpenAI-compatible route (opencode only — `claude -p` cannot
   // reach it). Verified by the 2026-09-24 three-brief implement measurement (routing.ts
-  // AGENT_OC) and the review_ocr bake-off. OPEN FACT: rates conflict — agent-gateway's
-  // gateway-measured 0.15/0.60/0.003 (kept here; what opencode-runner.ts costs against) vs
-  // modelpick's 0.50/1.50. Re-probe before any cost claim. `jsonObject`: probed 2026-10-02 —
+  // AGENT_OC) and the review_ocr bake-off. Rate settled 2026-10-19 (modelpick): IU forwards this
+  // id to Requesty `deepseek/deepseek-v4.1-flash` (DeepSeek first-party, x-middleware-forwarded-
+  // model), list peak $0.30/$1.20, cached $0.006. DeepSeek halves it off-peak (16:30-00:30 UTC) —
+  // the 2026-09-24 gateway measurement of 0.15/0.60/0.003 was that window; the 0.50/1.50 was the
+  // Lyceum EU host (`-eu` ids). Peak is the conservative estimate; IU returns `usage.cost` on this
+  // route, which carries the discount and should win wherever the raw response is seen. Since
+  // 2026-10-17 the id serves the 1017 snapshot (same id). `jsonObject`: probed 2026-10-02 —
   // /chat/completions with response_format json_object + max_completion_tokens 16000 → HTTP 200,
   // valid JSON content.
   {
@@ -211,12 +215,12 @@ const MODELS: readonly ModelEntry[] = [
     backends: ["iu"],
     limit: { context: 850_000, output: 65_536, minOutput: MIN_OUTPUT_REASONING },
     rate: {
-      in: 0.15,
-      out: 0.6,
-      cacheRead: 0.003,
+      in: 0.3,
+      out: 1.2,
+      cacheRead: 0.006,
       source:
-        "agent-gateway gateway-measured 2026-09-24 (routing.ts AGENT_OC); CONFLICTS with modelpick 0.50/1.50 per MTok — unresolved, re-probe before cost claims",
-      date: "2026-09-24",
+        "Requesty list deepseek/deepseek-v4.1-flash, peak (off-peak 16:30-00:30 UTC is 50%); route verified via x-middleware-forwarded-model",
+      date: "2026-10-19",
     },
     effort: ["high", "max", "none"],
     jsonObject: true,
@@ -303,7 +307,16 @@ const MODELS: readonly ModelEntry[] = [
     harnesses: ["opencode"],
     backends: ["iu"],
     limit: { context: 1_050_000, output: 65_536, minOutput: MIN_OUTPUT_REASONING },
-    rate: { in: 2, out: 12, source: OC_JSON_SOURCE, date: OC_JSON_DATE },
+    // IU serves it via "IU GDPR Sink Azure" (x-middleware-forwarded-server, probed 2026-10-19) and
+    // returns no usage.cost. OpenAI/Azure-US list below; Azure EU regions list 10% higher
+    // ($2.20/$13.20/$0.22) — which region IU uses, and its invoice rate, are unverified.
+    rate: {
+      in: 2,
+      out: 12,
+      cacheRead: 0.2,
+      source: "Requesty list openai/gpt-5.6-terra (= azure eastus2); route probed, rate not invoiced",
+      date: "2026-10-19",
+    },
     effort: ["low", "high", "max"],
     jsonObject: false,
     verified: "2026-07-16",

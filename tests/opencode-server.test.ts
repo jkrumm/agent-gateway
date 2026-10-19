@@ -411,7 +411,7 @@ describe("buildOpencodeServerConfig", () => {
     expect(modelsOf(OPENCODE_PROVIDER_CHAT)["deepseek-v4.1-flash"]).toEqual({
       name: "DeepSeek V4.1 Flash",
       limit: { context: 850_000, output: 65_536 },
-      cost: { input: 0.15, output: 0.6, cache: { read: 0.003 } },
+      cost: { input: 0.3, output: 1.2, cache: { read: 0.006 } },
       settings: { reasoningEffort: "high" },
       variants: [
         { id: "high", settings: { reasoningEffort: "high" } },
