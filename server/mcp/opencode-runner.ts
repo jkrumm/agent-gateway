@@ -777,6 +777,9 @@ function attributionRow(
     sessionId: base.sessionUuid,
     opencodeSessionId,
     tool: base.tool ?? "unknown",
+    // Exact job attribution for usage-tracker and benches (the ts-window join is ambiguous
+    // when two jobs share a project and model). Absent for a session that isn't job-backed.
+    jobId: base.jobId,
     project: base.cwd,
     model: base.model,
     backend: base.backend,

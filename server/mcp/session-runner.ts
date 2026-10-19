@@ -1229,6 +1229,7 @@ async function runSessionAttempt<T = unknown>(
     writeAttribution({
       sessionId: sessionUuid,
       tool: tool ?? "unknown",
+      jobId,
       project: cwd,
       model,
       backend,
