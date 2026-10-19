@@ -2,13 +2,16 @@
 // base kind and the pure report → synthesis-block rendering. No network, no bunx.
 
 import { describe, expect, test } from "bun:test";
+import { homedir } from "node:os";
 import {
   REACT_DOCTOR_DROPPED_RULES,
   REACT_DOCTOR_FAILED_PREFIX,
   REACT_DOCTOR_MAX_LINES,
   REACT_DOCTOR_VERSION,
   parseReactDoctorResult,
+  reactDoctorBinPath,
   reactDoctorCommand,
+  reactDoctorFailureReason,
   renderReactDoctorBlock,
 } from "../server/lib/react-doctor.ts";
 import { fallowBaseFor } from "../server/jobs/handlers/review.ts";
@@ -46,12 +49,26 @@ describe("reactDoctorCommand", () => {
   test("always pins the version and keeps telemetry and the remote supply-chain lookup off", () => {
     for (const base of [{ kind: "base", ref: "main" }, { kind: "auto" }] as const) {
       const cmd = reactDoctorCommand(base);
-      expect(cmd).toContain(`bunx react-doctor@${REACT_DOCTOR_VERSION} `);
+      expect(cmd).toContain(`'${reactDoctorBinPath()}' --no-telemetry`);
+      expect(cmd).toContain(`[ -x '${reactDoctorBinPath()}' ] || exit 0`);
       expect(cmd).toContain("--no-telemetry");
       expect(cmd).toContain("--no-supply-chain");
       expect(cmd).toContain("--blocking none");
       expect(cmd).toContain('--json-out "$out"');
-      expect(cmd).toContain("command -v bunx");
+      expect(cmd).not.toContain("bunx");
+    }
+  });
+
+  test("execs the pinned install by absolute path, never bunx", () => {
+    const bin = reactDoctorBinPath();
+    expect(bin).toBe(
+      `${homedir()}/.local/share/agent-gateway/react-doctor/${REACT_DOCTOR_VERSION}/node_modules/.bin/react-doctor`,
+    );
+    for (const base of [{ kind: "base", ref: "HEAD~5" }, { kind: "auto" }] as const) {
+      const cmd = reactDoctorCommand(base);
+      expect(cmd).not.toContain("bunx");
+      expect(cmd).not.toContain("$HOME");
+      expect(cmd).toContain(`'${homedir()}/`);
     }
   });
 
@@ -83,7 +100,7 @@ describe("reactDoctorCommand", () => {
 describe("renderReactDoctorBlock", () => {
   test("not applicable and failures are explicit, never read as clean", () => {
     expect(renderReactDoctorBlock({ stdout: "", ok: true })).toBe(
-      "react-doctor: not run (no React in the repo, no `bunx`, or no diff-shaped base for this scope).",
+      "react-doctor: not run (no React in the repo, no pinned install under ~/.local/share/agent-gateway/react-doctor (make install-react-doctor), or no diff-shaped base for this scope).",
     );
     expect(
       renderReactDoctorBlock({ stdout: `${REACT_DOCTOR_FAILED_PREFIX} (exit 2): boom`, ok: true }),
@@ -155,6 +172,38 @@ describe("renderReactDoctorBlock", () => {
   test("a report that ignored the diff scope is flagged", () => {
     const block = renderReactDoctorBlock(report([diag()], { mode: "full" }));
     expect(block).toContain("ignored the diff scope");
+  });
+});
+
+describe("reactDoctorFailureReason", () => {
+  test("leads with the error line, keeps the rest, header first", () => {
+    const stderr = [
+      "Scanning…",
+      "installing deps",
+      "error: Failed to link chalk: EEXIST",
+      "Node.js v26.11.1",
+    ].join("\n");
+    expect(reactDoctorFailureReason(`(exit 1): ${stderr}`)).toBe(
+      "(exit 1): error: Failed to link chalk: EEXIST | Scanning… | installing deps | Node.js v26.11.1",
+    );
+  });
+
+  test("without an error-looking line the order is kept", () => {
+    expect(reactDoctorFailureReason("(exit 2): one\ntwo")).toBe("(exit 2): one | two");
+  });
+
+  test("caps the length", () => {
+    const reason = reactDoctorFailureReason(`(exit 1): ${"x".repeat(2000)}`);
+    expect(reason.length).toBeLessThanOrEqual(601);
+    expect(reason.endsWith("…")).toBe(true);
+  });
+
+  test("flows through the failed marker into the render", () => {
+    const stdout = `${REACT_DOCTOR_FAILED_PREFIX} (exit 1): a\nTypeError: boom\n}`;
+    expect(parseReactDoctorResult({ stdout, ok: true })).toEqual({
+      kind: "failed",
+      reason: "(exit 1): TypeError: boom | a | }",
+    });
   });
 });
 

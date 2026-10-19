@@ -792,15 +792,22 @@ profile: `server/skills/review/README.md`.
 
 **react-doctor:** an advisory phase-1 input like fallow's brief, never a gate
 (`server/lib/react-doctor.ts`, rendered into synthesis's `[REACT_DOCTOR_RESULTS]`,
-logged `review.react_doctor`). No repo installs it — the command pins
-`REACT_DOCTOR_VERSION` and runs `bunx react-doctor@<ver>` diff-scoped
-(`--scope changed`, the base from `fallowBaseFor` resolved to an OID, since it
-rejects `~`/`^`), and only when a tracked `package.json` lists `react`.
+logged `review.react_doctor`). No repo installs it — `REACT_DOCTOR_VERSION` is
+installed once under `~/.local/share/agent-gateway/react-doctor/<ver>/`
+(`scripts/install-react-doctor.sh`, `make install-react-doctor`; `make deploy` and
+`make install-cli` run it best-effort, a failure only makes reviews report "not run")
+and the command execs `node_modules/.bin/react-doctor` there by absolute path
+(`reactDoctorBinPath()`), diff-scoped (`--scope changed`, the base from
+`fallowBaseFor` resolved to an OID, since it rejects `~`/`^`), only when a tracked
+`package.json` lists `react`. **Never `bunx`**: its shared install cache races under
+concurrent reviews (`Failed to link <pkg>: EEXIST`, 73 of 520 runs failed, measured
+2026-10-19). Upgrade: bump `REACT_DOCTOR_VERSION`, run `make install-react-doctor`.
 **`--no-telemetry` is mandatory** (it skips their remote score API; the command
 also passes `--no-supply-chain`, which skips Socket.dev lookups) — never send repo
 data off the machine. Noisy/overlapping rules are filtered in code
 (`REACT_DOCTOR_DROPPED_RULES`); a crash or timeout renders an explicit
-`react-doctor failed` line, never silence. Angles do not receive it.
+`react-doctor failed` line (reason = exit code + the first error-looking line of the
+last 15 stderr lines, ≤600 chars), never silence. Angles do not receive it.
 
 **OpenCodeReview (OCR):** one more phase-1 input, started right after Phase 1
 confirms real changes and awaited only just before the synthesis prompt is

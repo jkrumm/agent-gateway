@@ -1,8 +1,14 @@
-// ── react-doctor (npm `react-doctor`, run via `bunx`) ─────────────────────────────────────
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+// ── react-doctor (npm `react-doctor`, a pinned install run by absolute path) ──────────────
 //
 // One more phase-1 review INPUT next to fallow and OCR — advisory, never a gate. Central
-// toolbelt: no reviewed repo installs it, the command pins the version and runs it through
-// `bunx`. Diff-scoped (`--scope changed`), so it reports only issues new against the base.
+// toolbelt: no reviewed repo installs it; `scripts/install-react-doctor.sh` (`make
+// install-react-doctor`, also run by `make deploy`/`install-cli`) installs the pinned version
+// under `~/.local/share/agent-gateway/react-doctor/<version>` and the command execs that binary
+// directly. Never `bunx`: its shared install cache races under concurrent reviews (`Failed to
+// link <pkg>: EEXIST`, 73 of 520 runs failed, measured 2026-10-19). Diff-scoped (`--scope changed`), so it reports only issues new against the base.
 //
 // Measured on 0.9.18 (2026-10-16, argo/apps/dashboard):
 // - `--no-telemetry` (alias of `--no-score`) is MANDATORY: it skips their remote score API and
@@ -21,6 +27,16 @@
 
 /** Pinned in one place: an upgrade is a deliberate act (report shape, rule names, flags). */
 export const REACT_DOCTOR_VERSION = "0.9.18";
+
+/** Absolute path of the pinned install's binary (`scripts/install-react-doctor.sh` puts it here). */
+export function reactDoctorBinPath(): string {
+  return join(
+    homedir(),
+    ".local/share/agent-gateway/react-doctor",
+    REACT_DOCTOR_VERSION,
+    "node_modules/.bin/react-doctor",
+  );
+}
 
 /** CLI helper timeout (not an agent run — `.claude/rules/agent-limits.md` does not apply). */
 export const REACT_DOCTOR_TIMEOUT_MS = 120_000;
@@ -47,7 +63,28 @@ export const REACT_DOCTOR_MAX_LINES = 40;
 /** Same shape as review.ts's `FallowBase` (structural — pass `fallowBaseFor`'s result as is). */
 export type ReactDoctorBase = { kind: "base"; ref: string } | { kind: "auto" } | { kind: "skip" };
 
-/** Shell command for the react-doctor report. Empty output = not applicable (no `bunx`, no
+/** Stderr lines the wrapper hands back on a failure; the reason leads with the error line. */
+const REACT_DOCTOR_STDERR_LINES = 15;
+const REACT_DOCTOR_REASON_MAX_CHARS = 600;
+const REACT_DOCTOR_ERROR_LINE = /error|Error|EEXIST|ENOENT|throw/;
+
+/** Turns the wrapper's failure text (`(exit N): <stderr tail>`, multi-line) into one diagnostic
+ *  reason: the exit header, then the first error-looking line, then the rest, capped. */
+export function reactDoctorFailureReason(raw: string): string {
+  const [, header = "", body = ""] = raw.match(/^\s*(\(exit \d+\):)?\s*([\s\S]*)$/) ?? [];
+  const lines = body
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const errorLine = lines.find((l) => REACT_DOCTOR_ERROR_LINE.test(l));
+  const ordered = errorLine ? [errorLine, ...lines.filter((l) => l !== errorLine)] : lines;
+  const reason = [header, ordered.join(" | ")].filter(Boolean).join(" ");
+  return reason.length > REACT_DOCTOR_REASON_MAX_CHARS
+    ? `${reason.slice(0, REACT_DOCTOR_REASON_MAX_CHARS)}…`
+    : reason;
+}
+
+/** Shell command for the react-doctor report. Empty output = not applicable (no pinned install, no
  *  React in any tracked package.json, or a scope with no diff-shaped base); otherwise the JSON
  *  report, or `REACT_DOCTOR_FAILED_PREFIX` + the stderr tail. stderr never reaches stdout
  *  (`shell` merges the two). The ref is already `validateScope`-checked (or a resolved OID in
@@ -55,8 +92,9 @@ export type ReactDoctorBase = { kind: "base"; ref: string } | { kind: "auto" } |
  *  `--include-untracked` to see new files. */
 export function reactDoctorCommand(base: ReactDoctorBase): string {
   if (base.kind === "skip") return "true";
+  const bin = `'${reactDoctorBinPath().replaceAll("'", "'\\''")}'`;
   const guards =
-    "command -v bunx >/dev/null 2>&1 || exit 0; " +
+    `[ -x ${bin} ] || exit 0; ` +
     `git ls-files -z -- '*package.json' 2>/dev/null | xargs -0 grep -lE '"react"[[:space:]]*:' 2>/dev/null | grep -q . || exit 0`;
   const resolve =
     base.kind === "base"
@@ -68,10 +106,10 @@ export function reactDoctorCommand(base: ReactDoctorBase): string {
       : " --scope changed";
   return (
     `${guards}; ${resolve}out=$(mktemp); err=$(mktemp); ` +
-    `bunx react-doctor@${REACT_DOCTOR_VERSION} --no-telemetry --no-supply-chain --no-cache ` +
+    `${bin} --no-telemetry --no-supply-chain --no-cache ` +
     `--json --json-compact --json-out "$out" -y --blocking none${scopeArgs} >/dev/null 2>"$err"; rc=$?; ` +
     `if [ -s "$out" ]; then cat "$out"; ` +
-    `else [ "$rc" -eq 0 ] || echo "${REACT_DOCTOR_FAILED_PREFIX} (exit $rc): $(tail -n 3 "$err")"; fi; rm -f "$out" "$err"`
+    `else [ "$rc" -eq 0 ] || echo "${REACT_DOCTOR_FAILED_PREFIX} (exit $rc): $(tail -n ${REACT_DOCTOR_STDERR_LINES} "$err")"; fi; rm -f "$out" "$err"`
   );
 }
 
@@ -145,7 +183,12 @@ export function parseReactDoctorResult(result: {
         };
   }
   if (stdout.startsWith(REACT_DOCTOR_FAILED_PREFIX)) {
-    return { kind: "failed", reason: stdout.replace(/^react-doctor failed:?\s*/, "") };
+    return {
+      kind: "failed",
+      reason: reactDoctorFailureReason(
+        stdout.slice(REACT_DOCTOR_FAILED_PREFIX.length).replace(/^:/, ""),
+      ),
+    };
   }
 
   let report: {
@@ -198,7 +241,7 @@ export function parseReactDoctorResult(result: {
 export function renderReactDoctorBlock(result: { stdout: string; ok: boolean }): string {
   const outcome = parseReactDoctorResult(result);
   if (outcome.kind === "not-applicable")
-    return "react-doctor: not run (no React in the repo, no `bunx`, or no diff-shaped base for this scope).";
+    return "react-doctor: not run (no React in the repo, no pinned install under ~/.local/share/agent-gateway/react-doctor (make install-react-doctor), or no diff-shaped base for this scope).";
   if (outcome.kind === "failed") {
     return `${REACT_DOCTOR_FAILED_PREFIX}: ${outcome.reason} — no React-specific static-analysis input for this review.`;
   }

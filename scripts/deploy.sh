@@ -15,6 +15,7 @@
 # afterwards (down, wrong password, not the pinned opencode), aborts before the reload with
 # nothing touched and no rollback. Likewise a post-reload verify that fails ONLY on the opencode
 # server is reported as an opencode problem and does not roll back master: the build is not at fault.
+# It also ensures the pinned react-doctor install (scripts/install-react-doctor.sh), best effort.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -65,6 +66,9 @@ opencode_only_failure() {
 }
 
 echo "deploying $head"
+# The pinned react-doctor the review job execs: best effort — without it the review reports
+# "react-doctor: not run", which must never block a deploy.
+scripts/install-react-doctor.sh || echo "note: react-doctor install failed — review runs report it as not run (make install-react-doctor)"
 scripts/reload-preflight.sh
 rc=$?
 if [ "$rc" -eq 3 ]; then
