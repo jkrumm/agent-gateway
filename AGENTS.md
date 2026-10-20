@@ -828,7 +828,10 @@ picked by a same-range bake-off, rationale in `routing.ts`; per-token, off Max; 
 since it's an external CLI, not a `runSession` worker). Fails soft to a
 one-line skip/fail block the synthesizer reads like an unavailable
 fallow — never a gate, never thrown into the review. Disable with
-`AGENT_GATEWAY_REVIEW_OCR=0`. The IU key is handed to the third-party `ocr` binary
+`AGENT_GATEWAY_REVIEW_OCR=0`. Skipped below 100 changed diff lines
+(`AGENT_GATEWAY_REVIEW_OCR_MIN_LINES`, 0 = always): on the 111-review corpus it filed 0
+blocking findings under 100 lines at full cost (~3 min, ~$0.06 — it explores the repo
+either way), and 9 in the 74 reviews above. The IU key is handed to the third-party `ocr` binary
 via env — accepted because its agent tools are read-only (file read/find/
 search via `git`, no shell tool) and it reads LLM config only from env/
 `~/.opencodereview`, never the repo; a repo's own `.opencodereview/rule.json`

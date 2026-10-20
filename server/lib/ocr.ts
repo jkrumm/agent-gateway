@@ -405,9 +405,35 @@ function truncateForPrompt(line: string): string {
   return trimmed ? trimmed.slice(0, STDERR_LINE_FOR_PROMPT_CHARS) : "no stderr";
 }
 
+/** Below this many changed diff lines OCR is skipped. Measured 2026-10-20 on the 111-review
+ *  corpus: under 100 lines OCR filed 0 blocking findings in 37 reviews and 5% of all findings,
+ *  while costing the same ~3 min and ~$0.06 as on a large diff (it explores the repo either
+ *  way). From 100 lines up it found 9 confirmed-shape blockers in 74. Override with
+ *  `AGENT_GATEWAY_REVIEW_OCR_MIN_LINES` (0 = always run). */
+export const OCR_MIN_CHANGED_LINES_DEFAULT = 100;
+
+export function ocrMinChangedLines(): number {
+  const raw = Number(process.env.AGENT_GATEWAY_REVIEW_OCR_MIN_LINES);
+  return Number.isFinite(raw) && raw >= 0 && process.env.AGENT_GATEWAY_REVIEW_OCR_MIN_LINES !== ""
+    ? raw
+    : OCR_MIN_CHANGED_LINES_DEFAULT;
+}
+
+/** Added + removed lines in a unified diff, excluding the `+++`/`---` file headers. */
+export function countChangedLines(diff: string): number {
+  let n = 0;
+  for (const line of diff.split("\n")) {
+    if ((line.startsWith("+") || line.startsWith("-")) && !/^(\+\+\+|---)( |$)/.test(line)) n++;
+  }
+  return n;
+}
+
 export interface RunOcrReviewOptions {
   cwd: string;
   scope: string;
+  /** Changed lines in the reviewed diff; below `ocrMinChangedLines()` OCR is skipped. Omitted =
+   *  no size gate. */
+  changedLines?: number;
   refBaseOid?: string;
   context?: string;
   jobId?: string;
@@ -471,6 +497,28 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
         "ocr skipped — AGENT_GATEWAY_REVIEW_OCR=0",
       );
       return { block: skippedBlock("AGENT_GATEWAY_REVIEW_OCR=0"), ran: false };
+    }
+
+    const minLines = ocrMinChangedLines();
+    if (opts.changedLines !== undefined && opts.changedLines < minLines) {
+      logger.info(
+        {
+          event: "review.ocr",
+          tool: "review_ocr",
+          project: opts.cwd,
+          status: "skipped",
+          reason: "small_diff",
+          changedLines: opts.changedLines,
+          minLines,
+        },
+        "ocr skipped — diff below the size gate",
+      );
+      return {
+        block: skippedBlock(
+          `diff has ${opts.changedLines} changed lines, below the ${minLines}-line gate`,
+        ),
+        ran: false,
+      };
     }
 
     const ocrBin = Bun.which("ocr");

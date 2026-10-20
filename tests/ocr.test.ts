@@ -5,6 +5,10 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  OCR_MIN_CHANGED_LINES_DEFAULT,
+  countChangedLines,
+  ocrMinChangedLines,
+  runOcrReview,
   OCR_EFFORT,
   ocrArgs,
   ocrModeArgs,
@@ -418,5 +422,45 @@ describe("ocrArgs", () => {
   test("appends the background file when context is given", () => {
     const args = ocrArgs({ modeArgs: [], repo: "/r", outFile: "/o", bgFile: "/bg.md" });
     expect(args.slice(-2)).toEqual(["--background-file", "/bg.md"]);
+  });
+});
+
+describe("OCR diff-size gate", () => {
+  test("countChangedLines counts +/- lines, never the file headers", () => {
+    const diff = [
+      "diff --git a/x.ts b/x.ts",
+      "--- a/x.ts",
+      "+++ b/x.ts",
+      "@@ -1,2 +1,2 @@",
+      "-old",
+      "+new",
+      " same",
+      "+--- a markdown rule added as content",
+    ].join("\n");
+    expect(countChangedLines(diff)).toBe(3);
+    expect(countChangedLines("")).toBe(0);
+  });
+
+  test("the threshold defaults to 100 and takes a numeric override, 0 included", () => {
+    const prev = process.env.AGENT_GATEWAY_REVIEW_OCR_MIN_LINES;
+    try {
+      delete process.env.AGENT_GATEWAY_REVIEW_OCR_MIN_LINES;
+      expect(ocrMinChangedLines()).toBe(OCR_MIN_CHANGED_LINES_DEFAULT);
+      process.env.AGENT_GATEWAY_REVIEW_OCR_MIN_LINES = "0";
+      expect(ocrMinChangedLines()).toBe(0);
+      process.env.AGENT_GATEWAY_REVIEW_OCR_MIN_LINES = "nope";
+      expect(ocrMinChangedLines()).toBe(OCR_MIN_CHANGED_LINES_DEFAULT);
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_GATEWAY_REVIEW_OCR_MIN_LINES;
+      else process.env.AGENT_GATEWAY_REVIEW_OCR_MIN_LINES = prev;
+    }
+  });
+
+  test("a small diff is skipped before ocr is spawned, with the reason in the block", async () => {
+    const res = await runOcrReview({ cwd: process.cwd(), scope: "HEAD~1", changedLines: 12 });
+    expect(res.ran).toBe(false);
+    expect(res.block).toBe(
+      "OpenCodeReview: skipped (diff has 12 changed lines, below the 100-line gate)",
+    );
   });
 });

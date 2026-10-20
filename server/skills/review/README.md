@@ -118,7 +118,8 @@ External tools run in parallel with agents:
   complexity/export-style rules are filtered because fallow owns complexity. A failure
   renders an explicit `react-doctor failed` line.
 - **OpenCodeReview (`ocr`)** — cross-file consistency, config drift, precise line-anchored
-  findings (if installed on PATH; `AGENT_GATEWAY_REVIEW_OCR=0` disables)
+  findings (if installed on PATH; `AGENT_GATEWAY_REVIEW_OCR=0` disables; skipped below
+  100 changed lines, `AGENT_GATEWAY_REVIEW_OCR_MIN_LINES` overrides)
 
 ## Output Schema
 
