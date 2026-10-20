@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { Elysia, t } from "elysia";
 import { cancelJob, createJob, getJob, listJobs, queueStats } from "../jobs/store.ts";
 import { isJobTool, type JobTool } from "../jobs/types.ts";
@@ -24,7 +24,7 @@ async function toolSubmitRefusal(tool: JobTool, params: unknown): Promise<string
   // verify (measured 2026-10-19: 14 replayed reviews of deleted worktrees in one second rolled
   // a deploy back). Every handler that takes `cwd` repeats this check.
   const cwd = (params as Record<string, unknown> | undefined)?.cwd;
-  if (typeof cwd === "string" && !existsSync(cwd))
+  if (typeof cwd === "string" && !statSync(cwd, { throwIfNoEntry: false })?.isDirectory())
     return `${tool} refused: directory not found: ${cwd}`;
   if (tool === "dispatch") return dispatchSubmitRefusal((params ?? {}) as Record<string, unknown>);
   if (tool === "prose") return proseSubmitRefusal(params);

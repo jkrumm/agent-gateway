@@ -2,7 +2,7 @@
 // a caller's deleted worktree never counts as a job failure in `failedLastHour`.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { __resetForTests, listJobs } from "../server/jobs/store.ts";
@@ -35,6 +35,14 @@ describe("missing cwd refusal", () => {
     expect(status).toBe(400);
     expect(body.error).toBe(`review refused: directory not found: ${missing}`);
     expect(listJobs().length).toBe(before);
+  });
+
+  test("a regular file is not a directory and is refused too", async () => {
+    const file = join(dir, "not-a-dir.txt");
+    writeFileSync(file, "x");
+    const { status, body } = await post({ tool: "check", params: { cwd: file } });
+    expect(status).toBe(400);
+    expect(body.error).toBe(`check refused: directory not found: ${file}`);
   });
 
   test("an existing directory is accepted", async () => {
