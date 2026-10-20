@@ -257,6 +257,12 @@ The 2026-10-11 `brew upgrade` changed behaviour under a running agw and broke ev
   (config-defined providers are now listed by `/api/provider|/api/model`, recorded as the fact
   `providers.configDefinedListed`). Reason: the P0 request-timeout failures, and the changelog's
   "faster, safer session snapshots" (the server snapshots each worktree with its own git repo).
+- **2.0.29 → 2.0.32 (2026-10-20).** v2 probe 60/60 on three of four runs (the first run had one
+  failed check that did not recur — flaky, not reproduced), live probe 27/27 on the restarted shared
+  server. 2.1.0 (released the same morning) was deliberately skipped until its first patch. The
+  shared server reports "config is stale" for a few seconds after a restart while agents load —
+  re-check before acting on it. Found and removed a Homebrew `opencode` 2.0.29 that `brew bundle`
+  had reinstalled ahead of the pin on PATH (dotfiles Brewfile now skips it on this machine).
 - Wave 2 (shipped): the running-server version is in `/api/jobs/health` (`opencodeServer`) and
   `make verify`, the wrapper refuses to start a binary that is not the pinned one, and
   episodes refuse to start against a server whose version differs from it.

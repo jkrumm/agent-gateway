@@ -36,7 +36,7 @@ import { listModels, type ModelEntry, type ModelWire } from "../lib/models.ts";
 /** The only opencode build agw drives. The wrapper runs the npm install under `~/.local/share/agent-gateway/opencode-bin/<version>`; it refuses to start
  *  a different binary and `getOpencodeServerStatus` marks a different running version not-ok
  *  (docs/opencode-v2.md § Version pin and upgrade gate). */
-export const OPENCODE_PINNED_VERSION = "2.0.29";
+export const OPENCODE_PINNED_VERSION = "2.0.32";
 
 /** Fixed loopback port. Override: `AGENT_GATEWAY_OPENCODE_PORT` (read per call). */
 export const DEFAULT_OPENCODE_PORT = 49375;
