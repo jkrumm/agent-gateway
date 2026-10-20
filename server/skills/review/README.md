@@ -108,7 +108,7 @@ External tools run in parallel with agents:
 - **react-doctor** (`server/lib/react-doctor.ts`) — React-specific bugs/perf (refs mutated in
   render, missing effect cleanup, re-render traps) via the pinned binary
   `~/.local/share/agent-gateway/react-doctor/<version>/node_modules/.bin/react-doctor
---scope changed`, same base as fallow resolved to an OID. Installed by
+  --scope changed`, same base as fallow resolved to an OID. Installed by
   `scripts/install-react-doctor.sh` (`make install-react-doctor`, also run by `make deploy`
   and `make install-cli`); never `bunx` — its shared install cache races under concurrent
   reviews (`Failed to link <pkg>: EEXIST`, 14% of runs, measured 2026-10-19). Upgrade: bump

@@ -7,7 +7,7 @@ import { getIuConfig } from "../lib/iu-openai.ts";
 import { IDLE_TIMEOUT_MS } from "../lib/idle-timeout.ts";
 import { runOpencodeAttempt } from "./opencode-runner.ts";
 import { interruptOpencodeSession } from "./opencode-server.ts";
-import { readTrimmedLines, usageLane, workerBaseEnv } from "./worker-shared.ts";
+import { readTrimmedLines, workerBaseEnv } from "./worker-shared.ts";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import {
@@ -75,7 +75,6 @@ import {
   writeAttribution,
   writeSessionEnv,
   type SessionOptions,
-  type SessionProgress,
   type SessionResult,
 } from "./session-core.ts";
 // How often the idle watchdog checks `lastChunkAt` — cheap enough to run every tick of a
