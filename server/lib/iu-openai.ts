@@ -18,6 +18,8 @@ import { readTrimmedLines } from "../mcp/worker-shared.ts";
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
+const VISION_MIN_MAX_COMPLETION_TOKENS = 16_000;
+
 /** NDJSON usage sink consumed by the usage-tracker's `agent-gateway-iu` collector. Resolved fresh
  *  on every call (not cached at module load) — a test that sets `AGENT_GATEWAY_IU_USAGE_LOG` AFTER
  *  this module has already been imported (e.g. transitively, via `server/lib/ocr.ts`, from an
@@ -414,10 +416,14 @@ export async function visionRead(opts: {
   // No `temperature` on the wire, deliberately — same reasoning as textComplete's: the IU
   // gateway 503s on a non-default temperature for the gpt-5.x family, and VISION may be
   // re-pointed at one of those models. Sampled at the provider's default.
+  // The output floor matches textComplete's single-shot floor: a thinking model's reasoning
+  // tokens count against max_completion_tokens, so the gateway default can truncate before
+  // any answer is emitted.
   const data = await iuFetch(
     "/chat/completions",
     {
       model,
+      max_completion_tokens: VISION_MIN_MAX_COMPLETION_TOKENS,
       messages: [
         {
           role: "user",
