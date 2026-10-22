@@ -1,8 +1,8 @@
 # OpenCode v2 — archived
 
 All waves are done. The full plan, with every wave's measurements and **Left behind**, is
-`docs/waves/archive/2026-10-opencode-v2.md`. No wave is active; the last close-out follows (kept here so
-the wave watcher can still read the `done` flip).
+`docs/waves/archive/2026-10-opencode-v2.md`. Wave 12 (factory Phase 0, 2026-10-22) is active; Wave 11's close-out stays above it so
+the wave watcher can still read the `done` flip.
 
 ## Wave 11 — sharpen and close the loops            <!-- status: done -->
 - [x] Decision-model context iteration in warden `scripts/lifecycle/shadow.py`. Today 6 of 8 noise items are called `new`, the attach target is right 1 of 7 times, and confidence ≥ 0.95 is right only 11 of 16 times. Add the signals the LLM triage uses that the shadow context lacks: alert source/fingerprint history, why past items were ignored, and repo noise patterns. Re-run `scripts/shadow-replay.py` on a larger labelled set (≥ 100) and record the before/after table in `docs/decision-shadow.md`. Never promote by hand; the promotion rule stays the improve loop's.
@@ -22,3 +22,18 @@ shipped: agw a9813ed + 8562f8d + 21187c4 (deployed, `make verify` green), warden
 - **Docs truth pass:** agw AGENTS.md/review README/routing doc/deploy.sh hint, brain model-routing, dotfiles agent-platform + architecture diagram table. Warden LOOP.md already measures shadow and routes.
 - **Open for the improve loop:** (1) shadow promotion check on live rows (`shadow.py report`); noise alerts it calls `new` at ≥ 0.95 belong in the policy ignore list; (2) review outcomes on frontend-heavy PRs after the route move (revert = one env line); (3) real implement-tier dispatch error rate (`session.opencode_error`, `[GET … after Nms]`) since 2.0.29; (4) the OpenCode server restart is still destructive to attached episodes; (5) viewport overflow in archify `visual-check` for tall diagrams; (6) dotfiles `make check` fails on unrelated launchd labels (`hermes-serve*`, weatherorb).
 
+## Wave 12 — Factory Phase 0: investigate reads the host            <!-- status: active -->
+Why: ~30 of the 74 items that reached the owner in 14 days (Round 5 audit,
+`~/SourceRoot/dotfiles/docs/waves/PLAN.md` §Established facts) are one contradiction:
+`agw-readonly` allows only git/rg/cat/ls/head/tail/wc/jq/curl
+(`server/mcp/opencode-server.ts:122-140`) while warden's investigate brief promises host
+reads (`warden/scripts/loop/work.py:264`), so investigate episodes ask "grant access or
+close?". This is Phase 0 of the factory design (`~/SourceRoot/dotfiles/docs/factory/BRIEF.md`):
+only fixes no open design decision can invalidate. warden Wave 8 runs in parallel and
+consumes this wave's verb set and verdict field; it reads both from **Left behind**.
+
+- [ ] **Host read verbs in `agw-readonly`**, exactly this set, read-only by construction: `make logs`, `make verify`, `make status` (bare in the episode cwd, or `make -C ~/SourceRoot/<repo> …`); `launchctl print <domain>/<label>` and `launchctl list`; `tail`/`head` with an explicit line bound on `~/Library/Logs/**`; `curl` GET to loopback only (`localhost`, `127.0.0.1`), no `-X`/`-d`/`--data*`/`-T`/`-F`. Explicit denies stay first: every other `make` target (`deploy`, `setup`, `restart`, `*-setup`, `*-teardown`, `secrets-*`), `launchctl kickstart|bootout|bootstrap|load|unload|kill`, any non-loopback `curl`. Unit tests for both sides (allowed and denied command lines, including flag-smuggling attempts like `make logs deploy` and `curl localhost -X POST`).
+- [ ] **A host-access gap is a signal, not a question.** When an investigate episode still cannot read what it needs, the verdict says so in a structured field (reuse an existing category/kind field if the schema has one, else add `blocked_on: "host_access"`) instead of asking the owner. Record the exact field and value in **Left behind** — warden Wave 8 keys on it.
+- [ ] **Policy lines in `server/skills/dispatch/_common.md`** (the drain in warden Wave 8 runs on them): only product direction, spend, irreversible data loss and other people are owner decisions — everything else is decided with the cheap reversible default (park, revert, leave the PR unmerged); retention and upgrade windows follow the repo's docs, else the conservative default; roadmap sequencing defers to the repo's `docs/waves/PLAN.md` (file it there, don't ask); KeepAlive vs watchdog follows the repo's documented framework; of two PRs for one fix, keep the newer green one and close the other; security/data-loss findings that have a code fix revise first; `[chronic]` means a deeper investigate, never a page; "already fixed on master" resolves.
+- [ ] Gate: `make check`, `/review` on the diff, `make deploy`, `make verify`. Prove it live: one real investigate job on a host-shaped question (e.g. "why did <a recent Kuma DOWN> fire", repo homelab or dotfiles) reads the host through the new verbs and returns a verdict without an access question. Record the job id and the verbs it used.
+**Left behind:**
