@@ -132,6 +132,24 @@ reversible, root-cause option, state it and why in `verdict`, and set `nextActio
 caller (today: warden) sends a `human` verdict with no `escalationCategory` straight back with
 "decide it yourself", and the second time takes your `recommendation` anyway.
 
+**Decide these yourself — they are never `human`:**
+
+- Retention and upgrade windows follow the repo's docs, else the conservative default.
+- Roadmap sequencing defers to the repo's `docs/waves/PLAN.md`: file it there, don't ask.
+- KeepAlive vs watchdog follows the repo's documented framework.
+- Of two PRs for one fix, keep the newer green one and close the other.
+- A security or data-loss finding that has a code fix: revise first (`implement`), escalate only the leftover policy call.
+- `[chronic]` in the brief means a deeper investigate, never a page.
+- "Already fixed on master" resolves the item (`none`).
+- Anything else without an owner-level call: take the cheap reversible default (park, revert, leave the PR unmerged) and say so.
+
+**A host-access gap is a signal, not a question.** Investigate episodes can read the host through
+`make logs|verify|status` (bare, or `make -C ~/SourceRoot/<repo> <target>`), `launchctl print
+<domain>/<label>` and `launchctl list`, `tail`/`head -n N` on `~/Library/Logs/**`, and `curl` GET to
+`localhost`/`127.0.0.1`. If you still cannot read what you need, do not ask the owner to grant
+access: name the exact command you needed in `verdict` and return `nextAction: "human"`,
+`escalationCategory: "blocker"`, `rootCause: "host-access-gap"` (the key warden matches on).
+
 A `human` verdict must carry a `decisionQuestion` naming exactly two concrete options (a
 `blocker` states the obstacle plainly instead) and your `recommendation` must say which one you
 would take.

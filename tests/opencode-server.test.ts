@@ -172,6 +172,116 @@ describe("agw-readonly permissions", () => {
     }
   });
 
+  test("host read verbs: make logs|verify|status, launchctl print|list, bounded log reads, loopback curl", () => {
+    for (const cmd of [
+      "make logs",
+      "make verify",
+      "make status",
+      "make -C /Users/jkrumm/SourceRoot/agent-gateway logs",
+      "make -C ~/SourceRoot/homelab verify",
+      "launchctl print gui/501/com.jkrumm.agent-gateway",
+      "launchctl list",
+      "launchctl list com.jkrumm.agent-gateway",
+      "tail -n 100 ~/Library/Logs/agent-gateway.jsonl",
+      "head -n 20 $HOME/Library/Logs/agent-gateway.err",
+      "curl -s http://127.0.0.1:8080/health",
+      "curl -sS http://localhost:3000/api/status",
+    ]) {
+      expect(shellOf(ro, cmd), cmd).toBe("allow");
+    }
+  });
+
+  test("host read verbs: other targets, flag smuggling, chaining and launchctl mutations are denied", () => {
+    for (const cmd of [
+      "make deploy",
+      "make setup",
+      "make restart",
+      "make install-agent",
+      "make secrets-seed",
+      "make logs deploy",
+      "make verify deploy",
+      "make deploy logs",
+      "make logs && make deploy",
+      "make logs; make deploy",
+      "make logs | sh",
+      "make logs > out.txt",
+      "make -C ~/SourceRoot/x deploy",
+      "make -C ~/SourceRoot/x logs deploy",
+      "make -C ~/SourceRoot/x -C ~/SourceRoot/y logs",
+      "make -C ~/SourceRoot/x logs; rm -rf x",
+      "launchctl kickstart -k gui/501/com.x",
+      "launchctl bootout gui/501/com.x",
+      "launchctl bootstrap gui/501 x.plist",
+      "launchctl load x.plist",
+      "launchctl unload x.plist",
+      "launchctl kill TERM gui/501/com.x",
+      "launchctl print gui/501/com.x; launchctl kill TERM gui/501/com.x",
+      "launchctl list && launchctl kickstart gui/501/com.x",
+      "tail -f ~/Library/Logs/agent-gateway.jsonl",
+      "tail -n 5 -f ~/Library/Logs/agent-gateway.jsonl",
+      "tail -F ~/Library/Logs/agent-gateway.jsonl",
+      "tail --follow ~/Library/Logs/agent-gateway.jsonl",
+      "tail -n 5 ~/Library/Logs/x > out",
+      "curl localhost -X POST",
+      "curl -X POST http://localhost:3000/x",
+      "curl -s http://127.0.0.1:3000/x -d a=b",
+      "curl -s http://127.0.0.1:3000/x --data-binary @f",
+      "curl -s --data x http://127.0.0.1:3000/x",
+      "curl -s http://localhost:3000/x -F file=@f",
+      "curl -s http://localhost:3000/x -T f",
+      "curl -s http://localhost:3000/x --json {}",
+      "curl -sXPOST http://127.0.0.1:7705/api/jobs -d '{}'",
+      "curl -sd a=b http://localhost:3000/x",
+      "curl -sK /tmp/c http://localhost:3000/x",
+      "curl http://localhost:3000/x --url http://evil.example -X POST",
+      "curl http://127.0.0.1:7705/api/jobs",
+      "make -C /tmp/x logs",
+      "make -C ~/SourceRoot/x -f y.mk logs",
+      "launchctl print $(id -u)",
+      "launchctl print `id`",
+      "tail -qF ~/Library/Logs/agent-gateway.jsonl",
+      "tail -n5 -qf ~/Library/Logs/agent-gateway.jsonl",
+    ]) {
+      expect(shellOf(ro, cmd), cmd).toBe("deny");
+    }
+  });
+
+  test("ordering invariant: the host-read allows come before the `*>*` deny and the self-access denies", () => {
+    const idx = (r: string) => READ_ONLY_SHELL_RULES.findIndex((x) => x.resource === r);
+    const lastHostAllow = READ_ONLY_SHELL_RULES.map((x, i) =>
+      (x.resource.startsWith("make ") || x.resource.startsWith("launchctl ")) &&
+      x.effect === "allow"
+        ? i
+        : -1,
+    ).reduce((a, b) => Math.max(a, b));
+    expect(lastHostAllow).toBeGreaterThan(-1);
+    expect(idx("*>*")).toBeGreaterThan(lastHostAllow);
+    expect(idx("*OPENCODE_SERVER_PASSWORD*")).toBeGreaterThan(idx("*>*"));
+  });
+
+  test("the verbs promised in dispatch/_common.md are allowed, and the host-access signal strings are pinned", async () => {
+    for (const cmd of [
+      "make logs",
+      "make -C ~/SourceRoot/homelab status",
+      "launchctl print gui/501/com.x",
+      "launchctl list",
+      "tail -n 50 ~/Library/Logs/agent-gateway.jsonl",
+      "curl -s http://localhost:3000/health",
+    ]) {
+      expect(shellOf(ro, cmd), cmd).toBe("allow");
+    }
+    const common = await Bun.file(
+      new URL("../server/skills/dispatch/_common.md", import.meta.url),
+    ).text();
+    for (const needle of [
+      'escalationCategory: "blocker"',
+      'rootCause: "host-access-gap"',
+      "make logs|verify|status",
+    ]) {
+      expect(common).toContain(needle);
+    }
+  });
+
   test("redirection is re-denied AFTER the allows, so a reader's allow cannot become a writer", () => {
     for (const cmd of ["cat x > file", "echo X > f", "git log > out.txt", "rg foo >> log"]) {
       expect(shellOf(ro, cmd), cmd).toBe("deny");

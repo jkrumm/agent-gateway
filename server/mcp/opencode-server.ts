@@ -95,6 +95,8 @@ function serverSelfAccessDenyRules(): OpencodePermissionRule[] {
     "*IU_ANTHROPIC_BASE*",
     ...ports,
     "*/api/session*",
+    // The gateway's own job API (no auth): a worker has no business reading or writing it.
+    "*:7705*",
   ].map((resource) => shell(resource, "deny"));
 }
 
@@ -163,9 +165,86 @@ export const READ_ONLY_SHELL_RULES: readonly OpencodePermissionRule[] = [
   shell("rg *--pre=*", "deny"),
   // git diff/log/show --output=<file> writes to a file.
   shell("git * --output*", "deny"),
+  ...hostReadShellRules(),
   shell("*>*", "deny"),
   ...serverSelfAccessDenyRules(),
 ];
+
+/** Host read verbs for investigate episodes (Wave 12): `make logs|verify|status`, `launchctl
+ *  print|list`, bounded `tail`/`head` on `~/Library/Logs`, and loopback `curl` GET. They sit AFTER
+ *  the generic allows and BEFORE the `*>*` deny, so a redirect can never ride on an allow (last match wins). A pattern without a trailing
+ *  ` *` matches the exact command only, so `make logs deploy` never matches `make logs`; the
+ *  `-C <dir> <target>` form allows exactly one space-free directory and one target, and
+ *  `make -C * * ?*` re-denies anything with more words. Like the rest of this list it matches
+ *  command TEXT: a cost-raising boundary, not a sandbox. */
+function hostReadShellRules(): OpencodePermissionRule[] {
+  const roots = [join(homedir(), "SourceRoot"), "~/SourceRoot", "$HOME/SourceRoot"];
+  const targets = ["logs", "verify", "status"];
+  return [
+    ...targets.flatMap((t) => [
+      shell(`make ${t}`, "allow"),
+      ...roots.map((r) => shell(`make -C ${r}/* ${t}`, "allow")),
+    ]),
+    // Any other make target, an extra word after -C <dir> <target>, or a chained command.
+    shell("make -C * * ?*", "deny"),
+    shell("make *;*", "deny"),
+    shell("make *&*", "deny"),
+    shell("make *|*", "deny"),
+    shell("make *$(*", "deny"),
+    shell("make *`*", "deny"),
+    shell("make *<(*", "deny"),
+    shell("launchctl print *", "allow"),
+    shell("launchctl list *", "allow"),
+    ...[
+      "kickstart",
+      "bootout",
+      "bootstrap",
+      "load",
+      "unload",
+      "kill",
+      "remove",
+      "enable",
+      "disable",
+    ].map((verb) => shell(`launchctl ${verb} *`, "deny")),
+    shell("launchctl *;*", "deny"),
+    shell("launchctl *&*", "deny"),
+    shell("launchctl *|*", "deny"),
+    shell("launchctl *$(*", "deny"),
+    shell("launchctl *`*", "deny"),
+    shell("launchctl *<(*", "deny"),
+    // A follow (also clustered, `-qF`) would never return; the generic `tail *`/`head *` allows
+    // already cover `~/Library/Logs`, and a bare `tail` is 10 lines.
+    shell("tail -*f*", "deny"),
+    shell("tail * -*f*", "deny"),
+    shell("tail -*F*", "deny"),
+    shell("tail * -*F*", "deny"),
+    shell("tail --follow*", "deny"),
+    shell("tail * --follow*", "deny"),
+    // Loopback curl is a read: no method override, body, upload, form or config, in any clustered
+    // short form (`-sXPOST`, `-sd x`) too. Over-matching a header that happens to contain the letter
+    // is accepted; that is the safe side.
+    ...["localhost", "127.0.0.1"].flatMap((host) =>
+      [
+        "-*X*",
+        "-*d*",
+        "-*T*",
+        "-*F*",
+        "-*K*",
+        "--request*",
+        "--data*",
+        "--upload-file*",
+        "--form*",
+        "--json*",
+        "--config*",
+        "--url*",
+      ].flatMap((flag) => [
+        shell(`curl *${host}* ${flag}`, "deny"),
+        shell(`curl ${flag} *${host}*`, "deny"),
+        shell(`curl * ${flag} *${host}*`, "deny"),
+      ]),
+    ),
+  ];
+}
 
 /** `agw-readonly`: investigate / author / check / review workers. Catch-all deny first, so
  *  anything not named below (including Code Mode's `execute`, MCP tools and every future
