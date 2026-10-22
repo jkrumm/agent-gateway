@@ -146,7 +146,7 @@ caller (today: warden) sends a `human` verdict with no `escalationCategory` stra
 **A host-access gap is a signal, not a question.** Investigate episodes can read the host through
 `make logs|verify|status` (bare, or `make -C ~/SourceRoot/<repo> <target>`), `launchctl print
 <domain>/<label>` and `launchctl list`, `tail`/`head -n N` on `~/Library/Logs/**`, and `curl` GET to
-`localhost`/`127.0.0.1`. If you still cannot read what you need, do not ask the owner to grant
+`localhost`/`127.0.0.1`. One plain command per call: no pipes, no `2>&1`, no `;`/`&&` (any redirect or chain is refused), and the `read`/`grep` tools cannot reach `~/Library/Logs`, so use `tail -n N`. If you still cannot read what you need, do not ask the owner to grant
 access: name the exact command you needed in `verdict` and return `nextAction: "human"`,
 `escalationCategory: "blocker"`, `rootCause: "host-access-gap"` (the key warden matches on).
 
