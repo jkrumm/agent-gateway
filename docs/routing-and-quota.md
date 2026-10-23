@@ -625,6 +625,16 @@ bench at effort `high`: terra ~$0.07 / 23s / 1 finding, v4.1-flash $0.013 / 108s
 findings (terra's one included); the latency hides behind the angle phase. Still cross-lab
 against the Anthropic angles, which is the point of the seat.
 
+### Review depth (review_router output, gated)
+
+The `review_router` single-shot also answers `depth` (`light` | `standard` | `deep`) and a one-line
+`depthReason`. No route changes: it rides the same `review_router` call. Caller `depth` > router >
+fallback `deep`. Logged always as `review.depth`. With `AGENT_GATEWAY_REVIEW_DEPTH_GATING=1` (default
+off) light runs senior-dev + adversary, standard runs the floor + router angles without OCR, and
+deep runs everything with OCR. Off changes nothing but the log line. Replay the router over stored
+reviews with `scripts/replay-depth.ts` before enabling the flag; it reports lost blocking findings.
+Full table and reasoning: `server/skills/review/README.md` § Depth.
+
 ### review_ocr
 
 review_ocr: the `ocr` CLI (server/lib/ocr.ts) only ever consumes `.model` — it is not a

@@ -45,14 +45,27 @@ could plausibly _violate_ it. The checklist is a prompt for your judgment, not a
 rows are already owned by reviewers you cannot select (the baseline and the file-type floor);
 they are listed so you can confirm the dimension is covered, not so you can route to it.
 
+## Review depth
+
+Also judge how deep this diff needs reviewing: `light`, `standard` or `deep`. Risk decides it,
+not line count — a 300-line rename can be `light`, a 12-line token check can be `deep`.
+
+- **light** — mechanical or low-risk: docs, test-only, renames, config values, formatting, dependency bumps with no behaviour change.
+- **standard** — ordinary local logic in one or two files, no risk trigger below.
+- **deep** — any of: cross-file logic, auth/secrets/security, data or migrations, concurrency, a public API contract, or any diff where a reviewer exploring the whole repo would plausibly find something the diff alone hides.
+
+When unsure between two depths, pick the deeper one.
+
 ## Output
 
-Return ONLY a JSON object: the angle keys to add plus a one-line rationale.
+Return ONLY a JSON object: the angle keys to add, a one-line rationale, the depth and a one-line depth reason.
 
 ```json
 {
   "angles": ["security", "resilience"],
-  "rationale": "Touches token validation (security) and adds a persisted job row plus a LaunchAgent plist change (resilience)."
+  "rationale": "Touches token validation (security) and adds a persisted job row plus a LaunchAgent plist change (resilience).",
+  "depth": "deep",
+  "depthReason": "Auth token validation across two files; a whole-repo explorer could find a second caller."
 }
 ```
 
@@ -61,3 +74,4 @@ Rules:
 - Only use keys from the list above. Never invent keys. Never include `architect`, `senior-dev`, `frontend`, `backend`, `typescript`, or `qa`.
 - Be selective: most diffs need 0–2 extra angles. A trivial diff needs none.
 - Judge by what the code _does_, not just file names.
+- `depth` is one of `light`, `standard`, `deep`; `depthReason` is one line.
