@@ -619,7 +619,11 @@ starving the answer). `harness` is inert, as on every non-session transport.
 
 ### adversary
 
-adversary sits alone: its own model (gpt-5.6-terra), same iu-openai transport as VISION.
+adversary sits alone: same iu-openai transport as VISION. deepseek-v4.1-flash since
+2026-10-23 — gpt-5.6-terra before, ~$10/day of IU spend at ~150 reviews/day. A same-diff
+bench at effort `high`: terra ~$0.07 / 23s / 1 finding, v4.1-flash $0.013 / 108s / 5
+findings (terra's one included); the latency hides behind the angle phase. Still cross-lab
+against the Anthropic angles, which is the point of the seat.
 
 ### review_ocr
 

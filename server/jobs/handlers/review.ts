@@ -898,28 +898,26 @@ export async function routeExtraAngles(
 
 // ── Adversary critic (cross-family, non-agentic) ──────────────────────────────
 //
-// One single HTTPS call to the IU OpenAI transport (gpt-5.6-terra) running in
-// parallel with the claude-sonnet-5 angle sessions. Purpose: kill the implicit
-// self-attribution bias every same-family multi-reviewer pipeline has, by
-// adding one genuinely off-policy critic. Fail-soft (returns AngleResult with
-// failureReason on any error so synthesis treats it like a degraded angle, not
-// a pipeline crash).
+// One single HTTPS call to the IU OpenAI transport (`routeFor("adversary")`) running in
+// parallel with the angle sessions. Purpose: kill the implicit self-attribution bias every
+// same-family multi-reviewer pipeline has, by adding one genuinely off-policy critic — the
+// angles run on Anthropic models, so the adversary must not. Fail-soft (returns AngleResult
+// with failureReason on any error so synthesis treats it like a degraded angle, not a
+// pipeline crash).
 //
-// gpt-5.6-terra is a reasoning model, with two non-obvious wiring rules:
+// Model history: gpt-5.6-terra until 2026-10-23, then deepseek-v4.1-flash for cost. Same
+// diff, same prompt, effort "high": terra ~$0.07 / 23s / 1 finding, v4.1-flash $0.013 /
+// 108s / 5 findings (including terra's one, graded improvement rather than blocking). The
+// extra latency hides behind the 60–120s angle phase.
 //
-//  1. It accepts ONLY the default temperature (1) and 400s on any explicit
-//     value, so no temperature is sent. The IU gateway surfaces that 400 as a
-//     503, which iuFetch treats as retryable — a stray `temperature: 0` would
-//     burn all three attempts and then fail soft, silently removing the
-//     adversary from every review while the pipeline still looked green.
-//  2. Omitting `reasoning_effort` is NOT a neutral default: it behaves as
-//     "none", so the model answers with zero thinking while still billing at
-//     the reasoning tier. Measured on a real 7.5K-char diff, effort drives how
-//     deep the critique goes: "none"/"medium" stopped at a surface offset bug,
-//     while "high" reached the subtler token-derivation bug ~50 lines further
-//     in. "high" costs ~$0.08 and ~50s — and since the adversary runs in
-//     parallel with the 60–120s angle phase, that latency is free. "xhigh"
-//     doubled the thinking tokens without finding more.
+// Wiring rules learned on terra, kept because they are harmless on any reasoning model:
+//
+//  1. No explicit temperature. terra 400s on anything but the default, which the IU
+//     gateway surfaces as a retryable 503 — a stray `temperature: 0` burns all three
+//     attempts and then fails soft, silently removing the adversary from every review.
+//  2. `reasoning_effort` is always sent: omitting it behaved as "none" on terra (zero
+//     thinking, billed at the reasoning tier), and effort drove how deep the critique
+//     went. "xhigh" doubled the thinking tokens without finding more.
 //
 // Truncated at 200K chars so a pathological huge diff can't blow the request.
 

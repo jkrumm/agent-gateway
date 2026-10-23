@@ -264,7 +264,8 @@ const ANGLE_OC: ToolRoute = {
 // VISION: the IU OpenAI vision transport (read_image, read_drawing) — no runSession, no fallback.
 // SINGLE_SHOT: `triage` and review's angle router — one tool-less JSON completion over the
 //   iu-openai transport, no session overhead, no Max lane, `harness` inert.
-// adversary sits alone: its own model, same iu-openai transport as VISION.
+// adversary sits alone: same iu-openai transport as VISION. deepseek-v4.1-flash since 2026-10-23
+//   (was gpt-5.6-terra — ~$10/day of IU spend; still cross-lab against the Haiku angles).
 const CLASSIFY: ToolRoute = {
   model: HAIKU_5_5,
   backend: "iu",
@@ -342,7 +343,7 @@ const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
     harness: "claude",
   },
   adversary: {
-    model: "gpt-5.6-terra",
+    model: DEEPSEEK_V41_FLASH,
     backend: "iu",
     fallback: null,
     transport: "iu-openai",

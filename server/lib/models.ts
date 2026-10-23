@@ -258,8 +258,8 @@ const MODELS: readonly ModelEntry[] = [
   },
 
   // ── GPT ids: Responses wire ONLY, opencode `iu-responses` provider ───────────────────
-  // gpt-5.6-terra is verified by the adversary route (single-shot Chat Completions via the
-  // iu-openai transport, in routing.ts since 2026-07-16) — that is evidence the id is served
+  // gpt-5.6-terra was verified by the adversary route (single-shot Chat Completions via the
+  // iu-openai transport, 2026-07-16 → 2026-10-23, when adversary moved to deepseek-v4.1-flash) — that is evidence the id is served
   // and answers, NOT of an agent loop over the Responses wire.
   {
     id: "gpt-6.1-sol",

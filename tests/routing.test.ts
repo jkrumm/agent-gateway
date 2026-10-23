@@ -164,9 +164,9 @@ describe("buildRoutingTable defaults", () => {
     }
   });
 
-  test("adversary stays gpt-5.6-terra on iu, no fallback, over the fixed iu-openai transport", () => {
+  test("adversary is deepseek-v4.1-flash on iu, no fallback, over the fixed iu-openai transport", () => {
     expect(routes.adversary).toEqual({
-      model: "gpt-5.6-terra",
+      model: "deepseek-v4.1-flash",
       backend: "iu",
       fallback: null,
       transport: "iu-openai",
@@ -978,7 +978,7 @@ describe("routeFor / describeRoute", () => {
       `${HAIKU_5_5} on iu via opencode (fallback ${SONNET} on max)`,
     );
     expect(describeRoute(routeFor("otel"))).toBe(`${SONNET} on max (fallback ${SONNET} on iu)`);
-    expect(describeRoute(routeFor("adversary"))).toBe("gpt-5.6-terra on iu");
+    expect(describeRoute(routeFor("adversary"))).toBe("deepseek-v4.1-flash on iu");
   });
 });
 
