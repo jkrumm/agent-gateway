@@ -220,12 +220,13 @@ string, so its own IU-billed token spend (`review_ocr` in the `agent-gateway-iu`
 effort's second review pass doubled it — see the `review_ocr` comment in
 `server/lib/routing.ts` for the full bake-off.
 
-The adversary model is a reasoning model — it thinks before answering, so it is
-slower (~50s) and pricier ($2.50/$15 per 1M, ~$0.08 a review) than the
-non-reasoning model it replaced, but it is a stronger critic and still a single
-call with no agent loop. Two wiring rules are easy to get wrong:
+The adversary model (`routeFor("adversary")`, deepseek-v4.1-flash since 2026-10-23,
+gpt-5.6-terra before) is a reasoning model run as a single call with no agent loop:
+~$0.013 and ~108s a review, which hides behind the angle phase. Numbers and the
+switch rationale: `docs/routing-and-quota.md` § adversary. Two wiring rules were
+measured on terra and are kept for any reasoning model:
 
-- **`temperature` must not be sent.** It accepts only the default (1) and 400s
+- **`temperature` must not be sent.** terra accepts only the default (1) and 400s
   on anything else — and the IU gateway relays that 400 as a _retryable-looking_
   503, so a stray `temperature: 0` burns every `iuFetch` attempt and then fails
   soft, silently dropping the adversary from every review while the pipeline

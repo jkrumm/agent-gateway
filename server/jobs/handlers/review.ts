@@ -7,6 +7,7 @@ import { claudeSafeRoute, routeFor, routeForReviewAngle } from "../../lib/routin
 import { textComplete } from "../../lib/iu-openai.ts";
 import { dataBlock, newFenceNonce } from "../../lib/prompt-fence.ts";
 import { parseJsonLoose, singleShotJson } from "../../lib/single-shot.ts";
+import { getModel } from "../../lib/models.ts";
 import { countChangedLines, runOcrReview, type RunOcrReviewResult } from "../../lib/ocr.ts";
 import {
   REACT_DOCTOR_FAILED_PREFIX,
@@ -910,7 +911,7 @@ export async function routeExtraAngles(
 // 108s / 5 findings (including terra's one, graded improvement rather than blocking). The
 // extra latency hides behind the 60–120s angle phase.
 //
-// Wiring rules learned on terra, kept because they are harmless on any reasoning model:
+// Wiring rules measured on terra; unverified on v4.1-flash but harmless to keep:
 //
 //  1. No explicit temperature. terra 400s on anything but the default, which the IU
 //     gateway surfaces as a retryable 503 — a stray `temperature: 0` burns all three
@@ -923,6 +924,10 @@ export async function routeExtraAngles(
 
 const ADVERSARY_MODEL = routeFor("adversary").model;
 const ADVERSARY_EFFORT = "high" as const;
+// The model's full output limit, explicit rather than the gateway default: at effort "high"
+// v4.1-flash spent ~19.5k reasoning tokens on a 2k-token diff, past the 16k single-shot
+// floor, and a starved budget surfaces as empty content and a silently dropped critic.
+const ADVERSARY_MAX_TOKENS = getModel(ADVERSARY_MODEL)?.limit.output;
 const ADVERSARY_MAX_DIFF_CHARS = 200_000;
 
 const ADVERSARY_OUTPUT = z.object({
@@ -957,6 +962,7 @@ async function runAdversaryAngle(opts: {
       model: ADVERSARY_MODEL,
       tool: "review:adversary",
       reasoningEffort: ADVERSARY_EFFORT,
+      maxTokens: ADVERSARY_MAX_TOKENS,
     });
     opts.bump?.("adversary: parsing");
 
