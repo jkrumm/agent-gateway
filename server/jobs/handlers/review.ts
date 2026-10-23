@@ -4,7 +4,7 @@ import { randomUUID } from "crypto";
 import { z } from "zod";
 import { runSession, SessionDetachedError, zodValidator } from "../../mcp/session-runner.ts";
 import { claudeSafeRoute, routeFor, routeForReviewAngle } from "../../lib/routing.ts";
-import { textComplete } from "../../lib/iu-openai.ts";
+import { textComplete, type IuUsage } from "../../lib/iu-openai.ts";
 import { dataBlock, newFenceNonce } from "../../lib/prompt-fence.ts";
 import { parseJsonLoose, singleShotJson } from "../../lib/single-shot.ts";
 import { getModel } from "../../lib/models.ts";
@@ -126,6 +126,10 @@ async function mapWithConcurrency<T, R>(
 
 // ── Input schema ─────────────────────────────────────────────────────────────
 
+// Review depth decides how much of the pipeline a diff earns when `AGENT_GATEWAY_REVIEW_DEPTH_GATING=1`.
+export const REVIEW_DEPTHS = ["light", "standard", "deep"] as const;
+export type ReviewDepth = (typeof REVIEW_DEPTHS)[number];
+
 export const REVIEW_INPUT = z.object({
   cwd: z
     .string()
@@ -161,6 +165,12 @@ export const REVIEW_INPUT = z.object({
     .optional()
     .describe(
       "Explicit reviewer angles to run, overriding the router. Valid: architect, senior-dev, frontend, backend, typescript, qa, security, performance, concurrency, data-migration, api-contract, resilience. Baseline architect + senior-dev are always included. Omit to let the router pick based on the diff.",
+    ),
+  depth: z
+    .enum(REVIEW_DEPTHS)
+    .optional()
+    .describe(
+      "Review depth: light (mechanical/docs/test-only/rename/config-value), standard (ordinary local logic), deep (cross-file logic, auth/secrets, data/migration, concurrency, public API contract). Wins over the router's pick. Only changes what runs when AGENT_GATEWAY_REVIEW_DEPTH_GATING=1; omit to let the router decide.",
     ),
   model: z
     .string()
@@ -808,9 +818,13 @@ export const ALL_ANGLE_LABELS: Record<string, string> = {
   ...ROUTER_ANGLE_LABELS,
 };
 
+// A router answer with a missing or unknown `depth` parses as undefined, so an old-style answer
+// stays valid and the review falls back to `deep`.
 const ROUTER_OUTPUT = z.object({
   angles: z.array(z.string()),
   rationale: z.string().optional(),
+  depth: z.enum(REVIEW_DEPTHS).optional().catch(undefined),
+  depthReason: z.string().optional().catch(undefined),
 });
 
 // The router sees the whole diff inline (no tools to fetch it) — bounded like the adversary's.
@@ -846,12 +860,27 @@ export async function routeExtraAngles(
   diff: string,
   bump?: (label: string) => void,
 ): Promise<AgentConfig[]> {
+  return (await routeReview(diff, bump)).angles;
+}
+
+/** The router's full answer: extra angles plus the review depth it judged the diff at. `depth`
+ *  is undefined whenever the router failed or omitted it — the caller falls back to `deep`. */
+export async function routeReview(
+  diff: string,
+  bump?: (label: string) => void,
+): Promise<{
+  angles: AgentConfig[];
+  depth?: ReviewDepth;
+  depthReason?: string;
+  /** The router call's IU usage; absent when the router failed. */
+  usage?: IuUsage;
+}> {
   let prompt: string;
   try {
     prompt = await loadAnglePrompt("router");
   } catch (err) {
     logger.error({ tool: "review", error: String(err) }, "router prompt load failed");
-    return [];
+    return { angles: [] };
   }
   const diffTrimmed =
     diff.length > ROUTER_MAX_DIFF_CHARS
@@ -870,12 +899,13 @@ export async function routeExtraAngles(
 
   bump?.("router: requesting");
   let data: z.infer<typeof ROUTER_OUTPUT>;
+  let usage: IuUsage | undefined;
   try {
     // No model override here, deliberately: this is the cheap single-shot tier
     // (review_router), not the judgment work a caller's `model` override is meant to
     // re-route. Re-pointing the router along with the angle/synthesis override would silently
     // widen what the knob does — don't "fix" this inconsistency.
-    ({ data } = await singleShotJson({
+    ({ data, usage } = await singleShotJson({
       tool: "review:router",
       prompt,
       schema: ROUTER_OUTPUT,
@@ -886,15 +916,60 @@ export async function routeExtraAngles(
       { tool: "review", error: String(err) },
       "router failed — using deterministic angles only",
     );
-    return [];
+    return { angles: [] };
   }
 
   const picked = data.angles.filter((a) => a in ROUTER_ANGLE_LABELS);
   logger.info(
-    { tool: "review", routerAngles: picked, rationale: data.rationale },
+    { tool: "review", routerAngles: picked, rationale: data.rationale, routerDepth: data.depth },
     "router selected extra angles",
   );
-  return picked.map((a) => ({ angle: a, label: ROUTER_ANGLE_LABELS[a] }));
+  return {
+    angles: picked.map((a) => ({ angle: a, label: ROUTER_ANGLE_LABELS[a] })),
+    depth: data.depth,
+    depthReason: data.depthReason,
+    usage,
+  };
+}
+
+/** Effective depth: a caller's `depth` wins, then the router's, then `deep` (router failure
+ *  is today's behaviour, so it must keep everything on). */
+export function resolveReviewDepth(
+  caller: ReviewDepth | undefined,
+  router: { depth?: ReviewDepth; depthReason?: string } | undefined,
+): { depth: ReviewDepth; source: "caller" | "router" | "fallback"; reason: string } {
+  if (caller) return { depth: caller, source: "caller", reason: "caller-specified" };
+  if (router?.depth) {
+    return { depth: router.depth, source: "router", reason: router.depthReason ?? "" };
+  }
+  return { depth: "deep", source: "fallback", reason: "no router depth; keeping full review" };
+}
+
+/** `AGENT_GATEWAY_REVIEW_DEPTH_GATING=1` turns depth into a gate; off (default) every depth runs
+ *  today's full pipeline and depth is only logged. */
+export function reviewDepthGating(): boolean {
+  return process.env.AGENT_GATEWAY_REVIEW_DEPTH_GATING === "1";
+}
+
+/** The angle set a depth earns when gating is on. `light` keeps only senior-dev (plus the
+ *  adversary, which is not an angle here); `standard` and `deep` keep today's floor + router. */
+export function gatedAngles(
+  depth: ReviewDepth,
+  floor: AgentConfig[],
+  routed: AgentConfig[],
+): AgentConfig[] {
+  if (depth === "light")
+    return capAngles(
+      floor.filter((a) => a.angle === "senior-dev"),
+      MAX_ANGLES,
+    );
+  return capAngles([...floor, ...routed], MAX_ANGLES);
+}
+
+/** Whether OCR runs for this depth. Gating off: always (today). Gating on: only `deep`; the
+ *  100-line floor inside `runOcrReview` still applies on top. */
+export function ocrRunsAtDepth(depth: ReviewDepth): boolean {
+  return !reviewDepthGating() || depth === "deep";
 }
 
 // ── Adversary critic (cross-family, non-agentic) ──────────────────────────────
@@ -1066,7 +1141,16 @@ export async function runReview(
   isCancelled?: (jobId: string) => boolean,
   resumeCtx?: ReviewResumeContext,
 ): Promise<ReviewOutput> {
-  const { cwd, scope, context, angles, pr, branch, model } = parseParams(REVIEW_INPUT, rawParams);
+  const {
+    cwd,
+    scope,
+    context,
+    angles,
+    pr,
+    branch,
+    model,
+    depth: reviewDepth,
+  } = parseParams(REVIEW_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
 
   if (pr != null && branch != null) {
@@ -1120,7 +1204,12 @@ export async function runReview(
   // OCR runs in parallel with the angle phase; the `finally` aborts and awaits it so an early
   // exit (throw, all-angles-failed) never leaves `ocr` reading a worktree being torn down.
   let ocrAbort: AbortController | undefined;
-  let ocrPromise: Promise<RunOcrReviewResult> | undefined;
+  // Replaced by the real run once started; until then (only possible under depth gating, before
+  // the router has answered) it is a resolved no-op, so the `finally` never awaits nothing.
+  let ocrPromise: Promise<RunOcrReviewResult> = Promise.resolve({
+    block: "OpenCodeReview: not started",
+    ran: false,
+  });
   // Same lifetime as `ocrPromise`: the `finally` awaits it so an early exit never leaves
   // react-doctor scanning a ref-mode worktree that is being torn down.
   let reactDoctorPromise: Promise<{ stdout: string; ok: boolean; elapsedMs: number }> | undefined;
@@ -1241,24 +1330,29 @@ export async function runReview(
     // (vs. was skipped) comes back on the result itself (`ran`) — no separate enable check
     // duplicated here.
     ocrAbort = new AbortController();
-    ocrPromise = runOcrReview({
-      cwd: effectiveCwd,
-      scope: resolvedScope,
-      changedLines: countChangedLines(diffResult.stdout),
-      refBaseOid: refMode ? baseOid : undefined,
-      context,
-      jobId,
-      onActivity: bump,
-      signal: ocrAbort.signal,
-    }).catch(
-      // Belt and braces: `runOcrReview` is contracted to never throw, but a caller awaiting
-      // `ocrPromise` unconditionally (this function's own `finally`) must not let a violation
-      // of that contract become an unhandled rejection or a crashed review.
-      (err): RunOcrReviewResult => ({
-        block: `OpenCodeReview: failed (${String(err)})`,
-        ran: false,
-      }),
-    );
+    const ocrSignal = ocrAbort.signal;
+    const startOcr = (): Promise<RunOcrReviewResult> =>
+      runOcrReview({
+        cwd: effectiveCwd,
+        scope: resolvedScope,
+        changedLines: countChangedLines(diffResult.stdout),
+        refBaseOid: refMode ? baseOid : undefined,
+        context,
+        jobId,
+        onActivity: bump,
+        signal: ocrSignal,
+      }).catch(
+        // Belt and braces: `runOcrReview` is contracted to never throw, but a caller awaiting
+        // `ocrPromise` unconditionally (this function's own `finally`) must not let a violation
+        // of that contract become an unhandled rejection or a crashed review.
+        (err): RunOcrReviewResult => ({
+          block: `OpenCodeReview: failed (${String(err)})`,
+          ran: false,
+        }),
+      );
+    // Gating on: the depth decides whether OCR runs at all, and that comes from the router, so
+    // OCR starts after Phase 1.5 instead (see there). Gating off: unchanged, started here.
+    if (!reviewDepthGating()) ocrPromise = startOcr();
 
     // Same shape as OCR: started once real changes are confirmed, awaited just before synthesis,
     // so its ~5-10 s (120 s worst case) never delays the router + angle phases.
@@ -1303,12 +1397,35 @@ export async function runReview(
 
     // ── Phase 1.5: Dynamic angle routing ─────
     const explicit = angles && angles.length > 0;
+    const routed = explicit ? undefined : await routeReview(diffResult.stdout, bump);
+    const depthDecision = resolveReviewDepth(reviewDepth, routed);
+    const gating = reviewDepthGating();
+    logger.info(
+      {
+        event: "review.depth",
+        tool: "review",
+        project: cwd,
+        depth: depthDecision.depth,
+        source: depthDecision.source,
+        reason: depthDecision.reason,
+        changedLines: countChangedLines(diffResult.stdout),
+        gating,
+      },
+      "review depth resolved",
+    );
     const agents = explicit
       ? resolveRequestedAngles(angles, floorAgents)
-      : capAngles(
-          [...floorAgents, ...(await routeExtraAngles(diffResult.stdout, bump))],
-          MAX_ANGLES,
-        );
+      : gating
+        ? gatedAngles(depthDecision.depth, floorAgents, routed?.angles ?? [])
+        : capAngles([...floorAgents, ...(routed?.angles ?? [])], MAX_ANGLES);
+    if (gating) {
+      ocrPromise = ocrRunsAtDepth(depthDecision.depth)
+        ? startOcr()
+        : Promise.resolve({
+            block: `OpenCodeReview: skipped (review depth ${depthDecision.depth}; AGENT_GATEWAY_REVIEW_DEPTH_GATING=1)`,
+            ran: false,
+          });
+    }
 
     logger.info(
       {

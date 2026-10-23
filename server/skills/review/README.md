@@ -101,6 +101,29 @@ when re-running a review). The baseline architect + senior-dev are always kept.
 | API Contract     | changes public API shape, request/response schema, versioning, error contracts   |
 | Resilience       | touches persisted/in-flight state, cleanup, timeouts/retries, or the deploy path |
 
+### Depth (router-judged, gated behind a flag)
+
+The router also answers `depth`: `light` (mechanical, docs, test-only, renames, config values),
+`standard` (ordinary local logic) or `deep` (cross-file logic, auth/secrets, data/migration,
+concurrency, public API contract, or anything a whole-repo explorer would plausibly catch).
+Risk decides it, not line count. A caller's `depth` input wins over the router's; with neither
+(router failed or explicit `angles`) the review is `deep`. The effective depth is logged on
+`review.depth` (`{depth, source: caller|router|fallback, reason, changedLines, gating}`).
+
+`AGENT_GATEWAY_REVIEW_DEPTH_GATING=1` makes depth a gate; **default off**, so nothing runs
+differently and depth is only logged:
+
+| Depth      | Angles run (gated)                | OCR                     |
+| ---------- | --------------------------------- | ----------------------- |
+| `light`    | senior-dev + adversary            | off                     |
+| `standard` | floor + router angles + adversary | off                     |
+| `deep`     | everything + adversary            | on (≥100 changed lines) |
+
+fallow and react-doctor run at every depth. Explicit `angles` still choose the angle set; the
+gate then only decides OCR. `scripts/replay-depth.ts` replays the router over stored done reviews
+(read-only jobs.db, rebuilt diffs, router call only, $1 IU budget) and reports which blocking
+findings a gated depth would have lost. Run it before turning the flag on.
+
 External tools run in parallel with agents:
 
 - **fallow review --brief** — dead code, complexity, duplication (if installed; needs a
