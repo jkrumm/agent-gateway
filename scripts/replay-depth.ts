@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { gitDiffCommand, routeReview, type ReviewDepth } from "../server/jobs/handlers/review.ts";
 import { countChangedLines } from "../server/lib/ocr.ts";
 import { routeFor } from "../server/lib/routing.ts";
+import { existsSync } from "node:fs";
 import { usageCostUsd } from "../server/lib/models.ts";
 
 const DB_PATH = join(homedir(), ".local/share/agent-gateway/jobs.db");
@@ -85,12 +86,14 @@ function loadDoneReviews(): DoneReview[] {
  *  script never runs a remote operation). */
 function rebuildDiff(params: Record<string, unknown>): { diff: string } | { skip: string } {
   const cwd = String(params.cwd ?? "");
+  if (!existsSync(cwd)) return { skip: "cwd no longer exists (torn-down worktree)" };
   let command: string;
   if (typeof params.pr === "number") {
     const head = `refs/pull/${params.pr}/head`;
     if (!gitOk(cwd, ["rev-parse", "--verify", "-q", head])) return { skip: `no local ${head}` };
-    const base = gitOut(cwd, ["merge-base", "master", head]);
-    if (!base) return { skip: "no merge-base with master" };
+    const base =
+      gitOut(cwd, ["merge-base", "master", head]) ?? gitOut(cwd, ["merge-base", "main", head]);
+    if (!base) return { skip: "no merge-base with master/main" };
     command = `git diff ${base} ${head}`;
   } else if (typeof params.branch === "string") {
     return { skip: "branch scope needs an origin fetch; not run here" };
