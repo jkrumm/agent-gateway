@@ -923,7 +923,10 @@ export async function routeExtraAngles(
 // Truncated at 200K chars so a pathological huge diff can't blow the request.
 
 const ADVERSARY_MODEL = routeFor("adversary").model;
-const ADVERSARY_EFFORT = "high" as const;
+// "medium", retried once at "low" on an empty answer: on v4.1-flash, "high" spent the whole
+// 65k budget on reasoning and returned no content in 2 of its first 12 reviews (2026-10-23).
+const ADVERSARY_EFFORT = "medium" as const;
+const ADVERSARY_RETRY_EFFORT = "low" as const;
 // The model's full output limit, explicit rather than the gateway default: at effort "high"
 // v4.1-flash spent ~19.5k reasoning tokens on a 2k-token diff, past the 16k single-shot
 // floor, and a starved budget surfaces as empty content and a silently dropped critic.
@@ -957,12 +960,22 @@ async function runAdversaryAngle(opts: {
     // (IDLE_TIMEOUT_MS, 5 min of silence) — thinking on a near-200K-char diff being far slower
     // than the ~50s a typical diff takes is not a problem once the call is judged on whether
     // it is still producing tokens, not on total elapsed time.
-    const result = await textComplete({
-      prompt,
-      model: ADVERSARY_MODEL,
-      tool: "review:adversary",
-      reasoningEffort: ADVERSARY_EFFORT,
-      maxTokens: ADVERSARY_MAX_TOKENS,
+    const complete = (reasoningEffort: typeof ADVERSARY_EFFORT | typeof ADVERSARY_RETRY_EFFORT) =>
+      textComplete({
+        prompt,
+        model: ADVERSARY_MODEL,
+        tool: "review:adversary",
+        reasoningEffort,
+        maxTokens: ADVERSARY_MAX_TOKENS,
+      });
+    const result = await complete(ADVERSARY_EFFORT).catch((err: unknown) => {
+      if (!String(err).includes("returned no content")) throw err;
+      logger.warn(
+        { tool: "review", angle },
+        "adversary returned no content — retrying at low effort",
+      );
+      opts.bump?.("adversary: retrying at low effort");
+      return complete(ADVERSARY_RETRY_EFFORT);
     });
     opts.bump?.("adversary: parsing");
 
