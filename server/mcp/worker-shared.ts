@@ -11,6 +11,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -328,7 +329,10 @@ export function recordSessionAccount(sessionId: string, pin: SessionAccountPin):
     }
     const dir = sessionAccountDir();
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, `${sessionId}.json`), JSON.stringify(pin));
+    // tmp + rename: a reader never sees a half-written pin
+    const tmp = join(dir, `.${sessionId}.${process.pid}.tmp`);
+    writeFileSync(tmp, JSON.stringify(pin));
+    renameSync(tmp, join(dir, `${sessionId}.json`));
   } catch {
     /* a missing pin only costs a re-pick */
   }
@@ -339,7 +343,9 @@ export function recordSessionAccount(sessionId: string, pin: SessionAccountPin):
 export function readSessionAccount(sessionId: string): SessionAccountPin | null {
   if (!SESSION_ID_RE.test(sessionId)) return null;
   try {
-    const raw = JSON.parse(readFileSync(join(sessionAccountDir(), `${sessionId}.json`), "utf8"));
+    const path = join(sessionAccountDir(), `${sessionId}.json`);
+    if (!lstatSync(path).isFile()) return null; // never follow a symlink or read a directory
+    const raw = JSON.parse(readFileSync(path, "utf8"));
     if (typeof raw?.account !== "string" || raw.account === "") return null;
     const dir = typeof raw.dir === "string" && raw.dir !== "" ? raw.dir : null;
     if (dir !== null && !existsSync(dir)) return null;

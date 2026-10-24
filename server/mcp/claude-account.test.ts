@@ -25,9 +25,11 @@ import {
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { __resetIuConfigForTests } from "../lib/iu-openai.ts";
 import {
   chmodSync,
   existsSync,
+  readdirSync,
   mkdirSync,
   readFileSync,
   symlinkSync,
@@ -119,13 +121,21 @@ describe("buildWorkerEnv — account", () => {
     });
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
   });
-  test("null unsets an inherited dir and keeps today's token behaviour", () => {
+  test("null unsets an inherited dir and drops that dir's token with it", () => {
     const env = buildWorkerEnv({
       ...base,
       claudeConfigDir: null,
-      baseEnv: { CLAUDE_CONFIG_DIR: ME_DIR, CLAUDE_CODE_OAUTH_TOKEN: "tok" },
+      baseEnv: { CLAUDE_CONFIG_DIR: "/h/.claude-me", CLAUDE_CODE_OAUTH_TOKEN: "tok" },
     });
     expect(env.CLAUDE_CONFIG_DIR).toBeUndefined();
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+  });
+  test("null with no inherited dir keeps today's token behaviour", () => {
+    const env = buildWorkerEnv({
+      ...base,
+      claudeConfigDir: null,
+      baseEnv: { CLAUDE_CODE_OAUTH_TOKEN: "tok" },
+    });
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("tok");
   });
   test("undefined (picker failed) leaves the inherited env untouched", () => {
@@ -224,7 +234,7 @@ describe("runSession — retry on the other account", () => {
     const r = await runSession(opts);
     expect(r.ok).toBe(true);
     expect(seen).toEqual(["iu", "me", "forced:iu"]);
-    expect(marks.map(([a]) => a)).toEqual(["iu"]);
+    expect(marks.map(([a]) => a)).toEqual(["iu", "me"]); // the second wall is marked before the iu fallback
     expect(marks[0]![1]).toBeGreaterThan(Date.now() / 1000);
   });
 
@@ -611,6 +621,13 @@ describe("round 3 — classifier, env, fail-closed, pins, clamp", () => {
     expect(isDefinitiveQuotaError("limit reached|1792000000")).toBe(true);
   });
 
+  test("generic 'quota exceeded' wording is not a wall (billing / transient)", () => {
+    expect(isDefinitiveQuotaError("You exceeded your current quota, please check your plan")).toBe(
+      false,
+    );
+    expect(isDefinitiveQuotaError("quota exceeded, retry shortly")).toBe(false);
+  });
+
   const base = {
     tool: "check",
     backend: "max" as const,
@@ -661,11 +678,18 @@ describe("round 3 — classifier, env, fail-closed, pins, clamp", () => {
         await resolveAttemptAccount({ tool: "check", hasIuFallback: false, excludeAccount: "me" }),
       ).toEqual({ kind: "walled", account: "me" });
     });
-    test("resolveAttemptAccount: picker unavailable with an exclude still runs inherited", async () => {
+    test("resolveAttemptAccount: picker unavailable + exclude: iu when a fallback exists, else inherited", async () => {
       __setAccountPickerForTests(async () => ({ pick: { kind: "unavailable" } }));
+      expect(
+        await resolveAttemptAccount({ tool: "check", hasIuFallback: true, excludeAccount: "me" }),
+      ).toEqual({ kind: "iu" });
       expect(
         await resolveAttemptAccount({ tool: "check", hasIuFallback: false, excludeAccount: "me" }),
       ).toEqual({ kind: "spawn", claudeConfigDir: undefined });
+      expect(await resolveAttemptAccount({ tool: "check", hasIuFallback: true })).toEqual({
+        kind: "spawn",
+        claudeConfigDir: undefined,
+      });
     });
   });
 
@@ -694,6 +718,17 @@ describe("round 3 — classifier, env, fail-closed, pins, clamp", () => {
         expect(existsSync(join(dir, kept))).toBe(true);
       }
       expect(() => pruneSessionAccounts()).not.toThrow();
+    });
+
+    test("a pin write leaves no tmp file; a symlinked or directory pin reads as null", () => {
+      const dir = pinDir();
+      recordSessionAccount("p5", { account: "iu", dir: null });
+      expect(readdirSync(dir)).toEqual(["p5.json"]);
+      symlinkSync(join(dir, "p5.json"), join(dir, "p6.json"));
+      mkdirSync(join(dir, "p7.json"));
+      expect(readSessionAccount("p5")).toEqual({ account: "iu", dir: null });
+      expect(readSessionAccount("p6")).toBeNull();
+      expect(readSessionAccount("p7")).toBeNull();
     });
 
     test("pin read validation: empty account, empty dir, missing dir", () => {
@@ -805,5 +840,86 @@ describe("runSessionAttempt — picked account end to end (stub spawn)", () => {
     const line = lines.find((l) => l.event === "session_env" && l.data.session === "sess-run-1");
     expect(line.data.account).toBe("me");
     expect(line.data.backend).toBe("max");
+  });
+});
+
+describe("runSession — wall on one account, retry on the other, second wall → iu (stub spawn)", () => {
+  const route: ToolRoute = {
+    model: "claude-sonnet-5-5",
+    backend: "max",
+    fallback: { backend: "iu" },
+    transport: "session",
+    harness: "claude",
+  };
+  const saved = { ...process.env };
+  afterEach(() => {
+    __setSpawnForTests();
+    __setAccountPickerForTests();
+    __setExhaustedMarkerForTests();
+    __resetBreakersForTests();
+    __resetFallbackLogForTests();
+    for (const k of [
+      "IU_API_KEY",
+      "IU_BASE_URL",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "AGENT_GATEWAY_SESSION_ACCOUNTS_DIR",
+      "AGENT_GATEWAY_CLAUDE_LOG_DIR",
+    ]) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    __resetIuConfigForTests();
+  });
+
+  const wall = (text: string) =>
+    `cat <<'EOF'\n${JSON.stringify({ type: "result", subtype: "success", is_error: true, result: text, num_turns: 0 })}\nEOF\nexit 1\n`;
+  const okRun = `cat <<'EOF'\n${JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "{}", session_id: "sess-iu", num_turns: 1 })}\nEOF\n`;
+
+  test("two Max spawns at most, the second on the other dir without the token; both accounts marked", async () => {
+    const work = mkdtempSync(join(tmpdir(), "acct-wall-"));
+    process.env.IU_API_KEY = "iu-key";
+    process.env.IU_BASE_URL = "https://iu.example/anthropic";
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "inherited-token";
+    process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR = join(work, "pins");
+    process.env.AGENT_GATEWAY_CLAUDE_LOG_DIR = join(work, "logs");
+    __resetIuConfigForTests();
+
+    const picks = [
+      { pick: { kind: "default" as const }, account: "iu" },
+      { pick: { kind: "dir" as const, dir: ME_DIR }, account: "me" },
+    ];
+    let pickCalls = 0;
+    __setAccountPickerForTests(async () => picks[pickCalls++] ?? { pick: { kind: "iu" as const } });
+    const marks: string[] = [];
+    __setExhaustedMarkerForTests(async (a) => {
+      marks.push(a);
+      return true;
+    });
+    const scripts = [
+      wall("Claude AI usage limit reached|1792000000"),
+      wall("5-hour limit reached"),
+      okRun,
+    ];
+    const envs: Record<string, string>[] = [];
+    __setSpawnForTests((_cmd, opts) => {
+      const script = scripts[envs.length] ?? wall("unexpected extra spawn");
+      envs.push(opts.env);
+      return Bun.spawn(["sh", "-c", script], { ...opts, stdin: "ignore" });
+    });
+
+    const r = await runSession({ cwd: work, prompt: "x", route, tool: "check" });
+
+    expect(r.ok).toBe(true);
+    expect(envs.length).toBe(3);
+    // spawn 1: default account (dir unset); spawn 2: the other account, no token
+    expect(envs[0]!.CLAUDE_CONFIG_DIR).toBeUndefined();
+    expect(envs[1]!.CLAUDE_CONFIG_DIR).toBe(ME_DIR);
+    expect(envs[1]!.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    // spawn 3 is the iu lane, not a third Max spawn
+    expect(envs[2]!.ANTHROPIC_BASE_URL).toBe("https://iu.example/anthropic");
+    expect(envs[2]!.ANTHROPIC_AUTH_TOKEN).toBe("iu-key");
+    expect(pickCalls).toBe(2);
+    // both walled accounts are marked, the second one before the iu fallback
+    expect(marks).toEqual(["iu", "me"]);
   });
 });
