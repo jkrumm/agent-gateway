@@ -157,7 +157,7 @@ const accountBin = (): string =>
 
 /** The picker CLI's env: the four vars it needs to find bun, the keychain and a temp dir —
  *  never the worker/parent credentials — plus the config dir when the call is about one. */
-function accountCliEnv(configDir?: string): Record<string, string> {
+export function accountCliEnv(configDir?: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of ["PATH", "HOME", "TMPDIR", "LANG"]) {
     const v = process.env[key];

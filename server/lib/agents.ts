@@ -6,7 +6,7 @@ import { appLogger as logger } from "../logger.ts";
 import type { JobRecord, JobStatus } from "../jobs/types.ts";
 import { listJobRecords } from "../jobs/store.ts";
 import { getGitStatus } from "./git.ts";
-import { renderQuotaHeader, type AccountQuota } from "./claude-usage.ts";
+import { accountColumnWidth, renderQuotaHeader, type AccountQuota } from "./claude-usage.ts";
 import { readSessionAccount } from "../mcp/worker-shared.ts";
 import type { WardenBoard } from "./warden-board.ts";
 import { renderWardenBlock } from "./warden-board.ts";
@@ -423,7 +423,9 @@ export interface DispatchJobRaw {
   createdAt: number;
   startedAt: number | null;
   finishedAt: number | null;
-  /** Account recorded at spawn, when the job's worker session was pinned. */
+  /** The worker's Claude session id, once known. */
+  sessionId?: string | null;
+  /** Account recorded at spawn (the session pin); filled by `buildSnapshot`. */
   account?: string | null;
 }
 
@@ -878,7 +880,9 @@ export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): 
   const color = opts?.color === true;
   const cols = opts?.cols;
   const lineMax = cols ?? MAX_LINE_CHARS;
-  const accountColWidth = opts?.quota ? 3 : 0;
+  const rowAccounts = snapshot.projects.flatMap((p) => p.agents.map((a) => a.account));
+  const idWidth = opts?.quota ? accountColumnWidth(opts.quota, rowAccounts) : 0;
+  const accountColWidth = opts?.quota ? idWidth + 1 : 0;
   const titleMax =
     (cols != null ? Math.max(MIN_TITLE_CHARS, cols - 40) : MAX_TITLE_CHARS) - accountColWidth;
   const standingMax = cols != null ? cols - 8 : MAX_STANDING_CHARS;
@@ -887,7 +891,7 @@ export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): 
   const lines: string[] = [];
 
   if (opts?.quota) {
-    for (const quotaLine of renderQuotaHeader(opts.quota, generatedAt)) {
+    for (const quotaLine of renderQuotaHeader(opts.quota, generatedAt, idWidth)) {
       lines.push(
         color ? clampVisible(`${DIM}${quotaLine}${RESET}`, lineMax) : clampLine(quotaLine, lineMax),
       );
@@ -978,7 +982,7 @@ export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): 
       const statePadded = agent.state.padEnd(9);
       const title = truncate(agent.title ?? "(untitled)", titleMax);
       const age = relativeAge(agent.lastActivityAt, generatedAt);
-      const accountCol = opts?.quota ? `${(agent.account ?? "?").padEnd(2)} ` : "";
+      const accountCol = opts?.quota ? `${(agent.account ?? "?").padEnd(idWidth)} ` : "";
       const base = `  ${icon} ${statePadded} ${accountCol}${title}  · ${age}`;
 
       if (color) {
@@ -1222,25 +1226,38 @@ export function collectDispatchJobs(records: JobRecord[], now: number): Dispatch
       createdAt: r.createdAt,
       startedAt: r.startedAt,
       finishedAt: r.finishedAt,
-      account: (r.sessionId ? readSessionAccount(r.sessionId)?.account : null) ?? null,
+      sessionId: r.sessionId,
     }))
     .filter((j) => j.cwd !== "");
 }
 
-// ── Session → account (the `session_env` line in ~/.claude/logs) ─────────────────────────────
+// ── Session → account ────────────────────────────────────────────────────────────────────────
 //
-// The hook / agent-gateway writes `{event:"session_env", data:{session, account}}` when a
-// session starts. An account never changes for a session, so a hit is cached forever; a miss is
-// retried at most every MISS_RETRY_MS (the line may not exist yet). Day files are ~300 KB, so a
-// miss scans only the newest SESSION_LOG_DAYS files.
+// Two sources, one memo. (1) The spawn pin `readSessionAccount` (agent-gateway workers, dispatch
+// jobs). (2) The `session_env` line `{event:"session_env", data:{session, account}}` in
+// ~/.claude/logs (herdr/claude panes). An account never changes for a session, so a hit is cached
+// for the process lifetime. A miss backs off exponentially (60 s … 10 min) because the line/pin
+// may simply not exist yet, and a session that never gets one must not cost a log scan per
+// snapshot. Both maps are capped. Per call the log day files are read at most once each
+// (newest SESSION_LOG_DAYS, ~300 KB apiece), and only when some id still misses after the pins.
 
 const SESSION_LOG_DAYS = 3;
 const MISS_RETRY_MS = 60_000;
+const MISS_RETRY_MAX_MS = 10 * 60_000;
+const MAX_TRACKED_SESSIONS = 2000;
 const sessionAccountCache = new Map<string, string>();
-const sessionAccountMisses = new Map<string, number>();
+const sessionAccountMisses = new Map<string, { at: number; n: number }>();
 
 const claudeLogDir = (): string =>
   process.env.AGENT_GATEWAY_CLAUDE_LOG_DIR ?? join(homedir(), ".claude", "logs");
+
+/** Drop the oldest-inserted entries until `map` is back at the cap. */
+function capMap<V>(map: Map<string, V>): void {
+  for (const key of map.keys()) {
+    if (map.size <= MAX_TRACKED_SESSIONS) return;
+    map.delete(key);
+  }
+}
 
 /** Pure: sessionId → account for every `session_env` line in `text` carrying an `account`;
  *  later lines win (the newest line is last). */
@@ -1260,46 +1277,63 @@ export function parseSessionAccounts(text: string): Map<string, string> {
   return out;
 }
 
-/** Resolve accounts for `sessionIds` from the log dir, through the process-lifetime cache. */
+/** Resolve accounts for `sessionIds` (pins first, then the session_env logs), through the
+ *  process-lifetime memo. Unknown ids are absent from the result. */
 export function resolveSessionAccounts(
-  sessionIds: string[],
+  sessionIds: Iterable<string>,
   now = Date.now(),
 ): Map<string, string> {
   const result = new Map<string, string>();
-  const missing: string[] = [];
-  for (const id of sessionIds) {
+  let missing: string[] = [];
+  for (const id of new Set(sessionIds)) {
     const hit = sessionAccountCache.get(id);
-    if (hit) result.set(id, hit);
-    else {
-      const lastMiss = sessionAccountMisses.get(id);
-      if (lastMiss == null || now - lastMiss >= MISS_RETRY_MS) missing.push(id);
+    if (hit) {
+      result.set(id, hit);
+      continue;
+    }
+    const miss = sessionAccountMisses.get(id);
+    if (miss && now - miss.at < Math.min(MISS_RETRY_MS * 2 ** (miss.n - 1), MISS_RETRY_MAX_MS)) {
+      continue;
+    }
+    const pinned = readSessionAccount(id)?.account;
+    if (pinned) {
+      sessionAccountCache.set(id, pinned);
+      result.set(id, pinned);
+    } else {
+      missing.push(id);
     }
   }
-  if (missing.length === 0) return result;
 
-  const wanted = new Set(missing);
-  try {
-    const dir = claudeLogDir();
-    const files = readdirSync(dir)
-      .filter((f) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(f))
-      .toSorted()
-      .toReversed()
-      .slice(0, SESSION_LOG_DAYS);
-    for (const file of files) {
-      const found = parseSessionAccounts(readFileSync(join(dir, file), "utf8"));
-      for (const [id, account] of found) {
-        if (!wanted.has(id) || sessionAccountCache.has(id)) continue;
-        sessionAccountCache.set(id, account);
-        result.set(id, account);
+  if (missing.length > 0) {
+    try {
+      const dir = claudeLogDir();
+      const files = readdirSync(dir)
+        .filter((f) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(f))
+        .toSorted()
+        .toReversed()
+        .slice(0, SESSION_LOG_DAYS);
+      for (const file of files) {
+        const found = parseSessionAccounts(readFileSync(join(dir, file), "utf8"));
+        for (const id of missing) {
+          const account = found.get(id);
+          if (account) {
+            sessionAccountCache.set(id, account);
+            result.set(id, account);
+          }
+        }
+        missing = missing.filter((id) => !result.has(id));
+        if (missing.length === 0) break;
       }
-      if (missing.every((id) => sessionAccountCache.has(id))) break;
+    } catch {
+      /* no log dir — everything stays unknown */
     }
-  } catch {
-    /* no log dir — everything stays unknown */
+    for (const id of missing) {
+      sessionAccountMisses.set(id, { at: now, n: (sessionAccountMisses.get(id)?.n ?? 0) + 1 });
+    }
+    capMap(sessionAccountMisses);
   }
-  for (const id of missing) {
-    if (!sessionAccountCache.has(id)) sessionAccountMisses.set(id, now);
-  }
+  for (const id of result.keys()) sessionAccountMisses.delete(id);
+  capMap(sessionAccountCache);
   return result;
 }
 
@@ -1369,9 +1403,17 @@ export async function buildSnapshot(staleHoursOverride?: number): Promise<Agents
   );
   const transcripts = new Map(tailEntries);
 
-  const dispatchJobs = collectDispatchJobs(listJobRecords(), now);
+  const dispatchRaw = collectDispatchJobs(listJobRecords(), now);
 
-  const accounts = resolveSessionAccounts([...sessionsByCwd.keys()], now);
+  // One resolve for panes and dispatch workers alike: only rows that have a session id.
+  const accounts = resolveSessionAccounts(
+    [...sessionsByCwd.keys(), ...dispatchRaw.flatMap((j) => (j.sessionId ? [j.sessionId] : []))],
+    now,
+  );
+  const dispatchJobs = dispatchRaw.map((j) => ({
+    ...j,
+    account: j.sessionId ? (accounts.get(j.sessionId) ?? null) : null,
+  }));
 
   const projects = mergeAgents({
     herdrAgents: herdrAgentsResult.items,
