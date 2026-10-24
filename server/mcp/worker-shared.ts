@@ -5,6 +5,9 @@
 // imports nothing from any of them. `session-runner.ts` re-exports `scrubSensitiveEnv`
 // and `usageLane` so existing importers keep resolving.
 
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 /** Env var names that look like a credential. Matched case-insensitively against the
  *  inherited environment and deleted before the worker is spawned. Deliberately broad —
  *  a false positive costs a worker a variable it almost certainly did not need, while a
@@ -97,4 +100,122 @@ export async function readTrimmedLines(
     reader.releaseLock();
   }
   return buf;
+}
+
+// ── Claude Max account pick (dotfiles docs/claude-accounts.md §Picker) ───────────────────
+//
+// Two Max subscriptions share the mini; the `claude-account` CLI chooses one per spawn. The
+// account is fixed for a session's life (the prompt cache is per organisation), so the pick
+// happens once per attempt, never mid-session. Every failure of the picker means "today's
+// behaviour": the inherited env, i.e. the default account.
+
+/** What `claude-account pick` answered. `default` = `unset CLAUDE_CONFIG_DIR` (account A),
+ *  `dir` = a second account's config dir, `iu` = no Max account has headroom (exit 3),
+ *  `unavailable` = the picker failed, timed out or printed something unrecognised. */
+export type AccountPick =
+  | { kind: "default" }
+  | { kind: "dir"; dir: string }
+  | { kind: "iu" }
+  | { kind: "unavailable" };
+
+/** Pure: parse the picker's stdout + exit code. Never throws. */
+export function parseAccountPick(stdout: string, exitCode: number): AccountPick {
+  const out = stdout.trim();
+  if (exitCode === 3) return out === "iu" ? { kind: "iu" } : { kind: "unavailable" };
+  if (exitCode !== 0) return { kind: "unavailable" };
+  if (out === "unset CLAUDE_CONFIG_DIR") return { kind: "default" };
+  const m = /^export CLAUDE_CONFIG_DIR=(?:'([^']+)'|"([^"]+)"|(\S+))$/.exec(out);
+  const dir = m?.[1] ?? m?.[2] ?? m?.[3];
+  return dir ? { kind: "dir", dir } : { kind: "unavailable" };
+}
+
+/** A pick plus the registry id of the chosen account (`claude-account account`), when known. */
+export interface AccountSelection {
+  pick: AccountPick;
+  /** Registry id (`a`, `b`, …). Undefined when the picker failed or the id lookup did. */
+  account?: string;
+}
+
+const ACCOUNT_CLI_TIMEOUT_MS = 5000;
+
+const accountBin = (): string =>
+  process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN ??
+  join(homedir(), ".local", "bin", "claude-account");
+
+/** Run the picker CLI with a hard 5 s cap (a CLI helper, not an agent run). `null` on any
+ *  failure — spawn error, timeout, non-zero exit other than 3. */
+async function runAccountCli(
+  args: string[],
+  env: Record<string, string | undefined>,
+): Promise<{ stdout: string; exitCode: number } | null> {
+  try {
+    const proc = Bun.spawn([accountBin(), ...args], {
+      stdout: "pipe",
+      stderr: "ignore",
+      env,
+    });
+    const timer = setTimeout(() => proc.kill("SIGKILL"), ACCOUNT_CLI_TIMEOUT_MS);
+    try {
+      const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+      return exitCode === 0 || exitCode === 3 ? { stdout, exitCode } : null;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return null;
+  }
+}
+
+/** Ask the picker for an account for `lane` and resolve its registry id. Never throws. */
+async function pickAccountViaCli(lane: string): Promise<AccountSelection> {
+  const picked = await runAccountCli(["pick", "--lane", lane], process.env);
+  if (!picked) return { pick: { kind: "unavailable" } };
+  const pick = parseAccountPick(picked.stdout, picked.exitCode);
+  if (pick.kind === "iu" || pick.kind === "unavailable") return { pick };
+  const env = { ...process.env };
+  if (pick.kind === "dir") env.CLAUDE_CONFIG_DIR = pick.dir;
+  else delete env.CLAUDE_CONFIG_DIR;
+  const id = await runAccountCli(["account"], env);
+  const account = id?.stdout.trim();
+  return { pick, ...(account ? { account } : {}) };
+}
+
+let accountPicker: (lane: string) => Promise<AccountSelection> = pickAccountViaCli;
+
+export function pickClaudeAccount(lane: string): Promise<AccountSelection> {
+  return accountPicker(lane);
+}
+
+/** Test seam: replace the picker; call with no argument to restore the real one. */
+export function __setAccountPickerForTests(fn?: (lane: string) => Promise<AccountSelection>): void {
+  accountPicker = fn ?? pickAccountViaCli;
+}
+
+async function markExhaustedViaCli(account: string, untilEpochS: number): Promise<void> {
+  await runAccountCli(
+    ["exhausted", "--account", account, "--until", String(untilEpochS)],
+    process.env,
+  );
+}
+
+let exhaustedMarker: (account: string, untilEpochS: number) => Promise<void> = markExhaustedViaCli;
+
+/** Mark `account` as out of quota until `untilEpochS` so the next pick routes around it. */
+export function markAccountExhausted(account: string, untilEpochS: number): Promise<void> {
+  return exhaustedMarker(account, untilEpochS);
+}
+
+export function __setExhaustedMarkerForTests(
+  fn?: (account: string, untilEpochS: number) => Promise<void>,
+): void {
+  exhaustedMarker = fn ?? markExhaustedViaCli;
+}
+
+/** Epoch seconds a quota wall lifts: the CLI's `limit reached|<epoch>` suffix when present,
+ *  else `nowMs` + 1 h. */
+export function quotaResetEpochS(text: string | undefined, nowMs: number): number {
+  const m = /limit reached\s*\|\s*(\d{10})\b/i.exec(text ?? "");
+  const fallback = Math.floor(nowMs / 1000) + 3600;
+  const epoch = m ? Number(m[1]) : fallback;
+  return epoch > nowMs / 1000 ? epoch : fallback;
 }

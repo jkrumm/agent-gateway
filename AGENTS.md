@@ -591,6 +591,18 @@ install-cli`): `curl --max-time 5` against the IU base (`IU_OPENAI_BASE`, else `
 else the `claude-sdk-base-url` Keychain item), then `exec timeout ${OPENCODE_SAFE_TIMEOUT:-120}
 opencode …`; exit 75 when unreachable. Never a bare `opencode run`.
 
+**Claude Max account pick (2026-10-24, dotfiles `docs/claude-accounts.md`).** Two Max subscriptions share
+the mini. Each `claude -p` attempt on the `max` backend asks `claude-account pick --lane agent-gateway:<tool>`
+(`pickClaudeAccount`, worker-shared.ts; 5 s cap, binary `~/.local/bin/claude-account` or
+`AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN`) and sets (`export`) or deletes (`unset`) `CLAUDE_CONFIG_DIR` in the
+worker env; any picker failure = today's inherited env. Exit 3 / `iu` ("no account has headroom") takes the
+existing `max`→`iu` fallback, only where the route declares an `iu` fallback. A worker whose
+`CLAUDE_CONFIG_DIR` is set never carries `CLAUDE_CODE_OAUTH_TOKEN` (it would override that account's login).
+A quota-flavoured failure with no output on a picked account makes `planNextAttempt` return `account-retry`:
+`runSession` runs `claude-account exhausted --account <id> --until <resets_at | now+1h>`, re-picks once
+(the other account, or `iu`), and only a second wall reaches the IU fallback. The account id rides in the
+`session_env` line as `account`. Resume (`--resume`) is not pinned to an account; the pick is per attempt.
+
 **`otel` also injects the real ClickStack/HyperDX MCP** (bearer-authed
 `http` server) into its own worker session — key resolution fails soft
 (local `.env`, then `HYPERDX_PROD_ACCESS_KEY`, then `secrets-run` — never a
