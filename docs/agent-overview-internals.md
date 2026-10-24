@@ -296,3 +296,28 @@ narrative"), never inline in an interactive session.
   the `howItGotHere` recency cap, the wikilink strip, and the tool-result/
   user-line exclusion in prose extraction, same convention as
   `overview`/`dispatch`.
+
+## Quota header and account column
+
+`GET /api/overview.txt` starts with one line per **enabled** account (`renderQuotaHeader`,
+`server/lib/claude-usage.ts`):
+
+```
+iu  5h 8% ↺2h31m · 7d 88% ↺Tue 17:00
+me  5h 3% ↺4h56m · 7d 0% ↺Sat 11:00 · stale
+```
+
+Markers: `exhausted until HH:MM` (while `exhausted_until` is in the future), `auth!`
+(`auth_ok === false`), `stale` (freshest sample older than 6 h, or none). Times are the mini's local
+time. Each agent row carries the account id after the state (`?` = unknown); `/api/agents.txt` is
+unchanged.
+
+Account per agent (`Agent.account`, also in the JSON): herdr/claude panes join their session id
+against the `session_env` lines (`account` field) in `~/.claude/logs/*.jsonl` — the newest 3 day files
+are scanned on a miss, a hit is cached for the process lifetime (a session never changes account), a
+miss is retried at most every 60 s. Dispatch jobs read the session→account pin written at spawn
+(`readSessionAccount`, keyed by the job's recorded session id).
+
+The JSON overview (`/api/overview`, hence the Argo push) adds `quota: {accounts: {<id>: …}}` with the
+same per-account object `GET /api/usage` returns. The server stays loopback-only; Tinycast reads
+`quota` from Argo.

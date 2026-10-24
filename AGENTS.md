@@ -393,6 +393,18 @@ snapshot, and marks a recommendation `recommendationStale: true` if the agent
 has been active since. Full reconciliation/fencing detail:
 `docs/agent-overview-internals.md`.
 
+**Multi-account quota.** Two Claude Max accounts (`iu`, `me`) run on the mini; the quota cache is
+owned by the dotfiles CLI `claude-account` and read via `claude-account usage --json`
+(`server/lib/claude-usage.ts`: 5 s timeout, 15 s memo, env scrubbed of credentials, null on
+failure). `GET /api/usage` → `{ok, data, accounts}`: `accounts` is keyed by id with
+`five_hour_pct, seven_day_pct, five_hour_resets_at, seven_day_resets_at` (epoch s),
+`five_hour_mins_left, auth_ok, exhausted_until, enabled, plan, updated_at` (epoch ms), `source`; a
+POST newer than the CLI sample overrides per window. `POST /api/usage` takes an optional `account`
+(`/^[a-z][a-z0-9-]{0,15}$/`, default `iu`); `data` stays the last `iu` POST (back-compat).
+`/api/overview` adds `quota: {accounts}` and per-agent `account`; `/api/overview.txt` gets a quota
+header line per enabled account and an account column. See `docs/agent-overview-internals.md`
+§ Quota header and account column.
+
 The `narrative` job writes/revises one project's Obsidian vault page from
 git log + session transcripts + `voice.md` — business terms, never a
 changelog; `changed: false` with no page is a correct default answer, not a
