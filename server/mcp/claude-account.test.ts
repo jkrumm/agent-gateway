@@ -787,6 +787,7 @@ describe("runSessionAttempt — picked account end to end (stub spawn)", () => {
     for (const k of [
       "AGENT_GATEWAY_SESSION_ACCOUNTS_DIR",
       "AGENT_GATEWAY_CLAUDE_LOG_DIR",
+      "AGENT_GATEWAY_SESSIONS_LOG",
       "CLAUDE_CODE_OAUTH_TOKEN",
     ]) {
       if (saved[k] === undefined) delete process.env[k];
@@ -801,6 +802,7 @@ describe("runSessionAttempt — picked account end to end (stub spawn)", () => {
     const envDump = join(work, "env.txt");
     process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR = join(work, "pins");
     process.env.AGENT_GATEWAY_CLAUDE_LOG_DIR = join(work, "logs");
+    process.env.AGENT_GATEWAY_SESSIONS_LOG = join(work, "sessions.jsonl");
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "inherited-token";
     __setAccountPickerForTests(async () => ({
       pick: { kind: "dir", dir: accountDir },
@@ -840,6 +842,13 @@ describe("runSessionAttempt — picked account end to end (stub spawn)", () => {
     const line = lines.find((l) => l.event === "session_env" && l.data.session === "sess-run-1");
     expect(line.data.account).toBe("me");
     expect(line.data.backend).toBe("max");
+
+    // The sessions log row has its own sessionId, so it must name the account itself.
+    const sessions = readFileSync(join(work, "sessions.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    expect(sessions.at(-1)).toMatchObject({ tool: "check", backend: "max", account: "me" });
   });
 });
 

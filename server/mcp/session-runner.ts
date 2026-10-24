@@ -1386,6 +1386,9 @@ async function runSessionAttempt<T = unknown>(
       model,
       backend,
       harness: "claude",
+      // usage-tracker attributes this row by it: `sessionId` here is not the Claude session id
+      // that session_env carries, so there is nothing to join on.
+      ...(backend === "max" && account ? { account } : {}),
       tsStart,
       tsEnd: new Date().toISOString(),
       outcome,
