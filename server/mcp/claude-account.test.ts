@@ -7,8 +7,13 @@ import { sessionEnvRecord } from "./session-core.ts";
 import {
   __resetAttemptRunnerForTests,
   __resetBreakersForTests,
+  __resetFallbackLogForTests,
   __setAttemptRunnerForTests,
+  backendFallbacksLastHour,
+  buildSessionArgs,
   buildWorkerEnv,
+  isDefinitiveQuotaError,
+  resolveAttemptAccount,
   planNextAttempt,
   runSession,
   type AttemptRef,
@@ -19,8 +24,11 @@ import {
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import {
   __setAccountPickerForTests,
+  __setDefaultAccountForTests,
+  pickClaudeAccount,
   __setExhaustedMarkerForTests,
   __setExhaustionCheckForTests,
   parseAccountPick,
@@ -36,13 +44,13 @@ describe("parseAccountPick", () => {
     expect(parseAccountPick("unset CLAUDE_CONFIG_DIR\n", 0)).toEqual({ kind: "default" });
   });
   test("export → config dir, quoted or bare", () => {
-    expect(parseAccountPick("export CLAUDE_CONFIG_DIR='/Users/x/.claude-b'\n", 0)).toEqual({
+    expect(parseAccountPick("export CLAUDE_CONFIG_DIR='/Users/x/.claude-me'\n", 0)).toEqual({
       kind: "dir",
-      dir: "/Users/x/.claude-b",
+      dir: "/Users/x/.claude-me",
     });
-    expect(parseAccountPick("export CLAUDE_CONFIG_DIR=/Users/x/.claude-b", 0)).toEqual({
+    expect(parseAccountPick("export CLAUDE_CONFIG_DIR=/Users/x/.claude-me", 0)).toEqual({
       kind: "dir",
-      dir: "/Users/x/.claude-b",
+      dir: "/Users/x/.claude-me",
     });
   });
   test("exit 3 is the spill signal whatever stdout says (spill, iu, empty)", () => {
@@ -83,16 +91,16 @@ describe("buildWorkerEnv — account", () => {
   test("a picked dir is set and the inherited OAuth token is removed", () => {
     const env = buildWorkerEnv({
       ...base,
-      claudeConfigDir: "/h/.claude-b",
+      claudeConfigDir: "/h/.claude-me",
       baseEnv: { CLAUDE_CODE_OAUTH_TOKEN: "tok", PATH: "/bin" },
     });
-    expect(env.CLAUDE_CONFIG_DIR).toBe("/h/.claude-b");
+    expect(env.CLAUDE_CONFIG_DIR).toBe("/h/.claude-me");
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
   });
   test("an extraEnv token cannot sneak back in next to a config dir", () => {
     const env = buildWorkerEnv({
       ...base,
-      claudeConfigDir: "/h/.claude-b",
+      claudeConfigDir: "/h/.claude-me",
       extraEnv: { CLAUDE_CODE_OAUTH_TOKEN: "tok" },
     });
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
@@ -101,7 +109,7 @@ describe("buildWorkerEnv — account", () => {
     const env = buildWorkerEnv({
       ...base,
       claudeConfigDir: null,
-      baseEnv: { CLAUDE_CONFIG_DIR: "/h/.claude-b", CLAUDE_CODE_OAUTH_TOKEN: "tok" },
+      baseEnv: { CLAUDE_CONFIG_DIR: "/h/.claude-me", CLAUDE_CODE_OAUTH_TOKEN: "tok" },
     });
     expect(env.CLAUDE_CONFIG_DIR).toBeUndefined();
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("tok");
@@ -115,7 +123,7 @@ describe("buildWorkerEnv — account", () => {
 
 describe("sessionEnvRecord — account", () => {
   test("carries the account only when known", () => {
-    expect(sessionEnvRecord("s", null, "m", "max", "check", "claude", "b").account).toBe("b");
+    expect(sessionEnvRecord("s", null, "m", "max", "check", "claude", "me").account).toBe("me");
     expect("account" in sessionEnvRecord("s", null, "m", "max", "check", "claude")).toBe(false);
   });
 });
@@ -137,7 +145,7 @@ describe("planNextAttempt — account retry", () => {
     usedFallback: false,
     fallback: { backend: "iu" },
     routeModel: "claude-sonnet-5-5",
-    account: "a",
+    account: "iu",
   };
   test("first quota wall on a picked account → account-retry", () => {
     expect(planNextAttempt(input).kind).toBe("account-retry");
@@ -173,7 +181,10 @@ describe("runSession — retry on the other account", () => {
 
   test("marks the account exhausted, re-picks once, then falls back to iu", async () => {
     const marks: [string, number][] = [];
-    __setExhaustedMarkerForTests(async (a, u) => void marks.push([a, u]));
+    __setExhaustedMarkerForTests(async (a, u) => {
+      marks.push([a, u]);
+      return true;
+    });
     const seen: string[] = [];
     __setAttemptRunnerForTests(
       async <T>(
@@ -190,7 +201,7 @@ describe("runSession — retry on the other account", () => {
             model: forced.model,
           } as SessionResult<T>;
         }
-        const account = seen.length === 0 ? "a" : "b";
+        const account = seen.length === 0 ? "iu" : "me";
         seen.push(account);
         ref.account = account;
         return quotaFail() as SessionResult<T>;
@@ -198,17 +209,17 @@ describe("runSession — retry on the other account", () => {
     );
     const r = await runSession(opts);
     expect(r.ok).toBe(true);
-    expect(seen).toEqual(["a", "b", "forced:iu"]);
-    expect(marks.map(([a]) => a)).toEqual(["a"]);
+    expect(seen).toEqual(["iu", "me", "forced:iu"]);
+    expect(marks.map(([a]) => a)).toEqual(["iu"]);
     expect(marks[0]![1]).toBeGreaterThan(Date.now() / 1000);
   });
 
   test("a success on the other account ends the loop", async () => {
-    __setExhaustedMarkerForTests(async () => {});
+    __setExhaustedMarkerForTests(async () => true);
     let n = 0;
     __setAttemptRunnerForTests(async <T>(_o: SessionOptions<T>, ref: AttemptRef) => {
       n++;
-      ref.account = n === 1 ? "a" : "b";
+      ref.account = n === 1 ? "iu" : "me";
       return (
         n === 1 ? quotaFail() : { ok: true, data: "done", backend: "max", model: route.model }
       ) as SessionResult<T>;
@@ -239,26 +250,30 @@ describe("selectAccount — resume pin and exclusion", () => {
 
   test("pin round-trips; a bad session id is ignored", () => {
     freshDir();
-    recordSessionAccount("sess-1", { account: "b", dir: "/h/.claude-b" });
-    expect(readSessionAccount("sess-1")).toEqual({ account: "b", dir: "/h/.claude-b" });
-    recordSessionAccount("../evil", { account: "b", dir: null });
+    recordSessionAccount("sess-1", { account: "me", dir: "/h/.claude-me" });
+    expect(readSessionAccount("sess-1")).toEqual({ account: "me", dir: "/h/.claude-me" });
+    recordSessionAccount("../evil", { account: "me", dir: null });
     expect(readSessionAccount("../evil")).toBeNull();
     expect(readSessionAccount("missing")).toBeNull();
   });
 
   test("resume reuses the pinned account without picking", async () => {
     freshDir();
-    recordSessionAccount("sess-1", { account: "b", dir: "/h/.claude-b" });
+    recordSessionAccount("sess-1", { account: "me", dir: "/h/.claude-me" });
     __setExhaustionCheckForTests(async () => false);
-    __setAccountPickerForTests(picker({ pick: { kind: "default" }, account: "a" }));
+    __setAccountPickerForTests(picker({ pick: { kind: "default" }, account: "iu" }));
     const sel = await selectAccount({ lane: "agent-gateway:check", resumeSessionId: "sess-1" });
-    expect(sel).toEqual({ pick: { kind: "dir", dir: "/h/.claude-b" }, account: "b", reused: true });
+    expect(sel).toEqual({
+      pick: { kind: "dir", dir: "/h/.claude-me" },
+      account: "me",
+      reused: true,
+    });
     expect(picks).toEqual([]);
   });
 
   test("a pinned default account resumes as default", async () => {
     freshDir();
-    recordSessionAccount("sess-a", { account: "a", dir: null });
+    recordSessionAccount("sess-a", { account: "iu", dir: null });
     __setExhaustionCheckForTests(async () => false);
     const sel = await selectAccount({ lane: "l", resumeSessionId: "sess-a" });
     expect(sel.pick).toEqual({ kind: "default" });
@@ -267,27 +282,27 @@ describe("selectAccount — resume pin and exclusion", () => {
 
   test("an exhausted pinned account is re-picked", async () => {
     freshDir();
-    recordSessionAccount("sess-1", { account: "b", dir: "/h/.claude-b" });
-    __setExhaustionCheckForTests(async (a) => a === "b");
-    __setAccountPickerForTests(picker({ pick: { kind: "default" }, account: "a" }));
+    recordSessionAccount("sess-1", { account: "me", dir: "/h/.claude-me" });
+    __setExhaustionCheckForTests(async (a) => a === "me");
+    __setAccountPickerForTests(picker({ pick: { kind: "default" }, account: "iu" }));
     const sel = await selectAccount({ lane: "agent-gateway:check", resumeSessionId: "sess-1" });
-    expect(sel.account).toBe("a");
+    expect(sel.account).toBe("iu");
     expect(sel.reused).toBeUndefined();
     expect(picks).toEqual(["agent-gateway:check"]);
   });
 
   test("no pin (or no resume) → fresh pick", async () => {
     freshDir();
-    __setAccountPickerForTests(picker({ pick: { kind: "default" }, account: "a" }));
-    expect((await selectAccount({ lane: "l", resumeSessionId: "unknown" })).account).toBe("a");
-    expect((await selectAccount({ lane: "l" })).account).toBe("a");
+    __setAccountPickerForTests(picker({ pick: { kind: "default" }, account: "iu" }));
+    expect((await selectAccount({ lane: "l", resumeSessionId: "unknown" })).account).toBe("iu");
+    expect((await selectAccount({ lane: "l" })).account).toBe("iu");
     expect(picks.length).toBe(2);
   });
 
   test("the excluded account coming back from the picker → straight to iu", async () => {
     freshDir();
-    __setAccountPickerForTests(picker({ pick: { kind: "default" }, account: "a" }));
-    expect(await selectAccount({ lane: "l", excludeAccount: "a" })).toEqual({
+    __setAccountPickerForTests(picker({ pick: { kind: "default" }, account: "iu" }));
+    expect(await selectAccount({ lane: "l", excludeAccount: "iu" })).toEqual({
       pick: { kind: "iu" },
     });
   });
@@ -295,19 +310,283 @@ describe("selectAccount — resume pin and exclusion", () => {
   test("a different account than the excluded one is accepted", async () => {
     freshDir();
     __setAccountPickerForTests(
-      picker({ pick: { kind: "dir", dir: "/h/.claude-b" }, account: "b" }),
+      picker({ pick: { kind: "dir", dir: "/h/.claude-me" }, account: "me" }),
     );
-    expect((await selectAccount({ lane: "l", excludeAccount: "a" })).account).toBe("b");
+    expect((await selectAccount({ lane: "l", excludeAccount: "iu" })).account).toBe("me");
   });
 
   test("the pin of the excluded account is not reused on resume", async () => {
     freshDir();
-    recordSessionAccount("sess-1", { account: "a", dir: null });
+    recordSessionAccount("sess-1", { account: "iu", dir: null });
     __setExhaustionCheckForTests(async () => false);
     __setAccountPickerForTests(
-      picker({ pick: { kind: "dir", dir: "/h/.claude-b" }, account: "b" }),
+      picker({ pick: { kind: "dir", dir: "/h/.claude-me" }, account: "me" }),
     );
-    const sel = await selectAccount({ lane: "l", resumeSessionId: "sess-1", excludeAccount: "a" });
-    expect(sel.account).toBe("b");
+    const sel = await selectAccount({ lane: "l", resumeSessionId: "sess-1", excludeAccount: "iu" });
+    expect(sel.account).toBe("me");
+  });
+});
+
+describe("resolveAttemptAccount — spill", () => {
+  const spill = async (): Promise<AccountSelection> => ({ pick: { kind: "iu" } });
+  afterEach(() => {
+    __setAccountPickerForTests();
+    __setDefaultAccountForTests();
+    __resetFallbackLogForTests();
+  });
+  const base = { tool: "check", hasIuFallback: false };
+
+  test("with an iu fallback → iu, counted as a no-account-headroom fallback", async () => {
+    __setAccountPickerForTests(spill);
+    const r = await resolveAttemptAccount({ ...base, hasIuFallback: true });
+    expect(r).toEqual({ kind: "iu" });
+    expect(backendFallbacksLastHour().reasons["no-account-headroom"]).toBe(1);
+  });
+
+  test("without a fallback → the default account, set explicitly (never the inherited env)", async () => {
+    __setAccountPickerForTests(spill);
+    __setDefaultAccountForTests(async () => "iu");
+    expect(await resolveAttemptAccount(base)).toEqual({
+      kind: "spawn",
+      claudeConfigDir: null,
+      account: "iu",
+    });
+  });
+
+  test("without a fallback and the walled account is the default → walled, no spawn", async () => {
+    __setAccountPickerForTests(spill);
+    __setDefaultAccountForTests(async () => "iu");
+    expect(await resolveAttemptAccount({ ...base, excludeAccount: "iu" })).toEqual({
+      kind: "walled",
+      account: "iu",
+    });
+  });
+
+  test("without a fallback and the walled account is the other one → default account", async () => {
+    __setAccountPickerForTests(spill);
+    __setDefaultAccountForTests(async () => "iu");
+    const r = await resolveAttemptAccount({ ...base, excludeAccount: "me" });
+    expect(r).toEqual({ kind: "spawn", claudeConfigDir: null, account: "iu" });
+  });
+
+  test("picker unavailable → inherited env (today's behaviour)", async () => {
+    __setAccountPickerForTests(async () => ({ pick: { kind: "unavailable" } }));
+    expect(await resolveAttemptAccount(base)).toEqual({
+      kind: "spawn",
+      claudeConfigDir: undefined,
+    });
+  });
+});
+
+describe("definitive quota only", () => {
+  test("classifier: usage-limit walls yes, transient 429/529/overloaded no", () => {
+    expect(isDefinitiveQuotaError("Claude AI usage limit reached|1792000000")).toBe(true);
+    expect(isDefinitiveQuotaError("You've hit your limit")).toBe(true);
+    expect(isDefinitiveQuotaError("429 Too Many Requests")).toBe(false);
+    expect(isDefinitiveQuotaError("529 overloaded_error")).toBe(false);
+    expect(isDefinitiveQuotaError("rate limit exceeded, retry shortly")).toBe(false);
+  });
+
+  const input: NextAttemptInput = {
+    result: {
+      ok: false,
+      backend: "max",
+      classificationText: "429 Too Many Requests",
+      hadApiRetry: true,
+    },
+    attempt: 1,
+    noOutputYet: true,
+    usedFallback: false,
+    fallback: { backend: "iu" },
+    routeModel: "claude-sonnet-5-5",
+    account: "iu",
+  };
+  test("a transient 429 (even with api_retry) skips the account retry and goes to the iu fallback", () => {
+    expect(planNextAttempt(input).kind).toBe("fallback");
+  });
+
+  test("runSession never marks an account exhausted on a transient 429", async () => {
+    const marks: string[] = [];
+    __setExhaustedMarkerForTests(async (a) => {
+      marks.push(a);
+      return true;
+    });
+    __setAttemptRunnerForTests(
+      async <T>(
+        _o: SessionOptions<T>,
+        ref: AttemptRef,
+        forced?: { backend: "max" | "iu"; model: string },
+      ) => {
+        ref.account = "iu";
+        if (forced)
+          return { ok: true, backend: forced.backend, model: forced.model } as SessionResult<T>;
+        return { ...input.result, error: "429", model: "claude-sonnet-5-5" } as SessionResult<T>;
+      },
+    );
+    const route: ToolRoute = {
+      model: "claude-sonnet-5-5",
+      backend: "max",
+      fallback: { backend: "iu" },
+      transport: "session",
+      harness: "claude",
+    };
+    try {
+      const r = await runSession({ cwd: "/tmp", prompt: "x", route, tool: "check" });
+      expect(r.ok).toBe(true);
+      expect(marks).toEqual([]);
+    } finally {
+      __resetAttemptRunnerForTests();
+      __setExhaustedMarkerForTests();
+      __resetBreakersForTests();
+    }
+  });
+});
+
+describe("resume after a re-pick", () => {
+  const route: ToolRoute = {
+    model: "claude-sonnet-5-5",
+    backend: "max",
+    fallback: { backend: "iu" },
+    transport: "session",
+    harness: "claude",
+  };
+  afterEach(() => {
+    __resetAttemptRunnerForTests();
+    __setExhaustedMarkerForTests();
+    __setAccountPickerForTests();
+    __setExhaustionCheckForTests();
+    __resetBreakersForTests();
+  });
+
+  test("the account retry keeps passing resumeSessionId; the claude args carry --resume", async () => {
+    __setExhaustedMarkerForTests(async () => true);
+    const resumeIds: (string | undefined)[] = [];
+    __setAttemptRunnerForTests(async <T>(o: SessionOptions<T>, ref: AttemptRef) => {
+      resumeIds.push(o.resumeSessionId);
+      ref.account = resumeIds.length === 1 ? "iu" : "me";
+      return (
+        resumeIds.length === 1 ? quotaFail() : { ok: true, backend: "max", model: route.model }
+      ) as SessionResult<T>;
+    });
+    const r = await runSession({
+      cwd: "/tmp",
+      prompt: "x",
+      route,
+      tool: "check",
+      resumeSessionId: "sess-9",
+    });
+    expect(r.ok).toBe(true);
+    expect(resumeIds).toEqual(["sess-9", "sess-9"]);
+    const args = buildSessionArgs({
+      prompt: "x",
+      settingSources: "project",
+      model: route.model,
+      readOnly: false,
+      resumeSessionId: "sess-9",
+    });
+    expect(args).toContain("--resume");
+    expect(args[args.indexOf("--resume") + 1]).toBe("sess-9");
+  });
+
+  test("a walled pin is re-picked and the rewritten pin names the new account", async () => {
+    process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR = mkdtempSync(join(tmpdir(), "acct-pin-"));
+    recordSessionAccount("sess-9", { account: "iu", dir: null });
+    __setExhaustionCheckForTests(async (a) => a === "iu");
+    __setAccountPickerForTests(async () => ({
+      pick: { kind: "dir", dir: "/h/.claude-me" },
+      account: "me",
+    }));
+    const sel = await selectAccount({
+      lane: "agent-gateway:check",
+      resumeSessionId: "sess-9",
+      excludeAccount: "iu",
+    });
+    expect(sel.account).toBe("me");
+    // what maybeWriteSessionEnv does once the resumed session reports its id
+    recordSessionAccount("sess-9", { account: "me", dir: "/h/.claude-me" });
+    expect(readSessionAccount("sess-9")).toEqual({ account: "me", dir: "/h/.claude-me" });
+    delete process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR;
+  });
+});
+
+describe("account CLI calls", () => {
+  const dir = mkdtempSync(join(tmpdir(), "acct-cli-"));
+  const bin = join(dir, "claude-account");
+  const envDump = join(dir, "env.txt");
+  const usage = (v: unknown) => JSON.stringify({ accounts: v });
+  let usageJson = usage([]);
+  const prevBin = process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN;
+  const writeBin = () => {
+    writeFileSync(
+      bin,
+      `#!/bin/sh
+env > '${envDump}'
+case "$1" in
+  pick) echo "export CLAUDE_CONFIG_DIR='/h/.claude-me'" ;;
+  account) echo me ;;
+  usage) cat <<'JSON'
+${usageJson}
+JSON
+  ;;
+esac
+`,
+    );
+    chmodSync(bin, 0o755);
+  };
+  afterEach(() => {
+    if (prevBin === undefined) delete process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN;
+    else process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN = prevBin;
+    delete process.env.AGENT_GATEWAY_TEST_SECRET_TOKEN;
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    __setExhaustionCheckForTests();
+  });
+
+  test("the CLI gets a minimal env — no tokens — plus CLAUDE_CONFIG_DIR where needed", async () => {
+    writeBin();
+    process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN = bin;
+    process.env.AGENT_GATEWAY_TEST_SECRET_TOKEN = "s3cret";
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "tok";
+    const sel = await pickClaudeAccount("agent-gateway:check");
+    expect(sel).toEqual({ pick: { kind: "dir", dir: "/h/.claude-me" }, account: "me" });
+    // the last call was `account`, which needs the picked dir
+    const keys = readFileSync(envDump, "utf8")
+      .split("\n")
+      .map((l) => l.split("=")[0])
+      .filter((k) => k && !["PWD", "SHLVL", "_", "OLDPWD"].includes(k))
+      .sort();
+    expect(keys).toEqual(
+      ["CLAUDE_CONFIG_DIR", "HOME", "LANG", "PATH", "TMPDIR"].filter((k) => keys.includes(k)),
+    );
+    expect(keys).toContain("CLAUDE_CONFIG_DIR");
+    expect(keys).not.toContain("AGENT_GATEWAY_TEST_SECRET_TOKEN");
+    expect(keys).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+  });
+
+  describe("exhausted check validates the usage shape", () => {
+    const check = async (rows: unknown, raw?: string): Promise<boolean> => {
+      process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR = mkdtempSync(join(tmpdir(), "acct-pin-"));
+      recordSessionAccount("s", { account: "me", dir: "/h/.claude-me" });
+      usageJson = raw ?? usage(rows);
+      writeBin();
+      process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN = bin;
+      __setAccountPickerForTests(async () => ({ pick: { kind: "default" }, account: "iu" }));
+      const sel = await selectAccount({ lane: "l", resumeSessionId: "s" });
+      __setAccountPickerForTests();
+      delete process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR;
+      return sel.reused !== true; // re-picked ⇔ exhausted
+    };
+    const future = Math.floor(Date.now() / 1000) + 3600;
+
+    test("a future numeric exhausted_until → exhausted", async () => {
+      expect(await check([{ id: "me", exhausted_until: future }])).toBe(true);
+    });
+    test("past, null, string, other account, non-array, bad JSON → not exhausted", async () => {
+      expect(await check([{ id: "me", exhausted_until: 1 }])).toBe(false);
+      expect(await check([{ id: "me", exhausted_until: null }])).toBe(false);
+      expect(await check([{ id: "me", exhausted_until: String(future) }])).toBe(false);
+      expect(await check([{ id: "iu", exhausted_until: future }])).toBe(false);
+      expect(await check({ id: "me" })).toBe(false);
+      expect(await check(null, "not json")).toBe(false);
+    });
   });
 });

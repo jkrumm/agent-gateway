@@ -9,6 +9,7 @@ import { runOpencodeAttempt } from "./opencode-runner.ts";
 import { interruptOpencodeSession } from "./opencode-server.ts";
 import {
   markAccountExhausted,
+  defaultAccountId,
   recordSessionAccount,
   selectAccount,
   quotaResetEpochS,
@@ -827,6 +828,18 @@ export function resolveBackend(route: ToolRoute): ResolvedBackend {
 // so this regex stays the fallback path rather than the only one.
 const QUOTA_ERROR_RE = /hit your (usage )?limit|usage limit|rate.?limit|429|overloaded|quota/i;
 
+// A definitive account wall, as opposed to a transient 429/529 the same account recovers from in
+// seconds: only this may mark an account exhausted (a wrong mark routes everything away from a
+// healthy account until `until`).
+const DEFINITIVE_QUOTA_RE =
+  /hit your (usage )?limit|usage limit|limit reached|exceeded.*quota|quota.*exceeded/i;
+
+/** Pure: does this transport-sourced text say the Max account's usage window is used up (not
+ *  merely rate-limited or overloaded)? Gates the account-exhausted mark and the account retry. */
+export function isDefinitiveQuotaError(text: string): boolean {
+  return DEFINITIVE_QUOTA_RE.test(text);
+}
+
 /** Does this TRANSPORT-sourced text look like Max quota/rate-limit exhaustion rather
  *  than a generic transport or logic failure? Pure — feeds the reactive once-only
  *  `max` → `iu` retry in `runSession` (call with `classificationText`, never the full
@@ -1179,6 +1192,62 @@ export function resolveHarness(route: ToolRoute, forced?: ForcedAttempt): Harnes
   return forced || isClaudeModel(route.model) ? "claude" : route.harness;
 }
 
+export type AttemptAccount =
+  | { kind: "iu" }
+  | { kind: "walled"; account: string }
+  | { kind: "spawn"; claudeConfigDir: string | null | undefined; account?: string };
+
+/** Which Claude Max account (or the IU path) one `claude -p` Max attempt runs under.
+ *  - spill (picker exit 3, or it returned the account that just hit its wall) with an IU
+ *    fallback → `iu`, counted as a fallback;
+ *  - spill without one → the default account, set EXPLICITLY (never the inherited env), unless
+ *    that is the walled account → `walled` (fail as a quota failure, no spawn);
+ *  - picker unavailable → warn and run on the inherited env (today's behaviour). */
+export async function resolveAttemptAccount(input: {
+  tool: string | undefined;
+  jobId?: string;
+  resumeSessionId?: string;
+  excludeAccount?: string;
+  hasIuFallback: boolean;
+}): Promise<AttemptAccount> {
+  const { tool, jobId, excludeAccount } = input;
+  const selected = await selectAccount({
+    lane: usageLane(tool),
+    resumeSessionId: input.resumeSessionId,
+    excludeAccount,
+  });
+  switch (selected.pick.kind) {
+    case "unavailable":
+      runnerLogger().warn(
+        { event: "session.account_pick_unavailable", tool, jobId },
+        "claude-account pick failed — running on the inherited account",
+      );
+      return { kind: "spawn", claudeConfigDir: undefined };
+    case "iu": {
+      if (input.hasIuFallback) {
+        recordFallback("no-account-headroom", tool);
+        runnerLogger().warn(
+          { event: "backend.fallback", tool, jobId, reason: "no-account-headroom" },
+          "falling back to iu — no Claude Max account has headroom",
+        );
+        return { kind: "iu" };
+      }
+      const account = await defaultAccountId();
+      if (excludeAccount !== undefined && account === excludeAccount) {
+        return { kind: "walled", account };
+      }
+      return { kind: "spawn", claudeConfigDir: null, ...(account ? { account } : {}) };
+    }
+    case "dir":
+      return { kind: "spawn", claudeConfigDir: selected.pick.dir, account: selected.account };
+    case "default":
+      return { kind: "spawn", claudeConfigDir: null, account: selected.account };
+    default:
+      selected.pick satisfies never;
+      return { kind: "spawn", claudeConfigDir: undefined };
+  }
+}
+
 /** One session launch. Renamed out of `runSession` so the retry loop can wrap it —
  *  `turnsRef` is populated as soon as the worker's first assistant turn streams back,
  *  which is what lets the wrapper tell "failed before doing anything" from "failed
@@ -1217,34 +1286,34 @@ async function runSessionAttempt<T = unknown>(
   const harness = resolveHarness(route, forced);
   let backend: Backend = forced ? forced.backend : resolved.backend;
   // Claude Max account pick (docs/claude-accounts.md §Spawn integration): once per attempt, only
-  // for a `claude -p` worker on Max. `iu` ("no account has headroom") takes the existing IU
-  // fallback path, but only where the route declares one — otherwise stay on the default account.
+  // for a `claude -p` worker on Max. Resume is kept after a re-pick: `projects/` is shared across
+  // the accounts' config dirs, so `--resume` still finds the transcript (only the prompt cache is
+  // cold) — the pin is rewritten for the account that actually ran.
   let claudeConfigDir: string | null | undefined;
   let account: string | undefined;
   if (harness === "claude" && backend === "max") {
-    const selected = await selectAccount({
-      lane: usageLane(tool),
+    const chosen = await resolveAttemptAccount({
+      tool,
+      jobId,
       resumeSessionId: forced ? undefined : resumeSessionId,
       excludeAccount: turnsRef.excludeAccount,
+      hasIuFallback: WORKER_FALLBACK !== "none" && route.fallback?.backend === "iu",
     });
-    if (
-      selected.pick.kind === "iu" &&
-      WORKER_FALLBACK !== "none" &&
-      route.fallback?.backend === "iu"
-    ) {
+    if (chosen.kind === "iu") {
       backend = "iu";
+    } else if (chosen.kind === "walled") {
+      turnsRef.account = chosen.account;
+      const error = `Claude AI usage limit reached (account ${chosen.account} exhausted, no iu fallback)`;
       runnerLogger().warn(
-        { event: "backend.fallback", tool, model, backend, jobId, reason: "no-account-headroom" },
-        "falling back to iu — no Claude Max account has headroom",
+        { event: "session.account_walled", tool, model, jobId, account: chosen.account },
+        "every Max account is walled and the route has no iu fallback — not spawning",
       );
-    } else if (selected.pick.kind === "dir") {
-      claudeConfigDir = selected.pick.dir;
-      account = selected.account;
-    } else if (selected.pick.kind === "default") {
-      claudeConfigDir = null;
-      account = selected.account;
+      return { ok: false, error, classificationText: error, backend: "max", model };
+    } else {
+      claudeConfigDir = chosen.claudeConfigDir;
+      account = chosen.account;
+      turnsRef.account = account;
     }
-    if (backend === "max") turnsRef.account = account;
   }
   // Shared identity for every log line below that reports a session failure. A post-mortem
   // on 8 `session.timeout` entries came back with `model: null, backend: null, tool: null` and
@@ -2035,7 +2104,7 @@ export function planNextAttempt(input: NextAttemptInput): NextAttemptPlan {
   if (
     switchable &&
     result.backend === "max" &&
-    quotaFlavored &&
+    isDefinitiveQuotaError(result.classificationText ?? "") &&
     input.account !== undefined &&
     input.accountRetried !== true
   ) {
@@ -2226,7 +2295,19 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
         },
         "Max account hit its quota wall — marking it exhausted and re-picking",
       );
-      await markAccountExhausted(turnsRef.account, until);
+      const marked = await markAccountExhausted(turnsRef.account, until);
+      if (!marked) {
+        runnerLogger().warn(
+          {
+            event: "session.account_exhausted_mark_failed",
+            project: opts.cwd,
+            tool: opts.tool,
+            jobId: opts.jobId,
+            account: turnsRef.account,
+          },
+          "claude-account exhausted failed — the re-pick may return the same account",
+        );
+      }
       accountRetried = true;
       excludeAccount = turnsRef.account;
       continue;
