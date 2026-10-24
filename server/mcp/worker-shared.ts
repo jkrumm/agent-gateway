@@ -146,11 +146,23 @@ const accountBin = (): string =>
   process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN ??
   join(homedir(), ".local", "bin", "claude-account");
 
+/** The picker CLI's env: the four vars it needs to find bun, the keychain and a temp dir —
+ *  never the worker/parent credentials — plus the config dir when the call is about one. */
+function accountCliEnv(configDir?: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of ["PATH", "HOME", "TMPDIR", "LANG"]) {
+    const v = process.env[key];
+    if (v !== undefined) env[key] = v;
+  }
+  if (configDir !== undefined) env.CLAUDE_CONFIG_DIR = configDir;
+  return env;
+}
+
 /** Run the picker CLI with a hard 5 s cap (a CLI helper, not an agent run). `null` on any
  *  failure — spawn error, timeout, non-zero exit other than 3. */
 async function runAccountCli(
   args: string[],
-  env: Record<string, string | undefined>,
+  env: Record<string, string>,
 ): Promise<{ stdout: string; exitCode: number } | null> {
   try {
     const proc = Bun.spawn([accountBin(), ...args], {
@@ -172,16 +184,32 @@ async function runAccountCli(
 
 /** Ask the picker for an account for `lane` and resolve its registry id. Never throws. */
 async function pickAccountViaCli(lane: string): Promise<AccountSelection> {
-  const picked = await runAccountCli(["pick", "--lane", lane], process.env);
+  const picked = await runAccountCli(["pick", "--lane", lane], accountCliEnv());
   if (!picked) return { pick: { kind: "unavailable" } };
   const pick = parseAccountPick(picked.stdout, picked.exitCode);
   if (pick.kind === "iu" || pick.kind === "unavailable") return { pick };
-  const env = { ...process.env };
-  if (pick.kind === "dir") env.CLAUDE_CONFIG_DIR = pick.dir;
-  else delete env.CLAUDE_CONFIG_DIR;
-  const id = await runAccountCli(["account"], env);
+  const id = await runAccountCli(
+    ["account"],
+    accountCliEnv(pick.kind === "dir" ? pick.dir : undefined),
+  );
   const account = id?.stdout.trim();
   return { pick, ...(account ? { account } : {}) };
+}
+
+/** Registry id of the default account (`CLAUDE_CONFIG_DIR` unset); undefined when unknown. */
+async function defaultAccountViaCli(): Promise<string | undefined> {
+  const out = await runAccountCli(["account"], accountCliEnv());
+  return out?.stdout.trim() || undefined;
+}
+
+let defaultAccountLookup: () => Promise<string | undefined> = defaultAccountViaCli;
+
+export function defaultAccountId(): Promise<string | undefined> {
+  return defaultAccountLookup();
+}
+
+export function __setDefaultAccountForTests(fn?: () => Promise<string | undefined>): void {
+  defaultAccountLookup = fn ?? defaultAccountViaCli;
 }
 
 let accountPicker: (lane: string) => Promise<AccountSelection> = pickAccountViaCli;
@@ -195,22 +223,25 @@ export function __setAccountPickerForTests(fn?: (lane: string) => Promise<Accoun
   accountPicker = fn ?? pickAccountViaCli;
 }
 
-async function markExhaustedViaCli(account: string, untilEpochS: number): Promise<void> {
-  await runAccountCli(
+async function markExhaustedViaCli(account: string, untilEpochS: number): Promise<boolean> {
+  const out = await runAccountCli(
     ["exhausted", "--account", account, "--until", String(untilEpochS)],
-    process.env,
+    accountCliEnv(),
   );
+  return out?.exitCode === 0;
 }
 
-let exhaustedMarker: (account: string, untilEpochS: number) => Promise<void> = markExhaustedViaCli;
+let exhaustedMarker: (account: string, untilEpochS: number) => Promise<boolean> =
+  markExhaustedViaCli;
 
-/** Mark `account` as out of quota until `untilEpochS` so the next pick routes around it. */
-export function markAccountExhausted(account: string, untilEpochS: number): Promise<void> {
+/** Mark `account` as out of quota until `untilEpochS` so the next pick routes around it.
+ *  Resolves `false` when the CLI failed (the caller logs it). */
+export function markAccountExhausted(account: string, untilEpochS: number): Promise<boolean> {
   return exhaustedMarker(account, untilEpochS);
 }
 
 export function __setExhaustedMarkerForTests(
-  fn?: (account: string, untilEpochS: number) => Promise<void>,
+  fn?: (account: string, untilEpochS: number) => Promise<boolean>,
 ): void {
   exhaustedMarker = fn ?? markExhaustedViaCli;
 }
@@ -279,11 +310,20 @@ export function readSessionAccount(sessionId: string): SessionAccountPin | null 
 /** Is `account` currently marked exhausted (`claude-account usage --json`)? A CLI failure reads
  *  as "not exhausted": keeping the pin (warm cache) beats re-picking blind. */
 async function accountExhaustedViaCli(account: string): Promise<boolean> {
-  const out = await runAccountCli(["usage", "--json"], process.env);
+  const out = await runAccountCli(["usage", "--json"], accountCliEnv());
   if (!out) return false;
   try {
-    const rows: { id: string; exhausted_until: number | null }[] = JSON.parse(out.stdout).accounts;
-    return rows.some((r) => r.id === account && r.exhausted_until !== null);
+    const rows: unknown = JSON.parse(out.stdout)?.accounts;
+    if (!Array.isArray(rows)) return false;
+    const nowS = Date.now() / 1000;
+    return rows.some(
+      (r) =>
+        r !== null &&
+        typeof r === "object" &&
+        r.id === account &&
+        typeof r.exhausted_until === "number" &&
+        r.exhausted_until > nowS,
+    );
   } catch {
     return false;
   }

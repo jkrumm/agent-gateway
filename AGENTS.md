@@ -606,6 +606,14 @@ A quota-flavoured failure with no output on a picked account makes `planNextAtte
 pruned after 30 d): a `--resume` / crash re-run reuses that `CLAUDE_CONFIG_DIR` (prompt cache is per account)
 unless `claude-account usage --json` shows the account exhausted, then it re-picks. The re-pick after a
 wall excludes the exhausted account: if the picker still returns it, the attempt goes straight to `iu`.
+Spill with no `iu` fallback never falls through to the inherited env: the default account is set
+explicitly, and if that is the walled account the attempt fails as a quota failure without spawning
+(`resolveAttemptAccount`). Spill with a fallback is counted (`no-account-headroom`). A re-pick keeps
+`--resume` (`projects/` is shared across the config dirs; only the cache is cold) and rewrites the pin.
+Only a definitive wall (`isDefinitiveQuotaError`: usage limit / limit reached) marks an account exhausted
+or triggers the account retry; a transient 429/529 goes the old IU-fallback way. The `claude-account` CLI
+gets a minimal env (`PATH`, `HOME`, `TMPDIR`, `LANG`, `CLAUDE_CONFIG_DIR` where needed); a failed pick
+logs `session.account_pick_unavailable`, a failed exhausted mark `session.account_exhausted_mark_failed`.
 The spill signal is exit code 3 (stdout `spill`, or `iu` from an older picker; stdout is not keyed on).
 
 **`otel` also injects the real ClickStack/HyperDX MCP** (bearer-authed
