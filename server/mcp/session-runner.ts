@@ -489,9 +489,12 @@ export function buildWorkerEnv(input: WorkerEnvInput): Record<string, string> {
   if (claudeConfigDir === null) delete env.CLAUDE_CONFIG_DIR;
   else if (claudeConfigDir !== undefined) env.CLAUDE_CONFIG_DIR = claudeConfigDir;
   if (extraEnv) Object.assign(env, extraEnv);
-  // A token in the env overrides the login of whatever config dir is set, so a worker on a
-  // non-default account must never carry one (it would silently run on the token's account).
-  if (env.CLAUDE_CONFIG_DIR) delete env.CLAUDE_CODE_OAUTH_TOKEN;
+  // A token in the env overrides the login of the config dir beside it, so a worker on a dir
+  // THIS code set (the pick, or extraEnv) must not carry one. A dir merely inherited from the
+  // parent env is today's behaviour and keeps its token.
+  if (typeof claudeConfigDir === "string" || extraEnv?.CLAUDE_CONFIG_DIR) {
+    delete env.CLAUDE_CODE_OAUTH_TOKEN;
+  }
 
   return env;
 }
@@ -831,8 +834,10 @@ const QUOTA_ERROR_RE = /hit your (usage )?limit|usage limit|rate.?limit|429|over
 // A definitive account wall, as opposed to a transient 429/529 the same account recovers from in
 // seconds: only this may mark an account exhausted (a wrong mark routes everything away from a
 // healthy account until `until`).
+// Wording must name a usage window (or be the CLI's `limit reached|<epoch>` suffix): a bare
+// "limit reached" also appears in per-minute rate-limit text ("rate limit reached, retry shortly").
 const DEFINITIVE_QUOTA_RE =
-  /hit your (usage )?limit|usage limit|limit reached|exceeded.*quota|quota.*exceeded/i;
+  /\b(?:5-hour|weekly|session|daily|usage) limit\b|hit your (?:usage )?limit|limit reached\s*\|\s*\d{10}\b|exceeded.*quota|quota.*exceeded/i;
 
 /** Pure: does this transport-sourced text say the Max account's usage window is used up (not
  *  merely rate-limited or overloaded)? Gates the account-exhausted mark and the account retry. */
@@ -1233,8 +1238,9 @@ export async function resolveAttemptAccount(input: {
         return { kind: "iu" };
       }
       const account = await defaultAccountId();
-      if (excludeAccount !== undefined && account === excludeAccount) {
-        return { kind: "walled", account };
+      // With a walled account to avoid, an unresolved default id fails closed.
+      if (excludeAccount !== undefined && (account === undefined || account === excludeAccount)) {
+        return { kind: "walled", account: excludeAccount };
       }
       return { kind: "spawn", claudeConfigDir: null, ...(account ? { account } : {}) };
     }
@@ -1246,6 +1252,18 @@ export async function resolveAttemptAccount(input: {
       selected.pick satisfies never;
       return { kind: "spawn", claudeConfigDir: undefined };
   }
+}
+
+type ClaudeSpawn = (
+  cmd: string[],
+  opts: { cwd: string; stdout: "pipe"; stderr: "pipe"; env: Record<string, string> },
+) => Bun.Subprocess<"ignore", "pipe", "pipe">;
+
+let spawnClaude: ClaudeSpawn = (cmd, opts) => Bun.spawn(cmd, opts);
+
+/** Test seam: replace the `claude -p` spawn (e.g. with a stub shell); no argument restores it. */
+export function __setSpawnForTests(fn?: ClaudeSpawn): void {
+  spawnClaude = fn ?? ((cmd, opts) => Bun.spawn(cmd, opts));
 }
 
 /** One session launch. Renamed out of `runSession` so the retry loop can wrap it —
@@ -1434,7 +1452,7 @@ async function runSessionAttempt<T = unknown>(
     "session spawn",
   );
 
-  const proc = Bun.spawn([CLAUDE_BIN, ...args], {
+  const proc = spawnClaude([CLAUDE_BIN, ...args], {
     cwd,
     stdout: "pipe",
     stderr: "pipe",

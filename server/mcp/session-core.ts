@@ -47,7 +47,9 @@ export function runnerLogger(): typeof appLogger {
   return processKind() === "app" ? appLogger : mcpLogger;
 }
 
-const CLAUDE_LOG_DIR = join(homedir(), ".claude", "logs");
+// Resolved per call so a test can point it at a temp dir (`AGENT_GATEWAY_CLAUDE_LOG_DIR`).
+const claudeLogDir = (): string =>
+  process.env.AGENT_GATEWAY_CLAUDE_LOG_DIR ?? join(homedir(), ".claude", "logs");
 
 /** Pure: the `data` object of a `session_env` line — split out of `writeSessionEnv` so the
  *  `lane`/`harness` shape is unit-testable without touching `~/.claude/logs`. */
@@ -106,7 +108,8 @@ export function writeSessionEnv(
   account?: string,
 ): void {
   try {
-    mkdirSync(CLAUDE_LOG_DIR, { recursive: true });
+    const logDir = claudeLogDir();
+    mkdirSync(logDir, { recursive: true });
     const now = new Date().toISOString();
     const line =
       JSON.stringify({
@@ -116,7 +119,7 @@ export function writeSessionEnv(
         level: "info",
         data: sessionEnvRecord(sessionId, baseUrl, model, backend, tool, harness, account),
       }) + "\n";
-    appendFileSync(join(CLAUDE_LOG_DIR, `${now.slice(0, 10)}.jsonl`), line);
+    appendFileSync(join(logDir, `${now.slice(0, 10)}.jsonl`), line);
   } catch {
     /* never throw from telemetry */
   }

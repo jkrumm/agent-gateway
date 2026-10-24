@@ -610,10 +610,16 @@ Spill with no `iu` fallback never falls through to the inherited env: the defaul
 explicitly, and if that is the walled account the attempt fails as a quota failure without spawning
 (`resolveAttemptAccount`). Spill with a fallback is counted (`no-account-headroom`). A re-pick keeps
 `--resume` (`projects/` is shared across the config dirs; only the cache is cold) and rewrites the pin.
-Only a definitive wall (`isDefinitiveQuotaError`: usage limit / limit reached) marks an account exhausted
+Only a definitive wall (`isDefinitiveQuotaError`: a named usage window — 5-hour/weekly/session/daily/usage limit — or the `limit reached|<epoch>` suffix; a bare "limit reached" is rate-limit text) marks an account exhausted
 or triggers the account retry; a transient 429/529 goes the old IU-fallback way. The `claude-account` CLI
 gets a minimal env (`PATH`, `HOME`, `TMPDIR`, `LANG`, `CLAUDE_CONFIG_DIR` where needed); a failed pick
 logs `session.account_pick_unavailable`, a failed exhausted mark `session.account_exhausted_mark_failed`.
+A pick whose account id cannot be resolved fails closed once an account is excluded (`iu`, or no-spawn
+when there is no fallback). `CLAUDE_CODE_OAUTH_TOKEN` is dropped only for a dir this code (or `extraEnv`)
+set; an inherited dir keeps its token. Pins are validated on read (non-empty account, existing dir) and
+swept by `pruneSessionAccounts()` (regular `<id>.json` only, once per process before the first write).
+Reset epochs are clamped to now+7d. Exit 3 is a spill only for `pick`. `__setSpawnForTests` stubs the
+`claude -p` spawn.
 The spill signal is exit code 3 (stdout `spill`, or `iu` from an older picker; stdout is not keyed on).
 
 **`otel` also injects the real ClickStack/HyperDX MCP** (bearer-authed

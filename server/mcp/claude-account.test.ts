@@ -9,6 +9,7 @@ import {
   __resetBreakersForTests,
   __resetFallbackLogForTests,
   __setAttemptRunnerForTests,
+  __setSpawnForTests,
   backendFallbacksLastHour,
   buildSessionArgs,
   buildWorkerEnv,
@@ -24,10 +25,20 @@ import {
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import {
   __setAccountPickerForTests,
   __setDefaultAccountForTests,
+  markAccountExhausted,
+  pruneSessionAccounts,
   pickClaudeAccount,
   __setExhaustedMarkerForTests,
   __setExhaustionCheckForTests,
@@ -38,6 +49,9 @@ import {
   selectAccount,
   type AccountSelection,
 } from "./worker-shared.ts";
+
+// A real directory: pins whose dir has vanished are discarded on read.
+const ME_DIR = mkdtempSync(join(tmpdir(), "claude-me-"));
 
 describe("parseAccountPick", () => {
   test("unset → default account", () => {
@@ -91,16 +105,16 @@ describe("buildWorkerEnv — account", () => {
   test("a picked dir is set and the inherited OAuth token is removed", () => {
     const env = buildWorkerEnv({
       ...base,
-      claudeConfigDir: "/h/.claude-me",
+      claudeConfigDir: ME_DIR,
       baseEnv: { CLAUDE_CODE_OAUTH_TOKEN: "tok", PATH: "/bin" },
     });
-    expect(env.CLAUDE_CONFIG_DIR).toBe("/h/.claude-me");
+    expect(env.CLAUDE_CONFIG_DIR).toBe(ME_DIR);
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
   });
   test("an extraEnv token cannot sneak back in next to a config dir", () => {
     const env = buildWorkerEnv({
       ...base,
-      claudeConfigDir: "/h/.claude-me",
+      claudeConfigDir: ME_DIR,
       extraEnv: { CLAUDE_CODE_OAUTH_TOKEN: "tok" },
     });
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
@@ -109,7 +123,7 @@ describe("buildWorkerEnv — account", () => {
     const env = buildWorkerEnv({
       ...base,
       claudeConfigDir: null,
-      baseEnv: { CLAUDE_CONFIG_DIR: "/h/.claude-me", CLAUDE_CODE_OAUTH_TOKEN: "tok" },
+      baseEnv: { CLAUDE_CONFIG_DIR: ME_DIR, CLAUDE_CODE_OAUTH_TOKEN: "tok" },
     });
     expect(env.CLAUDE_CONFIG_DIR).toBeUndefined();
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("tok");
@@ -250,8 +264,8 @@ describe("selectAccount — resume pin and exclusion", () => {
 
   test("pin round-trips; a bad session id is ignored", () => {
     freshDir();
-    recordSessionAccount("sess-1", { account: "me", dir: "/h/.claude-me" });
-    expect(readSessionAccount("sess-1")).toEqual({ account: "me", dir: "/h/.claude-me" });
+    recordSessionAccount("sess-1", { account: "me", dir: ME_DIR });
+    expect(readSessionAccount("sess-1")).toEqual({ account: "me", dir: ME_DIR });
     recordSessionAccount("../evil", { account: "me", dir: null });
     expect(readSessionAccount("../evil")).toBeNull();
     expect(readSessionAccount("missing")).toBeNull();
@@ -259,12 +273,12 @@ describe("selectAccount — resume pin and exclusion", () => {
 
   test("resume reuses the pinned account without picking", async () => {
     freshDir();
-    recordSessionAccount("sess-1", { account: "me", dir: "/h/.claude-me" });
+    recordSessionAccount("sess-1", { account: "me", dir: ME_DIR });
     __setExhaustionCheckForTests(async () => false);
     __setAccountPickerForTests(picker({ pick: { kind: "default" }, account: "iu" }));
     const sel = await selectAccount({ lane: "agent-gateway:check", resumeSessionId: "sess-1" });
     expect(sel).toEqual({
-      pick: { kind: "dir", dir: "/h/.claude-me" },
+      pick: { kind: "dir", dir: ME_DIR },
       account: "me",
       reused: true,
     });
@@ -282,7 +296,7 @@ describe("selectAccount — resume pin and exclusion", () => {
 
   test("an exhausted pinned account is re-picked", async () => {
     freshDir();
-    recordSessionAccount("sess-1", { account: "me", dir: "/h/.claude-me" });
+    recordSessionAccount("sess-1", { account: "me", dir: ME_DIR });
     __setExhaustionCheckForTests(async (a) => a === "me");
     __setAccountPickerForTests(picker({ pick: { kind: "default" }, account: "iu" }));
     const sel = await selectAccount({ lane: "agent-gateway:check", resumeSessionId: "sess-1" });
@@ -309,9 +323,7 @@ describe("selectAccount — resume pin and exclusion", () => {
 
   test("a different account than the excluded one is accepted", async () => {
     freshDir();
-    __setAccountPickerForTests(
-      picker({ pick: { kind: "dir", dir: "/h/.claude-me" }, account: "me" }),
-    );
+    __setAccountPickerForTests(picker({ pick: { kind: "dir", dir: ME_DIR }, account: "me" }));
     expect((await selectAccount({ lane: "l", excludeAccount: "iu" })).account).toBe("me");
   });
 
@@ -319,9 +331,7 @@ describe("selectAccount — resume pin and exclusion", () => {
     freshDir();
     recordSessionAccount("sess-1", { account: "iu", dir: null });
     __setExhaustionCheckForTests(async () => false);
-    __setAccountPickerForTests(
-      picker({ pick: { kind: "dir", dir: "/h/.claude-me" }, account: "me" }),
-    );
+    __setAccountPickerForTests(picker({ pick: { kind: "dir", dir: ME_DIR }, account: "me" }));
     const sel = await selectAccount({ lane: "l", resumeSessionId: "sess-1", excludeAccount: "iu" });
     expect(sel.account).toBe("me");
   });
@@ -493,7 +503,7 @@ describe("resume after a re-pick", () => {
     recordSessionAccount("sess-9", { account: "iu", dir: null });
     __setExhaustionCheckForTests(async (a) => a === "iu");
     __setAccountPickerForTests(async () => ({
-      pick: { kind: "dir", dir: "/h/.claude-me" },
+      pick: { kind: "dir", dir: ME_DIR },
       account: "me",
     }));
     const sel = await selectAccount({
@@ -503,8 +513,8 @@ describe("resume after a re-pick", () => {
     });
     expect(sel.account).toBe("me");
     // what maybeWriteSessionEnv does once the resumed session reports its id
-    recordSessionAccount("sess-9", { account: "me", dir: "/h/.claude-me" });
-    expect(readSessionAccount("sess-9")).toEqual({ account: "me", dir: "/h/.claude-me" });
+    recordSessionAccount("sess-9", { account: "me", dir: ME_DIR });
+    expect(readSessionAccount("sess-9")).toEqual({ account: "me", dir: ME_DIR });
     delete process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR;
   });
 });
@@ -522,7 +532,7 @@ describe("account CLI calls", () => {
       `#!/bin/sh
 env > '${envDump}'
 case "$1" in
-  pick) echo "export CLAUDE_CONFIG_DIR='/h/.claude-me'" ;;
+  pick) echo "export CLAUDE_CONFIG_DIR='${ME_DIR}'" ;;
   account) echo me ;;
   usage) cat <<'JSON'
 ${usageJson}
@@ -547,7 +557,7 @@ esac
     process.env.AGENT_GATEWAY_TEST_SECRET_TOKEN = "s3cret";
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "tok";
     const sel = await pickClaudeAccount("agent-gateway:check");
-    expect(sel).toEqual({ pick: { kind: "dir", dir: "/h/.claude-me" }, account: "me" });
+    expect(sel).toEqual({ pick: { kind: "dir", dir: ME_DIR }, account: "me" });
     // the last call was `account`, which needs the picked dir
     const keys = readFileSync(envDump, "utf8")
       .split("\n")
@@ -565,7 +575,7 @@ esac
   describe("exhausted check validates the usage shape", () => {
     const check = async (rows: unknown, raw?: string): Promise<boolean> => {
       process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR = mkdtempSync(join(tmpdir(), "acct-pin-"));
-      recordSessionAccount("s", { account: "me", dir: "/h/.claude-me" });
+      recordSessionAccount("s", { account: "me", dir: ME_DIR });
       usageJson = raw ?? usage(rows);
       writeBin();
       process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN = bin;
@@ -588,5 +598,212 @@ esac
       expect(await check({ id: "me" })).toBe(false);
       expect(await check(null, "not json")).toBe(false);
     });
+  });
+});
+
+describe("round 3 — classifier, env, fail-closed, pins, clamp", () => {
+  test("a bare 'limit reached' is not a wall; named windows and the epoch suffix are", () => {
+    expect(isDefinitiveQuotaError("rate limit reached, retry shortly")).toBe(false);
+    expect(isDefinitiveQuotaError("limit reached")).toBe(false);
+    expect(isDefinitiveQuotaError("5-hour limit reached")).toBe(true);
+    expect(isDefinitiveQuotaError("weekly limit reached")).toBe(true);
+    expect(isDefinitiveQuotaError("Claude AI usage limit reached")).toBe(true);
+    expect(isDefinitiveQuotaError("limit reached|1792000000")).toBe(true);
+  });
+
+  const base = {
+    tool: "check",
+    backend: "max" as const,
+    model: "claude-sonnet-5-5",
+    anthropicBase: "",
+    iuKey: "",
+  };
+  test("an inherited dir + token with claudeConfigDir undefined keeps the token", () => {
+    const env = buildWorkerEnv({
+      ...base,
+      baseEnv: { CLAUDE_CONFIG_DIR: ME_DIR, CLAUDE_CODE_OAUTH_TOKEN: "tok" },
+    });
+    expect(env.CLAUDE_CONFIG_DIR).toBe(ME_DIR);
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("tok");
+  });
+  test("a dir set through extraEnv drops the token", () => {
+    const env = buildWorkerEnv({
+      ...base,
+      extraEnv: { CLAUDE_CONFIG_DIR: ME_DIR },
+      baseEnv: { CLAUDE_CODE_OAUTH_TOKEN: "tok" },
+    });
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+  });
+
+  describe("exclude + unknown id fails closed", () => {
+    afterEach(() => {
+      __setAccountPickerForTests();
+      __setDefaultAccountForTests();
+    });
+    test("selectAccount: a pick whose id is unresolved → iu; unavailable stays unavailable", async () => {
+      __setAccountPickerForTests(async () => ({ pick: { kind: "default" } }));
+      expect(await selectAccount({ lane: "l", excludeAccount: "iu" })).toEqual({
+        pick: { kind: "iu" },
+      });
+      __setAccountPickerForTests(async () => ({ pick: { kind: "unavailable" } }));
+      expect((await selectAccount({ lane: "l", excludeAccount: "iu" })).pick.kind).toBe(
+        "unavailable",
+      );
+    });
+    test("selectAccount: without an exclude an unresolved id is accepted", async () => {
+      __setAccountPickerForTests(async () => ({ pick: { kind: "default" } }));
+      expect((await selectAccount({ lane: "l" })).pick.kind).toBe("default");
+    });
+    test("resolveAttemptAccount: spill, no fallback, default id unknown, exclude set → walled", async () => {
+      __setAccountPickerForTests(async () => ({ pick: { kind: "iu" } }));
+      __setDefaultAccountForTests(async () => undefined);
+      expect(
+        await resolveAttemptAccount({ tool: "check", hasIuFallback: false, excludeAccount: "me" }),
+      ).toEqual({ kind: "walled", account: "me" });
+    });
+    test("resolveAttemptAccount: picker unavailable with an exclude still runs inherited", async () => {
+      __setAccountPickerForTests(async () => ({ pick: { kind: "unavailable" } }));
+      expect(
+        await resolveAttemptAccount({ tool: "check", hasIuFallback: false, excludeAccount: "me" }),
+      ).toEqual({ kind: "spawn", claudeConfigDir: undefined });
+    });
+  });
+
+  describe("pins", () => {
+    const pinDir = () =>
+      (process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR = mkdtempSync(join(tmpdir(), "acct-pin-")));
+    afterEach(() => delete process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR);
+
+    test("prune removes only old regular <id>.json files and survives odd entries", () => {
+      const dir = pinDir();
+      const old = new Date(Date.now() - 40 * 24 * 3600 * 1000);
+      const mk = (name: string, aged = true) => {
+        writeFileSync(join(dir, name), "{}");
+        if (aged) utimesSync(join(dir, name), old, old);
+      };
+      mk("old-1.json");
+      mk("fresh-1.json", false);
+      mk("notes.txt");
+      mk("bad name.json");
+      mkdirSync(join(dir, "dir.json"));
+      utimesSync(join(dir, "dir.json"), old, old);
+      symlinkSync(join(dir, "fresh-1.json"), join(dir, "link.json"));
+      pruneSessionAccounts();
+      expect(existsSync(join(dir, "old-1.json"))).toBe(false);
+      for (const kept of ["fresh-1.json", "notes.txt", "bad name.json", "dir.json", "link.json"]) {
+        expect(existsSync(join(dir, kept))).toBe(true);
+      }
+      expect(() => pruneSessionAccounts()).not.toThrow();
+    });
+
+    test("pin read validation: empty account, empty dir, missing dir", () => {
+      const dir = pinDir();
+      const put = (id: string, v: unknown) =>
+        writeFileSync(join(dir, `${id}.json`), JSON.stringify(v));
+      put("p1", { account: "", dir: null });
+      put("p2", { account: "iu", dir: "" });
+      put("p3", { account: "me", dir: join(dir, "gone") });
+      put("p4", { account: "me", dir });
+      expect(readSessionAccount("p1")).toBeNull();
+      expect(readSessionAccount("p2")).toEqual({ account: "iu", dir: null });
+      expect(readSessionAccount("p3")).toBeNull();
+      expect(readSessionAccount("p4")).toEqual({ account: "me", dir });
+    });
+  });
+
+  test("a far-future reset epoch is clamped to now + 7 d", () => {
+    const now = Date.UTC(2026, 9, 24, 12, 0, 0);
+    const far = Math.floor(now / 1000) + 90 * 24 * 3600;
+    expect(quotaResetEpochS(`usage limit reached|${far}`, now)).toBe(
+      Math.floor(now / 1000) + 7 * 24 * 3600,
+    );
+  });
+
+  test("exit 3 counts as a result only for pick", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acct-cli3-"));
+    const bin = join(dir, "claude-account");
+    writeFileSync(bin, "#!/bin/sh\necho spill\nexit 3\n");
+    chmodSync(bin, 0o755);
+    const prev = process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN;
+    process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN = bin;
+    try {
+      expect((await pickClaudeAccount("l")).pick.kind).toBe("iu");
+      expect(await markAccountExhausted("me", 1)).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN;
+      else process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN = prev;
+    }
+  });
+});
+
+describe("runSessionAttempt — picked account end to end (stub spawn)", () => {
+  const route: ToolRoute = {
+    model: "claude-sonnet-5-5",
+    backend: "max",
+    fallback: null,
+    transport: "session",
+    harness: "claude",
+  };
+  const saved = { ...process.env };
+  afterEach(() => {
+    __setSpawnForTests();
+    __setAccountPickerForTests();
+    __resetBreakersForTests();
+    for (const k of [
+      "AGENT_GATEWAY_SESSION_ACCOUNTS_DIR",
+      "AGENT_GATEWAY_CLAUDE_LOG_DIR",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+    ]) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  test("env carries the picked dir without the OAuth token; the pin and session_env name the account", async () => {
+    const work = mkdtempSync(join(tmpdir(), "acct-run-"));
+    const accountDir = join(work, "claude-me");
+    mkdirSync(accountDir);
+    const envDump = join(work, "env.txt");
+    process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR = join(work, "pins");
+    process.env.AGENT_GATEWAY_CLAUDE_LOG_DIR = join(work, "logs");
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "inherited-token";
+    __setAccountPickerForTests(async () => ({
+      pick: { kind: "dir", dir: accountDir },
+      account: "me",
+    }));
+    const events = [
+      { type: "system", subtype: "init", session_id: "sess-run-1" },
+      {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "{}",
+        session_id: "sess-run-1",
+        num_turns: 1,
+      },
+    ];
+    const script = `env > '${envDump}'\ncat <<'EOF'\n${events.map((e) => JSON.stringify(e)).join("\n")}\nEOF\n`;
+    __setSpawnForTests((_cmd, opts) =>
+      Bun.spawn(["sh", "-c", script], { ...opts, stdin: "ignore" }),
+    );
+
+    const r = await runSession({ cwd: work, prompt: "x", route, tool: "check" });
+    expect(r.error).toBeUndefined();
+    expect(r.ok).toBe(true);
+
+    const env = readFileSync(envDump, "utf8");
+    expect(env).toContain(`CLAUDE_CONFIG_DIR=${accountDir}`);
+    expect(env).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+
+    expect(readSessionAccount("sess-run-1")).toEqual({ account: "me", dir: accountDir });
+
+    const logFile = join(work, "logs", `${new Date().toISOString().slice(0, 10)}.jsonl`);
+    const lines = readFileSync(logFile, "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const line = lines.find((l) => l.event === "session_env" && l.data.session === "sess-run-1");
+    expect(line.data.account).toBe("me");
+    expect(line.data.backend).toBe("max");
   });
 });
