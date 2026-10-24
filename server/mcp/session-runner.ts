@@ -7,7 +7,14 @@ import { getIuConfig } from "../lib/iu-openai.ts";
 import { IDLE_TIMEOUT_MS } from "../lib/idle-timeout.ts";
 import { runOpencodeAttempt } from "./opencode-runner.ts";
 import { interruptOpencodeSession } from "./opencode-server.ts";
-import { readTrimmedLines, workerBaseEnv } from "./worker-shared.ts";
+import {
+  markAccountExhausted,
+  pickClaudeAccount,
+  quotaResetEpochS,
+  readTrimmedLines,
+  usageLane,
+  workerBaseEnv,
+} from "./worker-shared.ts";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import {
@@ -365,6 +372,10 @@ export interface WorkerEnvInput {
    *  controls thinking a different way, so this is silently dropped for one. */
   thinkingTokens?: number;
   extraEnv?: Record<string, string>;
+  /** Claude Max account config dir for this spawn (`claude-account pick`): a string sets
+   *  `CLAUDE_CONFIG_DIR`, `null` unsets it (the default account), `undefined` leaves the
+   *  inherited env alone (picker unavailable = today's behaviour). */
+  claudeConfigDir?: string | null;
   /** Override for tests — defaults to `process.env`. Only entries with a defined value are
    *  copied, mirroring `Object.entries` skipping `undefined`. */
   baseEnv?: Record<string, string | undefined>;
@@ -387,6 +398,7 @@ export function buildWorkerEnv(input: WorkerEnvInput): Record<string, string> {
     iuKey,
     thinkingTokens,
     extraEnv,
+    claudeConfigDir,
     baseEnv = process.env,
   } = input;
 
@@ -472,7 +484,12 @@ export function buildWorkerEnv(input: WorkerEnvInput): Record<string, string> {
     env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = ctx;
     env.API_TIMEOUT_MS = "3000000";
   }
+  if (claudeConfigDir === null) delete env.CLAUDE_CONFIG_DIR;
+  else if (claudeConfigDir !== undefined) env.CLAUDE_CONFIG_DIR = claudeConfigDir;
   if (extraEnv) Object.assign(env, extraEnv);
+  // A token in the env overrides the login of whatever config dir is set, so a worker on a
+  // non-default account must never carry one (it would silently run on the token's account).
+  if (env.CLAUDE_CONFIG_DIR) delete env.CLAUDE_CODE_OAUTH_TOKEN;
 
   return env;
 }
@@ -1123,6 +1140,14 @@ export function retryBackoffMs(attempt: number): number {
 
 // ── Runner ─────────────────────────────────────────────────────────────────────
 
+/** The per-attempt out-param `runSession` hands every attempt: `current` is the assistant-turn
+ *  count (see `runSessionAttempt`), `account` the Claude Max account id the attempt ran under
+ *  (set only when the picker answered and the attempt used a Max account). */
+export interface AttemptRef {
+  current: number;
+  account?: string;
+}
+
 /** A retry that skips `resolveBackend`: the loop already decided where the next
  *  attempt goes. `rate-limited` is the `max`→`iu` quota lane, `iu-unavailable` the
  *  reverse `iu`→`max` lane, `iu-5xx-after-output` the same direction for an IU server
@@ -1157,7 +1182,7 @@ export function resolveHarness(route: ToolRoute, forced?: ForcedAttempt): Harnes
  *  after it may have started writing files". */
 async function runSessionAttempt<T = unknown>(
   opts: SessionOptions<T>,
-  turnsRef: { current: number },
+  turnsRef: AttemptRef,
   forced?: ForcedAttempt,
 ): Promise<SessionResult<T>> {
   const {
@@ -1186,7 +1211,34 @@ async function runSessionAttempt<T = unknown>(
   // See the module-level comment on `resolveBackend` above. A forced retry skips it
   // outright: the caller already decided.
   const resolved: ResolvedBackend = resolveBackend(route);
-  const backend: Backend = forced ? forced.backend : resolved.backend;
+  const harness = resolveHarness(route, forced);
+  let backend: Backend = forced ? forced.backend : resolved.backend;
+  // Claude Max account pick (docs/claude-accounts.md §Spawn integration): once per attempt, only
+  // for a `claude -p` worker on Max. `iu` ("no account has headroom") takes the existing IU
+  // fallback path, but only where the route declares one — otherwise stay on the default account.
+  let claudeConfigDir: string | null | undefined;
+  let account: string | undefined;
+  if (harness === "claude" && backend === "max") {
+    const selected = await pickClaudeAccount(usageLane(tool));
+    if (
+      selected.pick.kind === "iu" &&
+      WORKER_FALLBACK !== "none" &&
+      route.fallback?.backend === "iu"
+    ) {
+      backend = "iu";
+      runnerLogger().warn(
+        { event: "backend.fallback", tool, model, backend, jobId, reason: "no-account-headroom" },
+        "falling back to iu — no Claude Max account has headroom",
+      );
+    } else if (selected.pick.kind === "dir") {
+      claudeConfigDir = selected.pick.dir;
+      account = selected.account;
+    } else if (selected.pick.kind === "default") {
+      claudeConfigDir = null;
+      account = selected.account;
+    }
+    if (backend === "max") turnsRef.account = account;
+  }
   // Shared identity for every log line below that reports a session failure. A post-mortem
   // on 8 `session.timeout` entries came back with `model: null, backend: null, tool: null` and
   // had to be joined against jobs.db by timestamp to find out which job each one belonged to —
@@ -1198,7 +1250,6 @@ async function runSessionAttempt<T = unknown>(
   // loop, the claude-specific envelope classification) is entirely skipped for one, in favor
   // of opencode-runner.ts's own self-contained attempt implementation, which returns the
   // same `SessionResult<T>` shape this function does everywhere else.
-  const harness = resolveHarness(route, forced);
   if (harness === "opencode") {
     return runOpencodeAttempt(opts, turnsRef, { model, backend, variant: route.variant });
   }
@@ -1287,6 +1338,7 @@ async function runSessionAttempt<T = unknown>(
     iuKey,
     thinkingTokens: route.thinkingTokens,
     extraEnv,
+    claudeConfigDir: backend === "max" ? claudeConfigDir : undefined,
   });
 
   const startMs = performance.now();
@@ -1301,6 +1353,7 @@ async function runSessionAttempt<T = unknown>(
       mcpServers: mcpServers ? Object.keys(mcpServers) : [],
       backend,
       baseUrl: env.ANTHROPIC_BASE_URL,
+      account,
     },
     "session spawn",
   );
@@ -1402,6 +1455,7 @@ async function runSessionAttempt<T = unknown>(
       backend,
       tool,
       "claude",
+      backend === "max" ? account : undefined,
     );
     sessionEnvWritten = true;
     // Report the id up to the job layer the instant it's known — see `onSessionId`'s doc
@@ -1891,6 +1945,11 @@ export interface NextAttemptInput {
   fallback: RouteFallback | null;
   /** The route's (override-applied) primary model — the same-model fallback runs it. */
   routeModel: string;
+  /** Claude Max account id the finished attempt ran under (`AttemptRef.account`); absent when
+   *  the picker did not answer, which keeps the account retry off. */
+  account?: string;
+  /** The one other-account retry of this session already happened. */
+  accountRetried?: boolean;
 }
 
 export type NextAttemptPlan =
@@ -1901,10 +1960,15 @@ export type NextAttemptPlan =
       withheld?: true;
     }
   | { kind: "retry" }
+  /** A Max worker hit its account's quota wall: mark the account exhausted and run the next
+   *  attempt as a fresh pick (the other account, or `iu`). Once per session. */
+  | { kind: "account-retry" }
   | { kind: "fallback"; forced: ForcedAttempt };
 
 /** Pure: given a finished attempt, decide whether to return it, retry the same backend,
  *  or switch lanes once. Rules, in order (see `runSession`'s doc comment for the why):
+ *  0. `max` on a picked account + quota-flavoured failure, first time → `account-retry`: the
+ *     next attempt re-picks (the other account, or `iu` when none has headroom).
  *  1. `max` + iu fallback + quota-flavoured failure → fallback to `iu`, same model.
  *  2. `iu` + max fallback + "IU never answered" → fallback to `max` on `fallback.model`
  *     (or the same model). Immediately for missing credentials, a timeout with zero
@@ -1956,6 +2020,16 @@ export function planNextAttempt(input: NextAttemptInput): NextAttemptPlan {
   // `error`, which can embed the model's own stdout) — see `isQuotaError`'s doc comment.
   const quotaFlavored =
     result.hadApiRetry === true || isQuotaError(result.classificationText ?? "");
+
+  if (
+    switchable &&
+    result.backend === "max" &&
+    quotaFlavored &&
+    input.account !== undefined &&
+    input.accountRetried !== true
+  ) {
+    return { kind: "account-retry" };
+  }
 
   if (switchable && result.backend === "max" && fallback?.backend === "iu" && quotaFlavored) {
     return {
@@ -2038,7 +2112,7 @@ export function planNextAttempt(input: NextAttemptInput): NextAttemptPlan {
 interface AttemptRunner {
   <T>(
     opts: SessionOptions<T>,
-    turnsRef: { current: number },
+    turnsRef: AttemptRef,
     forced?: ForcedAttempt,
   ): Promise<SessionResult<T>>;
 }
@@ -2062,6 +2136,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
   const fallback = WORKER_FALLBACK === "none" ? null : route.fallback;
   let attempt = 0;
   let usedFallback = false;
+  let accountRetried = false;
   // An open breaker starts the session on the fallback lane; `usedFallback` latches like any
   // other lane switch, so a failure there is never switched again.
   let forced = breakerPreempt(opts.tool ?? "unknown", route, fallback, Date.now());
@@ -2092,7 +2167,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     if (opts.jobId !== undefined && opts.isCancelled?.(opts.jobId)) {
       throw new SessionCancelledError(opts.jobId);
     }
-    const turnsRef = { current: 0 };
+    const turnsRef: AttemptRef = { current: 0 };
     const result = await attemptRunner(opts, turnsRef, forced);
     // One route key per attempt, primary or forced fallback alike — each backend/model
     // combination a job actually ran on gets its own streak, so a healthy `max` fallback
@@ -2121,7 +2196,28 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       usedFallback,
       fallback,
       routeModel: route.model,
+      account: turnsRef.account,
+      accountRetried,
     });
+    if (plan.kind === "account-retry" && turnsRef.account !== undefined) {
+      const until = quotaResetEpochS(result.classificationText, Date.now());
+      runnerLogger().warn(
+        {
+          event: "session.account_retry",
+          project: opts.cwd,
+          tool: opts.tool,
+          jobId: opts.jobId,
+          attempt,
+          account: turnsRef.account,
+          untilEpochS: until,
+          error: result.error,
+        },
+        "Max account hit its quota wall — marking it exhausted and re-picking",
+      );
+      await markAccountExhausted(turnsRef.account, until);
+      accountRetried = true;
+      continue;
+    }
     if (plan.kind === "fallback") {
       runnerLogger().warn(
         {

@@ -58,6 +58,7 @@ export function sessionEnvRecord(
   backend: Backend,
   tool: string | undefined,
   harness: Harness,
+  account?: string,
 ): {
   session: string;
   base_url: string | null;
@@ -65,8 +66,17 @@ export function sessionEnvRecord(
   backend: Backend;
   lane: string;
   harness: Harness;
+  account?: string;
 } {
-  return { session: sessionId, base_url: baseUrl, model, backend, lane: usageLane(tool), harness };
+  return {
+    session: sessionId,
+    base_url: baseUrl,
+    model,
+    backend,
+    lane: usageLane(tool),
+    harness,
+    ...(account ? { account } : {}),
+  };
 }
 
 /** Mirror dotfiles' SessionStart hook: record the worker's base_url keyed by its
@@ -82,7 +92,10 @@ export function sessionEnvRecord(
  * fires inside one — this sidecar record is the sole source, not a mirror of a redundant
  * one, despite the doc-comment framing above predating that fact. Exported so
  * `opencode-runner.ts` writes the identical shape (`harness: "opencode"`) rather than a
- * second, drifting sink usage-tracker would need its own collector for. */
+ * second, drifting sink usage-tracker would need its own collector for.
+ *
+ * `account` is the Claude Max account id (`claude-account account`) the worker ran under;
+ * omitted for IU and for a picker failure. */
 export function writeSessionEnv(
   sessionId: string,
   baseUrl: string | null,
@@ -90,6 +103,7 @@ export function writeSessionEnv(
   backend: Backend,
   tool: string | undefined,
   harness: Harness,
+  account?: string,
 ): void {
   try {
     mkdirSync(CLAUDE_LOG_DIR, { recursive: true });
@@ -100,7 +114,7 @@ export function writeSessionEnv(
         src: "agent-gateway",
         event: "session_env",
         level: "info",
-        data: sessionEnvRecord(sessionId, baseUrl, model, backend, tool, harness),
+        data: sessionEnvRecord(sessionId, baseUrl, model, backend, tool, harness, account),
       }) + "\n";
     appendFileSync(join(CLAUDE_LOG_DIR, `${now.slice(0, 10)}.jsonl`), line);
   } catch {
