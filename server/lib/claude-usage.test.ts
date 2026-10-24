@@ -3,7 +3,10 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
+  __expireClaudeUsageForTests,
   __resetClaudeUsageForTests,
+  __settleClaudeUsageForTests,
+  accountColumnWidth,
   __resetPostedUsageForTests,
   buildAccountQuotas,
   mergeAccountQuota,
@@ -103,6 +106,28 @@ describe("readClaudeUsage (fake CLI)", () => {
     expect(await readClaudeUsage()).toBeNull();
   });
 
+  test("stale-while-revalidate: serves the last good at once, refreshes in the background", async () => {
+    const state = join(dir, "state");
+    writeFileSync(state, "10");
+    fakeCli(
+      `P=$(cat ${state})\necho '{"accounts":[{"id":"iu","five_hour":'$P',"five_hour_age_s":0,"age_s":0}]}'`,
+    );
+    expect((await readClaudeUsage())?.accounts[0]?.five_hour).toBe(10);
+
+    writeFileSync(state, "20");
+    __expireClaudeUsageForTests();
+    expect((await readClaudeUsage())?.accounts[0]?.five_hour).toBe(10); // stale, immediate
+    await __settleClaudeUsageForTests();
+    expect((await readClaudeUsage())?.accounts[0]?.five_hour).toBe(20);
+
+    // a failing refresh keeps serving the last good
+    fakeCli("exit 1");
+    __expireClaudeUsageForTests();
+    await readClaudeUsage();
+    await __settleClaudeUsageForTests();
+    expect((await readClaudeUsage())?.accounts[0]?.five_hour).toBe(20);
+  });
+
   test("CLI down: POSTed values still produce an account", async () => {
     fakeCli("exit 1");
     recordPostedUsage("me", { five_hour_pct: 4, five_hour_mins_left: 30, seven_day_pct: 9 });
@@ -143,6 +168,13 @@ describe("mergeAccountQuota — POST precedence per window", () => {
     const q = mergeAccountQuota(c, NOW, post(60_000), NOW);
     expect(q.five_hour_pct).toBe(50);
     expect(q.seven_day_pct).toBe(88);
+  });
+
+  test("newer POST with null mins_left keeps the CLI 5h reset", () => {
+    const q = mergeAccountQuota(cli, NOW, post(10_000, { five_hour_mins_left: null }), NOW);
+    expect(q.five_hour_pct).toBe(50);
+    expect(q.five_hour_resets_at).toBe(1_800_000_000);
+    expect(q.five_hour_mins_left).toBe(Math.ceil((1_800_000_000 * 1000 - NOW) / 60_000));
   });
 
   test("POST with null seven_day keeps the CLI value", () => {
@@ -215,5 +247,14 @@ describe("renderQuotaHeader", () => {
   test("ids are aligned", () => {
     const lines = renderQuotaHeader({ iu: base, work: base }, NOW);
     expect(lines[0]!.startsWith("iu    5h")).toBe(true);
+  });
+});
+
+describe("accountColumnWidth", () => {
+  const q = (enabled = true) => ({ enabled }) as AccountQuota;
+  test("min 2, longest enabled id or row account", () => {
+    expect(accountColumnWidth({ a: q() }, [])).toBe(2);
+    expect(accountColumnWidth({ work: q(), longname: q(false) }, ["?"])).toBe(4);
+    expect(accountColumnWidth({ iu: q() }, ["research"])).toBe(8);
   });
 });

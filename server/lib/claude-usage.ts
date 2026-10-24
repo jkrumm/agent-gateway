@@ -3,6 +3,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { z } from "zod";
 import { appLogger as logger } from "../logger.ts";
+import { accountCliEnv } from "../mcp/worker-shared.ts";
 
 // Multi-account Claude Max quota (dotfiles docs/claude-accounts.md §Displays). The quota cache
 // is owned by the dotfiles CLI `claude-account`; `claude-account usage --json` reads only its
@@ -15,8 +16,10 @@ const CLI_TIMEOUT_MS = 5_000;
 const MEMO_MS = 15_000;
 /** A sample older than this is `stale` — the picker's eligibility cutoff (spec §Rule v1). */
 export const STALE_AFTER_MS = 6 * 3600 * 1000;
-const ACCOUNT_ID_RE = /^[a-z][a-z0-9-]{0,15}$/;
-const DEFAULT_ACCOUNT = "iu";
+/** Account id shape — the one definition, used by the CLI parser and the POST body. */
+export const ACCOUNT_ID_PATTERN = "^[a-z][a-z0-9-]{0,15}$";
+const ACCOUNT_ID_RE = new RegExp(ACCOUNT_ID_PATTERN);
+export const DEFAULT_ACCOUNT = "iu";
 
 const nullableNum = z.number().nullable().optional();
 
@@ -69,14 +72,6 @@ const accountBin = (): string =>
   process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN ??
   join(homedir(), ".local", "bin", "claude-account");
 
-const SCRUBBED_ENV = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"];
-
-function cliEnv(): Record<string, string | undefined> {
-  const env: Record<string, string | undefined> = { ...process.env };
-  for (const key of SCRUBBED_ENV) delete env[key];
-  return env;
-}
-
 function runCli(): Promise<string | null> {
   return new Promise((resolve) => {
     execFile(
@@ -84,7 +79,7 @@ function runCli(): Promise<string | null> {
       ["usage", "--json"],
       {
         timeout: Number(process.env.AGENT_GATEWAY_CLAUDE_USAGE_TIMEOUT_MS) || CLI_TIMEOUT_MS,
-        env: cliEnv(),
+        env: accountCliEnv(),
         maxBuffer: 1024 * 1024,
       },
       (err, stdout) => resolve(err ? null : stdout),
@@ -92,36 +87,72 @@ function runCli(): Promise<string | null> {
   });
 }
 
-let memo: { at: number; promise: Promise<CliUsage | null> } | null = null;
+// Stale-while-revalidate: the last good result is served immediately; a refresh (at most one in
+// flight) starts in the background once it is older than MEMO_MS. Only a cold start (nothing good
+// yet) waits, bounded by the CLI timeout. A failed refresh keeps serving the last good result —
+// its ages keep growing, so the header turns `stale` on its own.
+let lastGood: CliUsage | null = null;
+let lastAttempt = 0;
+let inflight: Promise<CliUsage | null> | null = null;
+let generation = 0;
 let failing = false;
 
-/** `claude-account usage --json`, memoized 15 s (the promise, so concurrent callers share one
- *  run). Never throws; null on any failure, logged once per failure streak. */
-export function readClaudeUsage(): Promise<CliUsage | null> {
-  const now = Date.now();
-  if (memo && now - memo.at < MEMO_MS) return memo.promise;
-  const promise = (async (): Promise<CliUsage | null> => {
+function refresh(): Promise<CliUsage | null> {
+  if (inflight) return inflight;
+  const gen = generation;
+  lastAttempt = Date.now();
+  const run = (async (): Promise<CliUsage | null> => {
     const stdout = await runCli();
     const usage = stdout == null ? null : parseClaudeUsage(stdout, Date.now());
+    if (gen !== generation) return usage; // reset mid-flight (tests): drop the result
+    lastAttempt = Date.now();
     if (usage) {
       failing = false;
+      lastGood = usage;
     } else if (!failing) {
       failing = true;
       logger.warn(
         { event: "usage.cli_failed", tool: "usage" },
-        "claude-account usage --json failed or returned garbage — serving POSTed values only",
+        "claude-account usage --json failed or returned garbage — serving the last good or POSTed values",
       );
     }
     return usage;
-  })();
-  memo = { at: now, promise };
-  return promise;
+  })().finally(() => {
+    if (gen === generation) inflight = null;
+  });
+  inflight = run;
+  return run;
 }
 
-/** Test-only — drops the memo and the failure-streak flag. */
+/** `claude-account usage --json`, stale-while-revalidate (see above). Never throws; null only
+ *  when no run has ever succeeded. */
+export function readClaudeUsage(): Promise<CliUsage | null> {
+  if (lastGood) {
+    if (Date.now() - lastAttempt >= MEMO_MS) void refresh();
+    return Promise.resolve(lastGood);
+  }
+  // cold failure inside the memo window: don't hammer the CLI
+  if (!inflight && Date.now() - lastAttempt < MEMO_MS) return Promise.resolve(null);
+  return refresh();
+}
+
+/** Test-only — drops all cached state. */
 export function __resetClaudeUsageForTests(): void {
-  memo = null;
+  generation += 1;
+  lastGood = null;
+  lastAttempt = 0;
+  inflight = null;
   failing = false;
+}
+
+/** Test-only — makes the cached result look older than the memo window. */
+export function __expireClaudeUsageForTests(): void {
+  lastAttempt = 0;
+}
+
+/** Test-only — resolves when no refresh is in flight. */
+export async function __settleClaudeUsageForTests(): Promise<void> {
+  await inflight;
 }
 
 // ── POSTed statusline values ─────────────────────────────────────────────────────────────────
@@ -134,12 +165,6 @@ export interface PostedUsage {
 }
 
 const posted = new Map<string, PostedUsage>();
-
-export function isAccountId(id: string): boolean {
-  return ACCOUNT_ID_RE.test(id);
-}
-
-export { DEFAULT_ACCOUNT };
 
 /** Store a POST for `account` and return the stored entry (`updated_at` = now). */
 export function recordPostedUsage(
@@ -208,10 +233,10 @@ export function mergeAccountQuota(
 
   if (post && (fiveTs == null || post.updated_at > fiveTs)) {
     fiveHourPct = post.five_hour_pct;
-    fiveResets =
-      post.five_hour_mins_left == null
-        ? null
-        : Math.round(post.updated_at / 1000 + post.five_hour_mins_left * 60);
+    // Only a POST that carries minutes-left moves the reset; otherwise the CLI's stays.
+    if (post.five_hour_mins_left != null) {
+      fiveResets = Math.round(post.updated_at / 1000 + post.five_hour_mins_left * 60);
+    }
     updatedAt = Math.max(updatedAt ?? 0, post.updated_at);
     source = "post";
   }
@@ -253,6 +278,18 @@ export async function buildAccountQuotas(): Promise<Record<string, AccountQuota>
   return out;
 }
 
+/** Width of the account id column, shared by the quota header and the agent rows: the longest
+ *  enabled id or row account, at least 2. */
+export function accountColumnWidth(
+  accounts: Record<string, AccountQuota>,
+  rowAccounts: Iterable<string | null | undefined>,
+): number {
+  let width = 2;
+  for (const [id, q] of Object.entries(accounts)) if (q.enabled) width = Math.max(width, id.length);
+  for (const a of rowAccounts) width = Math.max(width, a?.length ?? 0);
+  return width;
+}
+
 // ── Overview pane header ─────────────────────────────────────────────────────────────────────
 
 const pad2 = (n: number): string => String(n).padStart(2, "0");
@@ -276,9 +313,12 @@ const pct = (v: number | null): string => (v == null ? "?" : `${Math.round(v)}%`
 /** One line per enabled account: `iu  5h 8% ↺2h31m · 7d 88% ↺Tue 17:00`, plus `exhausted until
  *  HH:MM` / `auth!` / `stale` (sample older than 6 h) markers. Empty array when no account is
  *  enabled. Times are local (the mini's zone). */
-export function renderQuotaHeader(accounts: Record<string, AccountQuota>, now: number): string[] {
+export function renderQuotaHeader(
+  accounts: Record<string, AccountQuota>,
+  now: number,
+  idWidth: number = accountColumnWidth(accounts, []),
+): string[] {
   const enabled = Object.entries(accounts).filter(([, q]) => q.enabled);
-  const idWidth = Math.max(0, ...enabled.map(([id]) => id.length));
   return enabled.map(([id, q]) => {
     const five = `5h ${pct(q.five_hour_pct)} ${untilLabel(q.five_hour_resets_at, now)}`.trimEnd();
     const seven = `7d ${pct(q.seven_day_pct)} ${weeklyLabel(q.seven_day_resets_at)}`.trimEnd();

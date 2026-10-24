@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { recordSessionAccount } from "../mcp/worker-shared.ts";
 import {
   __resetSessionAccountCacheForTests,
   mergeAgents,
@@ -54,6 +55,31 @@ describe("session → account join", () => {
     // hits survive log removal (cache never changes for a session)
     rmSync(dir, { recursive: true, force: true });
     expect(resolveSessionAccounts(["old"], 80_000).get("old")).toBe("me");
+  });
+
+  test("spawn pins resolve without any log line", () => {
+    const pins = mkdtempSync(join(tmpdir(), "pins-"));
+    process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR = pins;
+    try {
+      recordSessionAccount("pinned-1", { account: "me", dir: null });
+      expect(resolveSessionAccounts(["pinned-1", "none"], 5).get("pinned-1")).toBe("me");
+    } finally {
+      delete process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR;
+      rmSync(pins, { recursive: true, force: true });
+    }
+  });
+
+  test("repeated misses back off exponentially (60 s, 120 s, …)", () => {
+    const file = join(dir, "2026-10-24.jsonl");
+    writeFileSync(file, `${line("other", "iu")}\n`);
+    expect(resolveSessionAccounts(["g"], 0).size).toBe(0); // miss 1, retry after 60 s
+    writeFileSync(file, `${line("g", "me")}\n`);
+    expect(resolveSessionAccounts(["g"], 59_000).size).toBe(0);
+    writeFileSync(file, `${line("other", "iu")}\n`);
+    expect(resolveSessionAccounts(["g"], 60_000).size).toBe(0); // miss 2, retry after 120 s
+    writeFileSync(file, `${line("g", "me")}\n`);
+    expect(resolveSessionAccounts(["g"], 120_000).size).toBe(0); // still backing off
+    expect(resolveSessionAccounts(["g"], 180_000).get("g")).toBe("me");
   });
 
   test("missing log dir → unknown, no throw", () => {
