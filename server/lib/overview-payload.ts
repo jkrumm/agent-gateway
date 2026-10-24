@@ -10,6 +10,7 @@ import {
   type FetchWardenBoardOptions,
   type WardenBoard,
 } from "./warden-board.ts";
+import { buildAccountQuotas, type AccountQuota } from "./claude-usage.ts";
 import { appLogger as logger } from "../logger.ts";
 
 // The one JSON `GET /api/overview` returns — a fresh deterministic snapshot with the newest
@@ -86,7 +87,10 @@ function readCachedOverview(): OverviewOutput | null {
 }
 
 export type OverviewPayload = Omit<AgentsSnapshot, "projects"> &
-  ReturnType<typeof mergeOverviewIntoSnapshot> & { warden: WardenBoard };
+  ReturnType<typeof mergeOverviewIntoSnapshot> & {
+    warden: WardenBoard;
+    quota: { accounts: Record<string, AccountQuota> };
+  };
 
 /** Fresh (cached ≤45 s) snapshot + the latest completed overview job, merged by agent id,
  *  plus warden's board fetched inside the same cache window. `payload` is exactly what
@@ -96,11 +100,22 @@ export async function buildOverviewPayload(): Promise<{
   snapshot: AgentsSnapshot;
   merged: ReturnType<typeof mergeOverviewIntoSnapshot>;
   warden: WardenBoard;
+  quota: Record<string, AccountQuota>;
   payload: OverviewPayload;
 }> {
-  const [snapshot, warden] = await Promise.all([cachedBuildSnapshot(), cachedFetchWardenBoard()]);
+  const [snapshot, warden, quota] = await Promise.all([
+    cachedBuildSnapshot(),
+    cachedFetchWardenBoard(),
+    buildAccountQuotas(),
+  ]);
   const cached = readCachedOverview();
   const merged = mergeOverviewIntoSnapshot(snapshot, cached);
-  const payload = { ...snapshot, projects: merged.projects, overview: merged.overview, warden };
-  return { snapshot, merged, warden, payload };
+  const payload = {
+    ...snapshot,
+    projects: merged.projects,
+    overview: merged.overview,
+    warden,
+    quota: { accounts: quota },
+  };
+  return { snapshot, merged, warden, quota, payload };
 }

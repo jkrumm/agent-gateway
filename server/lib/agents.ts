@@ -6,6 +6,8 @@ import { appLogger as logger } from "../logger.ts";
 import type { JobRecord, JobStatus } from "../jobs/types.ts";
 import { listJobRecords } from "../jobs/store.ts";
 import { getGitStatus } from "./git.ts";
+import { renderQuotaHeader, type AccountQuota } from "./claude-usage.ts";
+import { readSessionAccount } from "../mcp/worker-shared.ts";
 import type { WardenBoard } from "./warden-board.ts";
 import { renderWardenBlock } from "./warden-board.ts";
 import {
@@ -149,6 +151,14 @@ export const AGENT_OUTPUT = z.object({
         "the tail lands inside an oversized line; file mtime is never used — Claude Code " +
         "touches an idle session's transcript file, so mtime does not mean user activity); " +
         "job timestamp for dispatch entries. Null if unknown.",
+    ),
+  account: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      "Claude Max account id the agent runs on (`iu`, `me`), from the session's `session_env` " +
+        "log line or the dispatch spawn pin. Null when unknown.",
     ),
   startedAt: z
     .number()
@@ -413,6 +423,8 @@ export interface DispatchJobRaw {
   createdAt: number;
   startedAt: number | null;
   finishedAt: number | null;
+  /** Account recorded at spawn, when the job's worker session was pinned. */
+  account?: string | null;
 }
 
 export interface MergeAgentsInput {
@@ -423,6 +435,8 @@ export interface MergeAgentsInput {
   /** Resolved transcript tails, keyed by Claude sessionId. Reading them is I/O, so the caller
    *  resolves this map before calling into this pure function. */
   transcripts: Map<string, TranscriptTail>;
+  /** Claude sessionId → account id (see `resolveSessionAccounts`). Absent = all unknown. */
+  accounts?: Map<string, string>;
   now: number;
   staleAfterMs: number;
 }
@@ -469,6 +483,7 @@ export function mergeAgents(input: MergeAgentsInput): MergedProject[] {
     claudeAgents,
     dispatchJobs,
     transcripts,
+    accounts,
     now,
     staleAfterMs,
   } = input;
@@ -506,6 +521,7 @@ export function mergeAgents(input: MergeAgentsInput): MergedProject[] {
         lastPrompt: tail.lastPrompt,
         lastReply: tail.lastReply,
         lastActivityAt: tail.lastActivityAt,
+        account: sessionId ? (accounts?.get(sessionId) ?? null) : null,
         startedAt: null,
       },
     });
@@ -540,6 +556,7 @@ export function mergeAgents(input: MergeAgentsInput): MergedProject[] {
         lastPrompt: tail.lastPrompt,
         lastReply: tail.lastReply,
         lastActivityAt: tail.lastActivityAt,
+        account: accounts?.get(c.sessionId) ?? null,
         startedAt: c.startedAt,
       },
     });
@@ -565,6 +582,7 @@ export function mergeAgents(input: MergeAgentsInput): MergedProject[] {
         lastPrompt: null,
         lastReply: null,
         lastActivityAt: job.finishedAt ?? job.startedAt ?? job.createdAt,
+        account: job.account ?? null,
         startedAt: job.startedAt ?? job.createdAt,
       },
     });
@@ -817,6 +835,9 @@ export interface AgentEnrichment {
 }
 
 export interface RenderTextOptions {
+  /** Per-account quota (`buildAccountQuotas`). Set = the overview pane: a quota header on top
+   *  and an account column per agent row. Omitted keeps `/api/agents.txt` unchanged. */
+  quota?: Record<string, AccountQuota>;
   enrichment?: Map<string, AgentEnrichment>;
   /** `/api/overview`'s job metadata, or null when no `overview` job has ever completed.
    *  Omit entirely (undefined) to render exactly like the plain `/api/agents.txt` — this is
@@ -857,11 +878,21 @@ export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): 
   const color = opts?.color === true;
   const cols = opts?.cols;
   const lineMax = cols ?? MAX_LINE_CHARS;
-  const titleMax = cols != null ? Math.max(MIN_TITLE_CHARS, cols - 40) : MAX_TITLE_CHARS;
+  const accountColWidth = opts?.quota ? 3 : 0;
+  const titleMax =
+    (cols != null ? Math.max(MIN_TITLE_CHARS, cols - 40) : MAX_TITLE_CHARS) - accountColWidth;
   const standingMax = cols != null ? cols - 8 : MAX_STANDING_CHARS;
   const dropAgentCount = cols != null && cols < DROP_AGENT_COUNT_BELOW_COLS;
   const splitHeader = cols != null && cols < SPLIT_HEADER_BELOW_COLS;
   const lines: string[] = [];
+
+  if (opts?.quota) {
+    for (const quotaLine of renderQuotaHeader(opts.quota, generatedAt)) {
+      lines.push(
+        color ? clampVisible(`${DIM}${quotaLine}${RESET}`, lineMax) : clampLine(quotaLine, lineMax),
+      );
+    }
+  }
 
   const generatedAtIso = new Date(generatedAt).toISOString();
   const countsText =
@@ -947,7 +978,8 @@ export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): 
       const statePadded = agent.state.padEnd(9);
       const title = truncate(agent.title ?? "(untitled)", titleMax);
       const age = relativeAge(agent.lastActivityAt, generatedAt);
-      const base = `  ${icon} ${statePadded} ${title}  · ${age}`;
+      const accountCol = opts?.quota ? `${(agent.account ?? "?").padEnd(2)} ` : "";
+      const base = `  ${icon} ${statePadded} ${accountCol}${title}  · ${age}`;
 
       if (color) {
         const category = effectiveCategory(agent.state, enrichment);
@@ -1190,8 +1222,91 @@ export function collectDispatchJobs(records: JobRecord[], now: number): Dispatch
       createdAt: r.createdAt,
       startedAt: r.startedAt,
       finishedAt: r.finishedAt,
+      account: (r.sessionId ? readSessionAccount(r.sessionId)?.account : null) ?? null,
     }))
     .filter((j) => j.cwd !== "");
+}
+
+// ── Session → account (the `session_env` line in ~/.claude/logs) ─────────────────────────────
+//
+// The hook / agent-gateway writes `{event:"session_env", data:{session, account}}` when a
+// session starts. An account never changes for a session, so a hit is cached forever; a miss is
+// retried at most every MISS_RETRY_MS (the line may not exist yet). Day files are ~300 KB, so a
+// miss scans only the newest SESSION_LOG_DAYS files.
+
+const SESSION_LOG_DAYS = 3;
+const MISS_RETRY_MS = 60_000;
+const sessionAccountCache = new Map<string, string>();
+const sessionAccountMisses = new Map<string, number>();
+
+const claudeLogDir = (): string =>
+  process.env.AGENT_GATEWAY_CLAUDE_LOG_DIR ?? join(homedir(), ".claude", "logs");
+
+/** Pure: sessionId → account for every `session_env` line in `text` carrying an `account`;
+ *  later lines win (the newest line is last). */
+export function parseSessionAccounts(text: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const line of text.split("\n")) {
+    if (!line.includes('"session_env"')) continue;
+    try {
+      const data = JSON.parse(line)?.data;
+      if (typeof data?.session === "string" && typeof data?.account === "string" && data.account) {
+        out.set(data.session, data.account);
+      }
+    } catch {
+      /* partial or foreign line */
+    }
+  }
+  return out;
+}
+
+/** Resolve accounts for `sessionIds` from the log dir, through the process-lifetime cache. */
+export function resolveSessionAccounts(
+  sessionIds: string[],
+  now = Date.now(),
+): Map<string, string> {
+  const result = new Map<string, string>();
+  const missing: string[] = [];
+  for (const id of sessionIds) {
+    const hit = sessionAccountCache.get(id);
+    if (hit) result.set(id, hit);
+    else {
+      const lastMiss = sessionAccountMisses.get(id);
+      if (lastMiss == null || now - lastMiss >= MISS_RETRY_MS) missing.push(id);
+    }
+  }
+  if (missing.length === 0) return result;
+
+  const wanted = new Set(missing);
+  try {
+    const dir = claudeLogDir();
+    const files = readdirSync(dir)
+      .filter((f) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(f))
+      .toSorted()
+      .toReversed()
+      .slice(0, SESSION_LOG_DAYS);
+    for (const file of files) {
+      const found = parseSessionAccounts(readFileSync(join(dir, file), "utf8"));
+      for (const [id, account] of found) {
+        if (!wanted.has(id) || sessionAccountCache.has(id)) continue;
+        sessionAccountCache.set(id, account);
+        result.set(id, account);
+      }
+      if (missing.every((id) => sessionAccountCache.has(id))) break;
+    }
+  } catch {
+    /* no log dir — everything stays unknown */
+  }
+  for (const id of missing) {
+    if (!sessionAccountCache.has(id)) sessionAccountMisses.set(id, now);
+  }
+  return result;
+}
+
+/** Test-only. */
+export function __resetSessionAccountCacheForTests(): void {
+  sessionAccountCache.clear();
+  sessionAccountMisses.clear();
 }
 
 const DEFAULT_STALE_HOURS = 24;
@@ -1256,12 +1371,15 @@ export async function buildSnapshot(staleHoursOverride?: number): Promise<Agents
 
   const dispatchJobs = collectDispatchJobs(listJobRecords(), now);
 
+  const accounts = resolveSessionAccounts([...sessionsByCwd.keys()], now);
+
   const projects = mergeAgents({
     herdrAgents: herdrAgentsResult.items,
     herdrWorkspaces: herdrWorkspacesResult.items,
     claudeAgents: claudeAgentsResult.items,
     dispatchJobs,
     transcripts,
+    accounts,
     now,
     staleAfterMs,
   });

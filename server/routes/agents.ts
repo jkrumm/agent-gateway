@@ -94,7 +94,7 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
       { event: "overview.request", tool: "overview", format: "text" },
       "overview snapshot requested",
     );
-    const { snapshot, merged, warden } = await buildOverviewPayload();
+    const { snapshot, merged, warden, quota } = await buildOverviewPayload();
     const enrichment = new Map<string, AgentEnrichment>();
     for (const project of merged.projects) {
       for (const agent of project.agents) {
@@ -118,5 +118,12 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
       },
       "overview snapshot built",
     );
-    return renderText(snapshot, { enrichment, overview: merged.overview, warden, color, cols });
+    return renderText(snapshot, {
+      enrichment,
+      overview: merged.overview,
+      warden,
+      quota,
+      color,
+      cols,
+    });
   });
