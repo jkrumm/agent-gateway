@@ -5,7 +5,15 @@
 // imports nothing from any of them. `session-runner.ts` re-exports `scrubSensitiveEnv`
 // and `usageLane` so existing importers keep resolving.
 
-import { mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -173,7 +181,8 @@ async function runAccountCli(
     const timer = setTimeout(() => proc.kill("SIGKILL"), ACCOUNT_CLI_TIMEOUT_MS);
     try {
       const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-      return exitCode === 0 || exitCode === 3 ? { stdout, exitCode } : null;
+      // Exit 3 is the picker's spill signal; for any other subcommand it is just a failure.
+      return exitCode === 0 || (exitCode === 3 && args[0] === "pick") ? { stdout, exitCode } : null;
     } finally {
       clearTimeout(timer);
     }
@@ -246,13 +255,16 @@ export function __setExhaustedMarkerForTests(
   exhaustedMarker = fn ?? markExhaustedViaCli;
 }
 
+const QUOTA_RESET_MAX_S = 7 * 24 * 3600;
+
 /** Epoch seconds a quota wall lifts: the CLI's `limit reached|<epoch>` suffix when present,
  *  else `nowMs` + 1 h. */
 export function quotaResetEpochS(text: string | undefined, nowMs: number): number {
   const m = /limit reached\s*\|\s*(\d{10})\b/i.exec(text ?? "");
   const fallback = Math.floor(nowMs / 1000) + 3600;
   const epoch = m ? Number(m[1]) : fallback;
-  return epoch > nowMs / 1000 ? epoch : fallback;
+  if (epoch <= nowMs / 1000) return fallback;
+  return Math.min(epoch, Math.floor(nowMs / 1000) + QUOTA_RESET_MAX_S); // a bogus far-future epoch must not park an account
 }
 
 // ── Session → account pin ────────────────────────────────────────────────────────────────
@@ -278,30 +290,60 @@ const sessionAccountDir = (): string =>
 
 const SESSION_ID_RE = /^[A-Za-z0-9_-]+$/;
 
-/** Record which account a claude session runs under. Best-effort, never throws; old pins are
- *  pruned on write. */
+const SESSION_PIN_FILE_RE = /^[A-Za-z0-9_-]+\.json$/;
+
+/** Delete pins older than 30 days: regular `<sessionId>.json` files only, each entry on its own
+ *  try so one unreadable entry never stops the sweep. Runs once per process, lazily, before the
+ *  first pin is written. */
+export function pruneSessionAccounts(): void {
+  const dir = sessionAccountDir();
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return;
+  }
+  const cutoff = Date.now() - SESSION_ACCOUNT_RETENTION_MS;
+  for (const name of entries) {
+    if (!SESSION_PIN_FILE_RE.test(name)) continue;
+    try {
+      const path = join(dir, name);
+      const st = lstatSync(path);
+      if (st.isFile() && st.mtimeMs < cutoff) unlinkSync(path);
+    } catch {
+      /* skip this entry */
+    }
+  }
+}
+
+let pinsPruned = false;
+
+/** Record which account a claude session runs under. Best-effort, never throws. */
 export function recordSessionAccount(sessionId: string, pin: SessionAccountPin): void {
   if (!SESSION_ID_RE.test(sessionId)) return;
   try {
+    if (!pinsPruned) {
+      pinsPruned = true;
+      pruneSessionAccounts();
+    }
     const dir = sessionAccountDir();
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `${sessionId}.json`), JSON.stringify(pin));
-    const cutoff = Date.now() - SESSION_ACCOUNT_RETENTION_MS;
-    for (const f of readdirSync(dir)) {
-      const path = join(dir, f);
-      if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
-    }
   } catch {
     /* a missing pin only costs a re-pick */
   }
 }
 
+/** The pin for a session, or null when absent or unusable: it needs a non-empty account, an
+ *  empty dir reads as the default account, and a pinned dir must still exist. */
 export function readSessionAccount(sessionId: string): SessionAccountPin | null {
   if (!SESSION_ID_RE.test(sessionId)) return null;
   try {
     const raw = JSON.parse(readFileSync(join(sessionAccountDir(), `${sessionId}.json`), "utf8"));
-    if (typeof raw?.account !== "string") return null;
-    return { account: raw.account, dir: typeof raw.dir === "string" ? raw.dir : null };
+    if (typeof raw?.account !== "string" || raw.account === "") return null;
+    const dir = typeof raw.dir === "string" && raw.dir !== "" ? raw.dir : null;
+    if (dir !== null && !existsSync(dir)) return null;
+    return { account: raw.account, dir };
   } catch {
     return null;
   }
@@ -353,8 +395,11 @@ export async function selectAccount(input: {
     };
   }
   const selected = await pickClaudeAccount(lane);
-  if (excludeAccount !== undefined && selected.account === excludeAccount) {
-    return { pick: { kind: "iu" } };
+  if (excludeAccount !== undefined && selected.pick.kind !== "unavailable") {
+    // The picked account must be provably not the walled one: an unresolved id fails closed too.
+    if (selected.account === undefined || selected.account === excludeAccount) {
+      return { pick: { kind: "iu" } };
+    }
   }
   return selected;
 }
