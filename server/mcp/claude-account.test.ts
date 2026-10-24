@@ -16,10 +16,19 @@ import {
   type SessionOptions,
   type SessionResult,
 } from "./session-runner.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  __setAccountPickerForTests,
   __setExhaustedMarkerForTests,
+  __setExhaustionCheckForTests,
   parseAccountPick,
   quotaResetEpochS,
+  readSessionAccount,
+  recordSessionAccount,
+  selectAccount,
+  type AccountSelection,
 } from "./worker-shared.ts";
 
 describe("parseAccountPick", () => {
@@ -36,9 +45,13 @@ describe("parseAccountPick", () => {
       dir: "/Users/x/.claude-b",
     });
   });
-  test("exit 3 + iu → iu; exit 3 with anything else is a failure", () => {
+  test("exit 3 is the spill signal whatever stdout says (spill, iu, empty)", () => {
+    expect(parseAccountPick("spill\n", 3)).toEqual({ kind: "iu" });
     expect(parseAccountPick("iu\n", 3)).toEqual({ kind: "iu" });
-    expect(parseAccountPick("nope", 3)).toEqual({ kind: "unavailable" });
+    expect(parseAccountPick("", 3)).toEqual({ kind: "iu" });
+  });
+  test("a spill string at exit 0 is not a spill", () => {
+    expect(parseAccountPick("spill\n", 0)).toEqual({ kind: "unavailable" });
   });
   test("failure shapes → unavailable", () => {
     expect(parseAccountPick("", 0)).toEqual({ kind: "unavailable" });
@@ -203,5 +216,98 @@ describe("runSession — retry on the other account", () => {
     const r = await runSession(opts);
     expect(r.ok).toBe(true);
     expect(n).toBe(2);
+  });
+});
+
+describe("selectAccount — resume pin and exclusion", () => {
+  const picks: string[] = [];
+  const picker = (sel: AccountSelection) => async (lane: string) => {
+    picks.push(lane);
+    return sel;
+  };
+  const prevDir = process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR;
+
+  afterEach(() => {
+    picks.length = 0;
+    __setAccountPickerForTests();
+    __setExhaustionCheckForTests();
+    if (prevDir === undefined) delete process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR;
+    else process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR = prevDir;
+  });
+  const freshDir = () =>
+    (process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR = mkdtempSync(join(tmpdir(), "acct-pin-")));
+
+  test("pin round-trips; a bad session id is ignored", () => {
+    freshDir();
+    recordSessionAccount("sess-1", { account: "b", dir: "/h/.claude-b" });
+    expect(readSessionAccount("sess-1")).toEqual({ account: "b", dir: "/h/.claude-b" });
+    recordSessionAccount("../evil", { account: "b", dir: null });
+    expect(readSessionAccount("../evil")).toBeNull();
+    expect(readSessionAccount("missing")).toBeNull();
+  });
+
+  test("resume reuses the pinned account without picking", async () => {
+    freshDir();
+    recordSessionAccount("sess-1", { account: "b", dir: "/h/.claude-b" });
+    __setExhaustionCheckForTests(async () => false);
+    __setAccountPickerForTests(picker({ pick: { kind: "default" }, account: "a" }));
+    const sel = await selectAccount({ lane: "agent-gateway:check", resumeSessionId: "sess-1" });
+    expect(sel).toEqual({ pick: { kind: "dir", dir: "/h/.claude-b" }, account: "b", reused: true });
+    expect(picks).toEqual([]);
+  });
+
+  test("a pinned default account resumes as default", async () => {
+    freshDir();
+    recordSessionAccount("sess-a", { account: "a", dir: null });
+    __setExhaustionCheckForTests(async () => false);
+    const sel = await selectAccount({ lane: "l", resumeSessionId: "sess-a" });
+    expect(sel.pick).toEqual({ kind: "default" });
+    expect(sel.reused).toBe(true);
+  });
+
+  test("an exhausted pinned account is re-picked", async () => {
+    freshDir();
+    recordSessionAccount("sess-1", { account: "b", dir: "/h/.claude-b" });
+    __setExhaustionCheckForTests(async (a) => a === "b");
+    __setAccountPickerForTests(picker({ pick: { kind: "default" }, account: "a" }));
+    const sel = await selectAccount({ lane: "agent-gateway:check", resumeSessionId: "sess-1" });
+    expect(sel.account).toBe("a");
+    expect(sel.reused).toBeUndefined();
+    expect(picks).toEqual(["agent-gateway:check"]);
+  });
+
+  test("no pin (or no resume) → fresh pick", async () => {
+    freshDir();
+    __setAccountPickerForTests(picker({ pick: { kind: "default" }, account: "a" }));
+    expect((await selectAccount({ lane: "l", resumeSessionId: "unknown" })).account).toBe("a");
+    expect((await selectAccount({ lane: "l" })).account).toBe("a");
+    expect(picks.length).toBe(2);
+  });
+
+  test("the excluded account coming back from the picker → straight to iu", async () => {
+    freshDir();
+    __setAccountPickerForTests(picker({ pick: { kind: "default" }, account: "a" }));
+    expect(await selectAccount({ lane: "l", excludeAccount: "a" })).toEqual({
+      pick: { kind: "iu" },
+    });
+  });
+
+  test("a different account than the excluded one is accepted", async () => {
+    freshDir();
+    __setAccountPickerForTests(
+      picker({ pick: { kind: "dir", dir: "/h/.claude-b" }, account: "b" }),
+    );
+    expect((await selectAccount({ lane: "l", excludeAccount: "a" })).account).toBe("b");
+  });
+
+  test("the pin of the excluded account is not reused on resume", async () => {
+    freshDir();
+    recordSessionAccount("sess-1", { account: "a", dir: null });
+    __setExhaustionCheckForTests(async () => false);
+    __setAccountPickerForTests(
+      picker({ pick: { kind: "dir", dir: "/h/.claude-b" }, account: "b" }),
+    );
+    const sel = await selectAccount({ lane: "l", resumeSessionId: "sess-1", excludeAccount: "a" });
+    expect(sel.account).toBe("b");
   });
 });
