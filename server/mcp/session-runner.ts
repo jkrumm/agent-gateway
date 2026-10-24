@@ -486,13 +486,15 @@ export function buildWorkerEnv(input: WorkerEnvInput): Record<string, string> {
     env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = ctx;
     env.API_TIMEOUT_MS = "3000000";
   }
+  const unsetsInheritedDir = claudeConfigDir === null && !!env.CLAUDE_CONFIG_DIR;
   if (claudeConfigDir === null) delete env.CLAUDE_CONFIG_DIR;
   else if (claudeConfigDir !== undefined) env.CLAUDE_CONFIG_DIR = claudeConfigDir;
   if (extraEnv) Object.assign(env, extraEnv);
   // A token in the env overrides the login of the config dir beside it, so a worker on a dir
   // THIS code set (the pick, or extraEnv) must not carry one. A dir merely inherited from the
   // parent env is today's behaviour and keeps its token.
-  if (typeof claudeConfigDir === "string" || extraEnv?.CLAUDE_CONFIG_DIR) {
+  // Unsetting an inherited dir drops its token too: the token belongs to that dir's account.
+  if (typeof claudeConfigDir === "string" || extraEnv?.CLAUDE_CONFIG_DIR || unsetsInheritedDir) {
     delete env.CLAUDE_CODE_OAUTH_TOKEN;
   }
 
@@ -837,7 +839,7 @@ const QUOTA_ERROR_RE = /hit your (usage )?limit|usage limit|rate.?limit|429|over
 // Wording must name a usage window (or be the CLI's `limit reached|<epoch>` suffix): a bare
 // "limit reached" also appears in per-minute rate-limit text ("rate limit reached, retry shortly").
 const DEFINITIVE_QUOTA_RE =
-  /\b(?:5-hour|weekly|session|daily|usage) limit\b|hit your (?:usage )?limit|limit reached\s*\|\s*\d{10}\b|exceeded.*quota|quota.*exceeded/i;
+  /\b(?:5-hour|weekly|session|daily|usage) limit\b|hit your (?:usage )?limit|limit reached\s*\|\s*\d{10}\b/i;
 
 /** Pure: does this transport-sourced text say the Max account's usage window is used up (not
  *  merely rate-limited or overloaded)? Gates the account-exhausted mark and the account retry. */
@@ -1221,35 +1223,41 @@ export async function resolveAttemptAccount(input: {
     resumeSessionId: input.resumeSessionId,
     excludeAccount,
   });
-  switch (selected.pick.kind) {
+  const spill = async (): Promise<AttemptAccount> => {
+    if (input.hasIuFallback) {
+      recordFallback("no-account-headroom", tool);
+      runnerLogger().warn(
+        { event: "backend.fallback", tool, jobId, reason: "no-account-headroom" },
+        "falling back to iu — no Claude Max account has headroom",
+      );
+      return { kind: "iu" };
+    }
+    const account = await defaultAccountId();
+    // With a walled account to avoid, an unresolved default id fails closed.
+    if (excludeAccount !== undefined && (account === undefined || account === excludeAccount)) {
+      return { kind: "walled", account: excludeAccount };
+    }
+    return { kind: "spawn", claudeConfigDir: null, ...(account ? { account } : {}) };
+  };
+  const pick = selected.pick;
+  switch (pick.kind) {
     case "unavailable":
       runnerLogger().warn(
         { event: "session.account_pick_unavailable", tool, jobId },
-        "claude-account pick failed — running on the inherited account",
+        "claude-account pick failed",
       );
+      // With a walled account to avoid, a failed picker cannot prove the inherited account is a
+      // different one: take the iu fallback when there is one, else run inherited.
+      if (excludeAccount !== undefined && input.hasIuFallback) return spill();
       return { kind: "spawn", claudeConfigDir: undefined };
-    case "iu": {
-      if (input.hasIuFallback) {
-        recordFallback("no-account-headroom", tool);
-        runnerLogger().warn(
-          { event: "backend.fallback", tool, jobId, reason: "no-account-headroom" },
-          "falling back to iu — no Claude Max account has headroom",
-        );
-        return { kind: "iu" };
-      }
-      const account = await defaultAccountId();
-      // With a walled account to avoid, an unresolved default id fails closed.
-      if (excludeAccount !== undefined && (account === undefined || account === excludeAccount)) {
-        return { kind: "walled", account: excludeAccount };
-      }
-      return { kind: "spawn", claudeConfigDir: null, ...(account ? { account } : {}) };
-    }
+    case "iu":
+      return spill();
     case "dir":
-      return { kind: "spawn", claudeConfigDir: selected.pick.dir, account: selected.account };
+      return { kind: "spawn", claudeConfigDir: pick.dir, account: selected.account };
     case "default":
       return { kind: "spawn", claudeConfigDir: null, account: selected.account };
     default:
-      selected.pick satisfies never;
+      pick satisfies never;
       return { kind: "spawn", claudeConfigDir: undefined };
   }
 }
@@ -2116,8 +2124,12 @@ export function planNextAttempt(input: NextAttemptInput): NextAttemptPlan {
   // The structured `api_retry` signal wins outright when present; otherwise fall back to
   // the regex over TRANSPORT-sourced text only (`classificationText`, never the full
   // `error`, which can embed the model's own stdout) — see `isQuotaError`'s doc comment.
+  // A definitive wall ("5-hour limit reached") is not in `QUOTA_ERROR_RE`'s wording, so it joins
+  // here: after the account retry it must still reach the iu fallback.
   const quotaFlavored =
-    result.hadApiRetry === true || isQuotaError(result.classificationText ?? "");
+    result.hadApiRetry === true ||
+    isQuotaError(result.classificationText ?? "") ||
+    isDefinitiveQuotaError(result.classificationText ?? "");
 
   if (
     switchable &&
@@ -2229,6 +2241,39 @@ export function __resetAttemptRunnerForTests(): void {
   attemptRunner = runSessionAttempt;
 }
 
+async function markWalledAccount(
+  opts: { cwd: string; tool?: string; jobId?: string },
+  account: string,
+  attempt: number,
+  result: { classificationText?: string; error?: string },
+): Promise<void> {
+  const until = quotaResetEpochS(result.classificationText, Date.now());
+  runnerLogger().warn(
+    {
+      event: "session.account_exhausted",
+      project: opts.cwd,
+      tool: opts.tool,
+      jobId: opts.jobId,
+      attempt,
+      account,
+      untilEpochS: until,
+      error: result.error,
+    },
+    "Max account hit its quota wall — marking it exhausted",
+  );
+  if (await markAccountExhausted(account, until)) return;
+  runnerLogger().warn(
+    {
+      event: "session.account_exhausted_mark_failed",
+      project: opts.cwd,
+      tool: opts.tool,
+      jobId: opts.jobId,
+      account,
+    },
+    "claude-account exhausted failed — the re-pick may return the same account",
+  );
+}
+
 export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<SessionResult<T>> {
   const route = withModel(opts.route, opts.model);
   const fallback = WORKER_FALLBACK === "none" ? null : route.fallback;
@@ -2298,34 +2343,21 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       account: turnsRef.account,
       accountRetried,
     });
+    // The wall is marked before either branch below: the account retry re-picks around it, and
+    // the iu fallback after a second wall must leave the second account marked for later jobs.
+    const walled =
+      !result.ok &&
+      result.backend === "max" &&
+      turnsRef.account !== undefined &&
+      isDefinitiveQuotaError(result.classificationText ?? "");
+    if (
+      walled &&
+      (plan.kind === "account-retry" ||
+        (plan.kind === "fallback" && plan.forced.reason === "rate-limited"))
+    ) {
+      await markWalledAccount(opts, turnsRef.account!, attempt, result);
+    }
     if (plan.kind === "account-retry" && turnsRef.account !== undefined) {
-      const until = quotaResetEpochS(result.classificationText, Date.now());
-      runnerLogger().warn(
-        {
-          event: "session.account_retry",
-          project: opts.cwd,
-          tool: opts.tool,
-          jobId: opts.jobId,
-          attempt,
-          account: turnsRef.account,
-          untilEpochS: until,
-          error: result.error,
-        },
-        "Max account hit its quota wall — marking it exhausted and re-picking",
-      );
-      const marked = await markAccountExhausted(turnsRef.account, until);
-      if (!marked) {
-        runnerLogger().warn(
-          {
-            event: "session.account_exhausted_mark_failed",
-            project: opts.cwd,
-            tool: opts.tool,
-            jobId: opts.jobId,
-            account: turnsRef.account,
-          },
-          "claude-account exhausted failed — the re-pick may return the same account",
-        );
-      }
       accountRetried = true;
       excludeAccount = turnsRef.account;
       continue;
