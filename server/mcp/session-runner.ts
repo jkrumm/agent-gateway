@@ -9,7 +9,8 @@ import { runOpencodeAttempt } from "./opencode-runner.ts";
 import { interruptOpencodeSession } from "./opencode-server.ts";
 import {
   markAccountExhausted,
-  pickClaudeAccount,
+  recordSessionAccount,
+  selectAccount,
   quotaResetEpochS,
   readTrimmedLines,
   usageLane,
@@ -1146,6 +1147,8 @@ export function retryBackoffMs(attempt: number): number {
 export interface AttemptRef {
   current: number;
   account?: string;
+  /** In: the account that just hit its quota wall; the next pick must not return it. */
+  excludeAccount?: string;
 }
 
 /** A retry that skips `resolveBackend`: the loop already decided where the next
@@ -1219,7 +1222,11 @@ async function runSessionAttempt<T = unknown>(
   let claudeConfigDir: string | null | undefined;
   let account: string | undefined;
   if (harness === "claude" && backend === "max") {
-    const selected = await pickClaudeAccount(usageLane(tool));
+    const selected = await selectAccount({
+      lane: usageLane(tool),
+      resumeSessionId: forced ? undefined : resumeSessionId,
+      excludeAccount: turnsRef.excludeAccount,
+    });
     if (
       selected.pick.kind === "iu" &&
       WORKER_FALLBACK !== "none" &&
@@ -1458,6 +1465,10 @@ async function runSessionAttempt<T = unknown>(
       backend === "max" ? account : undefined,
     );
     sessionEnvWritten = true;
+    // Pin the session to its account so a later --resume / crash re-run stays on it.
+    if (backend === "max" && account) {
+      recordSessionAccount(workerSessionId, { account, dir: claudeConfigDir ?? null });
+    }
     // Report the id up to the job layer the instant it's known — see `onSessionId`'s doc
     // comment: a job killed moments after this fires still leaves a resumable id on its row.
     try {
@@ -2137,6 +2148,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
   let attempt = 0;
   let usedFallback = false;
   let accountRetried = false;
+  let excludeAccount: string | undefined;
   // An open breaker starts the session on the fallback lane; `usedFallback` latches like any
   // other lane switch, so a failure there is never switched again.
   let forced = breakerPreempt(opts.tool ?? "unknown", route, fallback, Date.now());
@@ -2167,7 +2179,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     if (opts.jobId !== undefined && opts.isCancelled?.(opts.jobId)) {
       throw new SessionCancelledError(opts.jobId);
     }
-    const turnsRef: AttemptRef = { current: 0 };
+    const turnsRef: AttemptRef = { current: 0, excludeAccount };
     const result = await attemptRunner(opts, turnsRef, forced);
     // One route key per attempt, primary or forced fallback alike — each backend/model
     // combination a job actually ran on gets its own streak, so a healthy `max` fallback
@@ -2216,6 +2228,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       );
       await markAccountExhausted(turnsRef.account, until);
       accountRetried = true;
+      excludeAccount = turnsRef.account;
       continue;
     }
     if (plan.kind === "fallback") {

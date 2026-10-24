@@ -5,6 +5,7 @@
 // imports nothing from any of them. `session-runner.ts` re-exports `scrubSensitiveEnv`
 // and `usageLane` so existing importers keep resolving.
 
+import { mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -110,7 +111,7 @@ export async function readTrimmedLines(
 // behaviour": the inherited env, i.e. the default account.
 
 /** What `claude-account pick` answered. `default` = `unset CLAUDE_CONFIG_DIR` (account A),
- *  `dir` = a second account's config dir, `iu` = no Max account has headroom (exit 3),
+ *  `dir` = a second account's config dir, `iu` = no Max account has headroom (exit 3; stdout `spill` or `iu`),
  *  `unavailable` = the picker failed, timed out or printed something unrecognised. */
 export type AccountPick =
   | { kind: "default" }
@@ -121,7 +122,8 @@ export type AccountPick =
 /** Pure: parse the picker's stdout + exit code. Never throws. */
 export function parseAccountPick(stdout: string, exitCode: number): AccountPick {
   const out = stdout.trim();
-  if (exitCode === 3) return out === "iu" ? { kind: "iu" } : { kind: "unavailable" };
+  // Exit 3 is the spill signal; stdout is `spill` (current) or `iu` (older picker), not keyed on.
+  if (exitCode === 3) return { kind: "iu" };
   if (exitCode !== 0) return { kind: "unavailable" };
   if (out === "unset CLAUDE_CONFIG_DIR") return { kind: "default" };
   const m = /^export CLAUDE_CONFIG_DIR=(?:'([^']+)'|"([^"]+)"|(\S+))$/.exec(out);
@@ -134,6 +136,8 @@ export interface AccountSelection {
   pick: AccountPick;
   /** Registry id (`a`, `b`, …). Undefined when the picker failed or the id lookup did. */
   account?: string;
+  /** The account was inherited from the session being resumed, not freshly picked. */
+  reused?: true;
 }
 
 const ACCOUNT_CLI_TIMEOUT_MS = 5000;
@@ -218,4 +222,99 @@ export function quotaResetEpochS(text: string | undefined, nowMs: number): numbe
   const fallback = Math.floor(nowMs / 1000) + 3600;
   const epoch = m ? Number(m[1]) : fallback;
   return epoch > nowMs / 1000 ? epoch : fallback;
+}
+
+// ── Session → account pin ────────────────────────────────────────────────────────────────
+//
+// The prompt cache is per organisation, so a resumed session (`--resume`, a crash re-run of a
+// dispatch episode) must run on the account it started on. The claude session id is recorded
+// next to the account the moment it is known; a later attempt resuming that id reuses the
+// account unless it has since hit a wall. A sidecar file per session (not a job column): the
+// session id is all a resume carries, and the picker's id → dir mapping lives outside the job
+// store.
+
+interface SessionAccountPin {
+  account: string;
+  /** Config dir the session ran under; `null` = the default account (env unset). */
+  dir: string | null;
+}
+
+const SESSION_ACCOUNT_RETENTION_MS = 30 * 24 * 3600 * 1000;
+
+const sessionAccountDir = (): string =>
+  process.env.AGENT_GATEWAY_SESSION_ACCOUNTS_DIR ??
+  join(homedir(), ".local", "state", "agent-gateway", "session-accounts");
+
+const SESSION_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+/** Record which account a claude session runs under. Best-effort, never throws; old pins are
+ *  pruned on write. */
+export function recordSessionAccount(sessionId: string, pin: SessionAccountPin): void {
+  if (!SESSION_ID_RE.test(sessionId)) return;
+  try {
+    const dir = sessionAccountDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${sessionId}.json`), JSON.stringify(pin));
+    const cutoff = Date.now() - SESSION_ACCOUNT_RETENTION_MS;
+    for (const f of readdirSync(dir)) {
+      const path = join(dir, f);
+      if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
+    }
+  } catch {
+    /* a missing pin only costs a re-pick */
+  }
+}
+
+export function readSessionAccount(sessionId: string): SessionAccountPin | null {
+  if (!SESSION_ID_RE.test(sessionId)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(join(sessionAccountDir(), `${sessionId}.json`), "utf8"));
+    if (typeof raw?.account !== "string") return null;
+    return { account: raw.account, dir: typeof raw.dir === "string" ? raw.dir : null };
+  } catch {
+    return null;
+  }
+}
+
+/** Is `account` currently marked exhausted (`claude-account usage --json`)? A CLI failure reads
+ *  as "not exhausted": keeping the pin (warm cache) beats re-picking blind. */
+async function accountExhaustedViaCli(account: string): Promise<boolean> {
+  const out = await runAccountCli(["usage", "--json"], process.env);
+  if (!out) return false;
+  try {
+    const rows: { id: string; exhausted_until: number | null }[] = JSON.parse(out.stdout).accounts;
+    return rows.some((r) => r.id === account && r.exhausted_until !== null);
+  } catch {
+    return false;
+  }
+}
+
+let exhaustionCheck: (account: string) => Promise<boolean> = accountExhaustedViaCli;
+
+export function __setExhaustionCheckForTests(fn?: (account: string) => Promise<boolean>): void {
+  exhaustionCheck = fn ?? accountExhaustedViaCli;
+}
+
+/** The account for one `claude -p` attempt. A resumed session reuses its pinned account unless
+ *  that is exhausted; otherwise a fresh pick. `excludeAccount` (the account that just hit a
+ *  wall) must not come back: when the picker returns it anyway, answer `iu` instead. */
+export async function selectAccount(input: {
+  lane: string;
+  resumeSessionId?: string;
+  excludeAccount?: string;
+}): Promise<AccountSelection> {
+  const { lane, resumeSessionId, excludeAccount } = input;
+  const pinned = resumeSessionId ? readSessionAccount(resumeSessionId) : null;
+  if (pinned && pinned.account !== excludeAccount && !(await exhaustionCheck(pinned.account))) {
+    return {
+      pick: pinned.dir === null ? { kind: "default" } : { kind: "dir", dir: pinned.dir },
+      account: pinned.account,
+      reused: true,
+    };
+  }
+  const selected = await pickClaudeAccount(lane);
+  if (excludeAccount !== undefined && selected.account === excludeAccount) {
+    return { pick: { kind: "iu" } };
+  }
+  return selected;
 }
