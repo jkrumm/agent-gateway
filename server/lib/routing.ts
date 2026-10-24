@@ -10,16 +10,20 @@
 // token, serves Claude AND gateway ids like DeepSeek-V4-Flash) and `max` (the inherited
 // Claude Code OAuth profile — the Max subscription, Claude ids only).
 //
+// Owner rule (2026-10-24): code-writing work runs on the Claude Max subscriptions only — never on
+// IU API tokens. `dispatch_implement` and `dispatch_implement_escalation` (MAX_ONLY_TOOLS below)
+// therefore run on Max over `claude -p` with NO IU fallback, and any env or per-job override
+// that would move them onto IU or a non-Claude model is refused. Editorial and investigate stay on IU.
+//
 // Harness: `claude` (spawns `claude -p`, `session-runner.ts`) or `opencode` (a session on the
-// shared OpenCode server over HTTP, `server/mcp/opencode-runner.ts`) — ONLY `dispatch`,
-// `dispatch_implement`, `dispatch_editorial` and `dispatch_implement_escalation` (the AGENT_OC/
-// AGENT_OC_IMPLEMENT/AGENT_OC_ESCALATION tiers below), the measured review angles (ANGLE_OC) and,
+// shared OpenCode server over HTTP, `server/mcp/opencode-runner.ts`) — ONLY `dispatch` and
+// `dispatch_editorial` (the AGENT_OC tier below), the measured review angles (ANGLE_OC) and,
 // since Wave 10, the CLASSIFY tier (check, overview, narrative, excalidraw) run on `opencode` —
-// only otel stays on `claude`. The dispatch family
-// defaults to `opencode`; the `claude` harness is an explicit opt-in there, reachable ONLY via
+// otel and the two Max-only implement routes stay on `claude`. The remaining dispatch routes
+// default to `opencode`; the `claude` harness is an explicit opt-in there, reachable ONLY via
 // `AGENT_GATEWAY_HARNESS_DISPATCH=claude` (paired with a Claude `AGENT_GATEWAY_MODEL_DISPATCH`)
 // or the reactive `iu`→`max` reverse fallback after an IU failure — the one AUTOMATIC Claude
-// path a dispatch episode has. A route's
+// path an investigate/author/editorial episode has. A route's
 // `variant` (opencode's reasoning-effort knob, the `provider/model#variant` suffix) is only meaningful when
 // `harness: "opencode"`. A fallback attempt (the `iu`→`max` reverse lane) ALWAYS runs the
 // `claude` harness, regardless of the primary route's harness — Max only ever serves a
@@ -29,6 +33,8 @@
 // Fallback semantics (applied in session-runner.ts, one hop only, never a second one), purely
 // REACTIVE — a session is only ever moved after a launch actually fails, never pre-empted:
 //   primary `max` → `fallback.backend: "iu"`: a quota-flavoured failure before first output.
+//     (Never for a MAX_ONLY_TOOLS route: its `fallback` is null, so a quota wall or an exhausted
+//     account pool fails the attempt closed — see `resolveAttemptAccount` in session-runner.ts.)
 //   primary `iu`  → `fallback.backend: "max"`: the reverse lane — an IU transport failure
 //     (or missing IU credentials) before first output moves the attempt onto Max, on
 //     `fallback.model` when set (a gateway id cannot run on Max) or the same model when not.
@@ -52,6 +58,7 @@
 // loads agent-gateway/.env itself — see server/lib/load-env.ts):
 //   AGENT_GATEWAY_MODEL_<TOOL>=<id>             e.g. AGENT_GATEWAY_MODEL_CHECK=claude-haiku-4-5
 //   AGENT_GATEWAY_BACKEND_<TOOL>=iu|max         e.g. AGENT_GATEWAY_BACKEND_REVIEW=iu
+//     (a MAX_ONLY_TOOLS key refuses `iu`, any model Max cannot serve, and the `opencode` harness)
 //   AGENT_GATEWAY_THINKING_TOKENS_<TOOL>=<n>    e.g. AGENT_GATEWAY_THINKING_TOKENS_CHECK=4096
 //   AGENT_GATEWAY_HARNESS_<TOOL>=claude|opencode e.g. AGENT_GATEWAY_HARNESS_DISPATCH=claude, best paired
 //     with AGENT_GATEWAY_MODEL_DISPATCH=claude-sonnet-5[1m]. dispatch's default model (Haiku 5.5 EU)
@@ -162,7 +169,7 @@ export interface ToolRoute {
   thinkingTokens?: number;
   /** Which CLI this route's `runSession` call actually spawns — see the module header's
    *  Harness paragraph and `Harness`'s doc comment. Defaults to `"claude"` on every tier
-   *  below except AGENT_OC/AGENT_OC_IMPLEMENT. */
+   *  below except AGENT_OC, ANGLE_OC and CLASSIFY. */
   harness: Harness;
   /** opencode's reasoning-effort variant (`provider/model#variant`; `"high"`, `"max"`, `"none"`, …)
    *  specific to the model's `opencode.json` entry (see `buildOpencodeServerConfig` in
@@ -170,6 +177,10 @@ export interface ToolRoute {
    *  every `claude`-harness route, where thinking is controlled by `thinkingTokens`
    *  (gateway ids) or not at all (Claude ids). */
   variant?: string;
+  /** Code-writing route: Max only, never IU (owner rule 2026-10-24). THE predicate for every
+   *  Max-only rule — `buildRoutingTable`'s override checks, `withModel` and `maxOnlyModelRefusal`
+   *  all read it, and `MAX_ONLY_TOOLS` is derived from it. Set only in DEFAULT_ROUTES. */
+  maxOnly?: boolean;
 }
 
 export const SONNET = "claude-sonnet-5[1m]";
@@ -187,8 +198,9 @@ export const DEEPSEEK_FLASH = "DeepSeek-V4-Flash";
  *  NOT the IU native Anthropic transport `DEEPSEEK_FLASH` above runs over — `claude -p`
  *  cannot reach this id at all. See AGENT_OC below. */
 export const DEEPSEEK_V41_FLASH = "deepseek-v4.1-flash";
-/** The escalation implement seat (attempt 3+), opencode-harness only — reached over IU's
- *  OpenAI-compatible route as `iu-chat/DeepSeek-V4-Pro`, `claude -p` cannot reach it. */
+/** Formerly the escalation implement seat (attempt 3+); no route uses it since 2026-10-24 (implement
+ *  and its escalation are Max-only). Opencode-harness only — reached over IU's OpenAI-compatible
+ *  route as `iu-chat/DeepSeek-V4-Pro`, `claude -p` cannot reach it. */
 export const DEEPSEEK_PRO = "DeepSeek-V4-Pro";
 
 // ── Tiers — named once, referenced by every tool that shares the shape, so a re-tiering
@@ -201,19 +213,22 @@ export const DEEPSEEK_PRO = "DeepSeek-V4-Pro";
 //   verdict, overview 170-180 s, ~20x the cost). (DeepSeek-V4-Flash over `claude -p` was rejected by
 //   IU from 2026-10-04: unrecognized_model.) check needs the `agw-check` profile, overview/narrative
 //   the tool-less one (opencode-server.ts); both are selected by the handler, not the route.
-// AGENT_OC / AGENT_OC_IMPLEMENT / ANGLE_OC moved from deepseek-v4.1-flash to Haiku 5.5 EU on
+// AGENT_OC / ANGLE_OC moved from deepseek-v4.1-flash to Haiku 5.5 EU on
 //   2026-10-14 (Wave 5 bench, docs/routing-and-quota.md § Wave 5): 12/12 vs 10/12 implement + investigate
 //   passes, ~6x faster, lower cost, 100% cache reads. Haiku bills 5x above 100K prompt tokens PER
 //   REQUEST (measured mean 38-64K) — a long episode costs more than the registry rate says.
 //   It exposes no effort variants, so these routes carry none.
-// AGENT_OC / AGENT_OC_IMPLEMENT / AGENT_OC_ESCALATION: dispatch (investigate/author),
-//   dispatch_implement and its attempt-3+ escalation on the OpenCode harness — cheaper and
-//   faster than the retired `claude -p` agent tiers; only the escalation route carries a
-//   `variant` (a route carries one only when its model's registry `effort` lists levels). The escalation route carries no Max fallback — a gateway
-//   model cannot run there, so the caller retries instead. The `claude` harness is NOT a
-//   default of any dispatch route: it is reached only by an explicit AGENT_GATEWAY_HARNESS_DISPATCH=claude
-//   (+ Claude model) override, by `dispatch_editorial` below, or — automatically — by the Max
-//   reverse fallback after an IU failure (the only automatic Claude path).
+// AGENT_OC: dispatch (investigate/author) and dispatch_editorial on the OpenCode harness — cheaper
+//   and faster than the retired `claude -p` agent tiers; a route carries a `variant` only when its
+//   model's registry `effort` lists levels (Haiku 5.5 lists none). The `claude` harness is NOT a
+//   default of these routes: it is reached only by an explicit AGENT_GATEWAY_HARNESS_DISPATCH=claude
+//   (+ Claude model) override or — automatically — by the Max reverse fallback after an IU failure
+//   (the only automatic Claude path).
+// MAX_ONLY_IMPLEMENT: `dispatch_implement` and its attempt-3+ `dispatch_implement_escalation` —
+//   Sonnet on Max over `claude -p`, NO IU fallback. Owner rule 2026-10-24: no code is written on IU
+//   tokens (they were Haiku 5.5 / DeepSeek-V4-Pro on IU through the OpenCode harness before). Both
+//   seats use SONNET: the registry has no Max-servable Claude id above it (the Opus ids are IU-only
+//   and single-shot-only). A quota wall on every Max account fails the attempt; it never spills.
 const AGENT_OC: ToolRoute = {
   model: HAIKU_5_5,
   backend: "iu",
@@ -221,20 +236,15 @@ const AGENT_OC: ToolRoute = {
   transport: "session",
   harness: "opencode",
 };
-const AGENT_OC_IMPLEMENT: ToolRoute = {
-  model: HAIKU_5_5,
-  backend: "iu",
-  fallback: { backend: "max", model: SONNET },
-  transport: "session",
-  harness: "opencode",
-};
-const AGENT_OC_ESCALATION: ToolRoute = {
-  model: DEEPSEEK_PRO,
-  backend: "iu",
+//   The escalation seat is deliberately the SAME object as implement, so attempt 3+ re-runs an
+//   identical config; kept as a separate key for its only caller (warden, being switched off).
+const MAX_ONLY_IMPLEMENT: ToolRoute = {
+  model: SONNET,
+  backend: "max",
   fallback: null,
   transport: "session",
-  harness: "opencode",
-  variant: "max",
+  harness: "claude",
+  maxOnly: true,
 };
 // ANGLE_OC: the review angles whose A/B cleared the adoption rule (senior-dev, typescript, qa on
 //   2026-10-05; frontend on 2026-10-15, Wave 11 — on three real weatherorb commits Haiku 5.5 EU
@@ -256,7 +266,7 @@ const ANGLE_OC: ToolRoute = {
 //   Wave 10: on two real ranges Haiku 5.5 EU found the same top blocking findings as Sonnet in
 //   ~0.5-0.65x the wall time (298 s vs 585 s, 473 s vs 705 s); flash did not (1 blocking, 521 s).
 //   The 2026-09-11 "cheap model fails on synthesis" measurement was GLM looping on a large diff.
-// dispatch_editorial shares AGENT_OC_IMPLEMENT: Haiku 5.5 EU matched Sonnet on two editorial briefs
+// dispatch_editorial shares AGENT_OC: Haiku 5.5 EU matched Sonnet on two editorial briefs
 //   (Wave 10: README fold-in 1 of 2 complete on both, a numbered-checklist rewrite 3 of 3 on both, at
 //   ~14 s vs ~30 s and ~$0.003 vs ~$0.13), so prose briefs no longer need a Claude route; the key
 //   stays so `AGENT_GATEWAY_MODEL_DISPATCH_EDITORIAL` can still pin one (docs/routing-and-quota.md
@@ -350,9 +360,9 @@ const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
     harness: "claude",
   },
   dispatch: AGENT_OC,
-  dispatch_implement: AGENT_OC_IMPLEMENT,
-  dispatch_implement_escalation: AGENT_OC_ESCALATION,
-  dispatch_editorial: AGENT_OC_IMPLEMENT,
+  dispatch_implement: MAX_ONLY_IMPLEMENT,
+  dispatch_implement_escalation: MAX_ONLY_IMPLEMENT,
+  dispatch_editorial: AGENT_OC,
   otel: JUDGE,
   excalidraw: CLASSIFY,
   read_image: VISION,
@@ -407,6 +417,22 @@ export function validateModel(
     };
   }
   return { ok: true, model: entry };
+}
+
+/** The routes that write code (Max only) — derived from `ToolRoute.maxOnly`, never listed by hand. */
+export const MAX_ONLY_TOOLS: ReadonlySet<RoutedTool> = new Set(
+  ROUTED_TOOLS.filter((tool) => DEFAULT_ROUTES[tool].maxOnly),
+);
+
+/** The one wording of every Max-only refusal (model, backend, harness, per-job model). */
+function maxOnlyRefusal(tool: string, detail: string): string {
+  return `${tool} runs on Max only (owner rule 2026-10-24: no code written on IU tokens) — ${detail}`;
+}
+
+/** Why `model` may not run on a Max-only route (it would leave Max), or null. */
+export function maxOnlyModelRefusal(tool: RoutedTool, model: string): string | null {
+  if (!DEFAULT_ROUTES[tool].maxOnly || servesOnMax(model)) return null;
+  return maxOnlyRefusal(tool, `${model} is not a Max-servable Claude id`);
 }
 
 /** `variant` survives a model change only when the new model exposes it. */
@@ -481,7 +507,8 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
     if (modelOverride) {
       const check = validateModel(modelOverride, { singleShot: tool === "prose_write" });
       const refused = check.ok
-        ? transportWireRefusal(tool, base.transport, check.model)
+        ? (transportWireRefusal(tool, base.transport, check.model) ??
+          maxOnlyModelRefusal(tool, modelOverride))
         : check.reason;
       if (refused) {
         overrides.push({ tool, field: "model", value: modelOverride, refused });
@@ -505,6 +532,13 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
           field: "backend",
           value: backendOverride,
           refused: `unknown backend — expected "iu" or "max"`,
+        });
+      } else if (base.maxOnly && backendOverride !== "max") {
+        overrides.push({
+          tool,
+          field: "backend",
+          value: backendOverride,
+          refused: maxOnlyRefusal(tool, `the ${backendOverride} backend is not allowed`),
         });
       } else if (backendOverride === "max" && !servesOnMax(model)) {
         overrides.push({
@@ -544,6 +578,16 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
           field: "harness",
           value: harnessOverride,
           refused: `unknown harness — expected "claude" or "opencode"`,
+        });
+      } else if (base.maxOnly && harnessOverride !== "claude") {
+        overrides.push({
+          tool,
+          field: "harness",
+          value: harnessOverride,
+          refused: maxOnlyRefusal(
+            tool,
+            `the ${harnessOverride} harness is not allowed, only claude`,
+          ),
         });
       } else {
         harness = harnessOverride;
@@ -708,6 +752,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
       thinkingTokens,
       harness,
       variant,
+      maxOnly: base.maxOnly,
     };
   }
   return { routes, overrides };
@@ -772,6 +817,7 @@ export function routeFor(tool: RoutedTool): ToolRoute {
     thinkingTokens: r.thinkingTokens,
     harness: r.harness,
     variant: r.variant,
+    maxOnly: r.maxOnly,
   };
 }
 
@@ -814,6 +860,10 @@ export function withModel(route: ToolRoute, model: string | undefined): ToolRout
   const check = validateModel(model);
   if (!check.ok) return route;
   const entry = check.model;
+  // A Max-only route is never moved onto IU by a per-job model: a non-Claude id is refused here,
+  // like an unknown one. Callers wanting a loud refusal use `maxOnlyModelRefusal` (submit and
+  // `runDispatch` do).
+  if (route.maxOnly && !servesOnMax(model)) return route;
   let harness: Harness = route.harness;
   if (route.transport === "session" && !entry.harnesses.includes(route.harness)) {
     if (!entry.harnesses.includes("claude")) return route;
@@ -836,6 +886,7 @@ export function withModel(route: ToolRoute, model: string | undefined): ToolRout
     thinkingTokens: route.thinkingTokens,
     harness,
     variant: harness === "opencode" ? variantFor(entry, route.variant) : undefined,
+    maxOnly: route.maxOnly,
   };
 }
 

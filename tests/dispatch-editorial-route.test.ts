@@ -1,5 +1,5 @@
 // `kind: "editorial"` routes a dispatch episode to the `dispatch_editorial` route key
-// (server/lib/routing.ts) — today the same OpenCode Haiku route as implement, separately
+// (server/lib/routing.ts) — today the same OpenCode Haiku route as investigate/author, separately
 // overridable — and the claude harness stays an explicit opt-in for every dispatch route.
 // Table-level checks use buildRoutingTable({}) so a local .env override cannot leak into the
 // expectation.
@@ -82,18 +82,18 @@ describe("dispatch_editorial route", () => {
 });
 
 describe("the claude harness is an explicit opt-in for dispatch", () => {
-  test("the default dispatch routes are all opencode", () => {
-    for (const key of [
-      "dispatch",
-      "dispatch_implement",
-      "dispatch_implement_escalation",
-      "dispatch_editorial",
-    ] as const) {
+  test("the investigate/author and editorial dispatch routes default to opencode", () => {
+    for (const key of ["dispatch", "dispatch_editorial"] as const) {
       expect(routes[key].harness).toBe("opencode");
     }
-    // Haiku 5.5 EU is claude-capable but runs here on opencode; only the escalation model is
-    // non-Claude.
-    expect(routes.dispatch_implement_escalation.model).not.toMatch(/^claude/);
+  });
+
+  test("the implement routes are the exception: Max-only on the claude harness, no IU", () => {
+    for (const key of ["dispatch_implement", "dispatch_implement_escalation"] as const) {
+      expect(routes[key].harness).toBe("claude");
+      expect(routes[key].backend).toBe("max");
+      expect(routes[key].fallback).toBeNull();
+    }
   });
 
   test("a code episode never resolves to the editorial route, at any tier", () => {
@@ -122,7 +122,7 @@ describe("`kind` param", () => {
     expect(withModel(routes.dispatch_implement, SONNET).harness).toBe("claude");
   });
 
-  test("an in-place episode in a repo with its own opencode config is refused on opencode (code or editorial), allowed once a Claude model forces the claude harness", async () => {
+  test("an in-place episode in a repo with its own opencode config is refused on opencode (editorial; code implement runs on claude), allowed once a Claude model forces the claude harness", async () => {
     const fx = await makeFixture();
     try {
       fx.write(".opencode/plugin.js", "module.exports = () => {}\n");
@@ -135,9 +135,8 @@ describe("`kind` param", () => {
           kind,
           model,
         });
-      expect(() => assertDispatchRequestAllowed(input("code"), false)).toThrow(
-        /dispatch refused:.*\.opencode/,
-      );
+      // implement code runs Max-only on claude -p, so the opencode-plugin hazard does not apply.
+      expect(() => assertDispatchRequestAllowed(input("code"), false)).not.toThrow();
       expect(() => assertDispatchRequestAllowed(input("editorial"), false)).toThrow(
         /dispatch refused:.*\.opencode/,
       );

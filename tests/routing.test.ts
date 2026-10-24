@@ -15,6 +15,8 @@ import {
   HAIKU_5_5,
   logRoutingOverrides,
   logStaleQuotaEnvVars,
+  MAX_ONLY_TOOLS,
+  maxOnlyModelRefusal,
   ROUTED_TOOLS,
   routeFor,
   routeForReviewAngle,
@@ -58,8 +60,8 @@ describe("buildRoutingTable defaults", () => {
     }
   });
 
-  test("dispatch_editorial shares the implement route: Haiku 5.5 EU via opencode on iu with the Sonnet-on-max fallback", () => {
-    expect(routes.dispatch_editorial).toEqual(routes.dispatch_implement);
+  test("dispatch_editorial is unchanged and shares the dispatch route: Haiku 5.5 EU via opencode on iu with the Sonnet-on-max fallback", () => {
+    expect(routes.dispatch_editorial).toEqual(routes.dispatch);
     expect(routes.dispatch_editorial).toEqual({
       model: HAIKU_5_5,
       backend: "iu",
@@ -81,31 +83,31 @@ describe("buildRoutingTable defaults", () => {
     });
   });
 
-  test("dispatch_implement: Haiku 5.5 EU via opencode on iu with the Sonnet-on-max fallback (implement-tier only), no variant", () => {
-    expect(routes.dispatch_implement).toEqual({
-      model: HAIKU_5_5,
-      backend: "iu",
-      fallback: { backend: "max", model: SONNET },
-      transport: "session",
-      harness: "opencode",
-      variant: undefined,
-    });
-  });
-
-  test("dispatch_implement_escalation: DeepSeek-V4-Pro via opencode on iu, no Max fallback, variant max (attempt-3+ implement escalation)", () => {
-    expect(routes.dispatch_implement_escalation).toEqual({
-      model: DEEPSEEK_PRO,
-      backend: "iu",
-      fallback: null,
-      transport: "session",
-      harness: "opencode",
-      variant: "max",
-    });
+  test("dispatch_implement and its escalation are Max-only: Sonnet on max via claude, no IU fallback, no variant (owner rule 2026-10-24)", () => {
+    for (const key of ["dispatch_implement", "dispatch_implement_escalation"] as const) {
+      expect(routes[key]).toEqual({
+        model: SONNET,
+        backend: "max",
+        fallback: null,
+        transport: "session",
+        harness: "claude",
+        variant: undefined,
+        maxOnly: true,
+      });
+      expect(routeFor(key).fallback).toBeNull();
+    }
   });
 
   test("the escalation route's model is a verified registry id, exposed at routes.dispatch_implement_escalation.model (warden's GET /api/routing path)", () => {
     const route = buildRoutingTable({}).routes.dispatch_implement_escalation;
-    expect(validateModel(route.model)).toMatchObject({ ok: true, model: { id: DEEPSEEK_PRO } });
+    expect(validateModel(route.model)).toMatchObject({ ok: true, model: { id: SONNET } });
+  });
+
+  test("MAX_ONLY_TOOLS names exactly the two code-writing routes", () => {
+    expect([...MAX_ONLY_TOOLS].toSorted()).toEqual([
+      "dispatch_implement",
+      "dispatch_implement_escalation",
+    ]);
   });
 
   test("otel: Sonnet on max with the quota fallback to iu (the JUDGE tier — deliberately NOT on glm, see routing.ts); claudeSafeRoute() is the same seat", () => {
@@ -395,18 +397,6 @@ describe("buildRoutingTable env overrides", () => {
     expect(overrides).toEqual([{ tool: "dispatch", field: "model", value: "gpt-6.1-sol" }]);
   });
 
-  test("a verified Responses-wire (GPT) id keeps the variant it exposes on a route that carries one (escalation)", () => {
-    const { routes, overrides } = buildRoutingTable({
-      AGENT_GATEWAY_MODEL_DISPATCH_IMPLEMENT_ESCALATION: "gpt-6.1-sol",
-    });
-    expect(routes.dispatch_implement_escalation.model).toBe("gpt-6.1-sol");
-    expect(routes.dispatch_implement_escalation.harness).toBe("opencode");
-    expect(routes.dispatch_implement_escalation.variant).toBe("max");
-    expect(overrides).toEqual([
-      { tool: "dispatch_implement_escalation", field: "model", value: "gpt-6.1-sol" },
-    ]);
-  });
-
   test("a GPT id on a claude-harness tool is refused — Responses-only ids have no claude -p path", () => {
     const { routes, overrides } = buildRoutingTable({ AGENT_GATEWAY_MODEL_OTEL: "gpt-6.1-sol" });
     expect(routes.otel.model).toBe(SONNET);
@@ -422,21 +412,6 @@ describe("buildRoutingTable env overrides", () => {
     ]);
   });
 
-  test("a model override without the route's variant drops it, reported as implied", () => {
-    // dispatch_implement_escalation is the default route that still carries a variant (max).
-    const { routes, overrides } = buildRoutingTable({
-      AGENT_GATEWAY_MODEL_DISPATCH_IMPLEMENT_ESCALATION: "gemini-3.5-flash",
-    });
-    expect(routes.dispatch_implement_escalation.model).toBe("gemini-3.5-flash");
-    expect(routes.dispatch_implement_escalation.variant).toBeUndefined();
-    expect(overrides).toContainEqual({
-      tool: "dispatch_implement_escalation",
-      field: "variant",
-      value: "max",
-      implied: expect.stringContaining("exposes no"),
-    });
-  });
-
   test("a variant the model does not expose is refused", () => {
     // Haiku 5.5 (the default dispatch model) exposes no variants at all.
     const haiku = buildRoutingTable({ AGENT_GATEWAY_VARIANT_DISPATCH: "high" });
@@ -450,11 +425,12 @@ describe("buildRoutingTable env overrides", () => {
       },
     ]);
     // A model that exposes variants still refuses a variant outside its ladder.
-    const pro = buildRoutingTable({
-      AGENT_GATEWAY_VARIANT_DISPATCH_IMPLEMENT_ESCALATION: "ultra",
+    const gpt = buildRoutingTable({
+      AGENT_GATEWAY_MODEL_DISPATCH: "gpt-6.1-sol",
+      AGENT_GATEWAY_VARIANT_DISPATCH: "ultra",
     });
-    expect(pro.routes.dispatch_implement_escalation.variant).toBe("max");
-    expect(pro.overrides[0]?.refused).toContain("exposes no");
+    expect(gpt.routes.dispatch.variant).toBeUndefined();
+    expect(gpt.overrides.find((o) => o.field === "variant")?.refused).toContain("exposes no");
   });
 
   test("no route runs on GLM any more — retired 2026-09-23, the id stays only as an (unverified, hence refused) registry entry", () => {
@@ -561,22 +537,6 @@ describe("buildRoutingTable env overrides", () => {
     expect(overrides).toEqual([{ tool: "dispatch", field: "harness", value: "claude" }]);
   });
 
-  test("AGENT_GATEWAY_HARNESS_<TOOL>=claude ALONE (default model stays DeepSeek-V4-Pro) is refused on the escalation route — that model has no path through claude -p", () => {
-    const { routes, overrides } = buildRoutingTable({
-      AGENT_GATEWAY_HARNESS_DISPATCH_IMPLEMENT_ESCALATION: "claude",
-    });
-    expect(routes.dispatch_implement_escalation.harness).toBe("opencode");
-    expect(routes.dispatch_implement_escalation.model).toBe(DEEPSEEK_PRO);
-    expect(overrides).toEqual([
-      {
-        tool: "dispatch_implement_escalation",
-        field: "harness",
-        value: "claude",
-        refused: expect.stringContaining("reachable only via the opencode harness"),
-      },
-    ]);
-  });
-
   test("AGENT_GATEWAY_MODEL_<TOOL>=deepseek-v4.1-flash on a claude-harness tool is refused the same way, blaming the model override instead", () => {
     const { routes, overrides } = buildRoutingTable({
       AGENT_GATEWAY_MODEL_OTEL: DEEPSEEK_V41_FLASH,
@@ -633,16 +593,6 @@ describe("buildRoutingTable env overrides", () => {
         },
       ]);
     }
-  });
-
-  test("AGENT_GATEWAY_VARIANT_<TOOL> replaces the tier's variant and is reported", () => {
-    const { routes, overrides } = buildRoutingTable({
-      AGENT_GATEWAY_VARIANT_DISPATCH_IMPLEMENT_ESCALATION: "high",
-    });
-    expect(routes.dispatch_implement_escalation.variant).toBe("high");
-    expect(overrides).toEqual([
-      { tool: "dispatch_implement_escalation", field: "variant", value: "high" },
-    ]);
   });
 
   test("AGENT_GATEWAY_VARIANT_<TOOL> sets a variant on a variant-less default once the model override exposes it", () => {
@@ -894,16 +844,6 @@ describe("withModel", () => {
     expect(r.variant).toBeUndefined();
   });
 
-  test("withModel(opencode-capable verified id) keeps the route's own harness and a variant the model exposes", () => {
-    const r = withModel(routeFor("dispatch_implement_escalation"), "gpt-6.1-sol");
-    expect(r.harness).toBe("opencode");
-    expect(r.variant).toBe("max");
-    // The variant-less default dispatch route has none to carry over.
-    const d = withModel(routeFor("dispatch"), "gpt-6.1-sol");
-    expect(d.harness).toBe("opencode");
-    expect(d.variant).toBeUndefined();
-  });
-
   test("withModel drops a variant the new model does not expose", () => {
     const r = withModel(routeFor("dispatch"), "gemini-3.5-flash");
     expect(r.harness).toBe("opencode");
@@ -965,12 +905,8 @@ describe("routeFor / describeRoute", () => {
     expect(describeRoute(routeFor("dispatch"))).toBe(
       `${HAIKU_5_5} on iu via opencode (fallback ${SONNET} on max)`,
     );
-    expect(describeRoute(routeFor("dispatch_implement"))).toBe(
-      `${HAIKU_5_5} on iu via opencode (fallback ${SONNET} on max)`,
-    );
-    expect(describeRoute(routeFor("dispatch_implement_escalation"))).toBe(
-      `${DEEPSEEK_PRO} on iu via opencode (variant max)`,
-    );
+    expect(describeRoute(routeFor("dispatch_implement"))).toBe(`${SONNET} on max`);
+    expect(describeRoute(routeFor("dispatch_implement_escalation"))).toBe(`${SONNET} on max`);
   });
 
   test("describeRoute renders the fallback model or the primary when none is fixed", () => {
@@ -1096,5 +1032,102 @@ describe("claudeSafeRoute", () => {
     route.model = "mutated";
     if (route.fallback) route.fallback.backend = "max";
     expect(claudeSafeRoute()).toMatchObject({ model: SONNET, fallback: { backend: "iu" } });
+  });
+});
+
+describe("Max-only implement routes (owner rule 2026-10-24: no code written on IU tokens)", () => {
+  const MAX_ONLY = ["dispatch_implement", "dispatch_implement_escalation"] as const;
+
+  test("default routes are max / claude / session with no fallback", () => {
+    const { routes, overrides } = buildRoutingTable({});
+    expect(overrides).toEqual([]);
+    for (const key of MAX_ONLY) {
+      expect(routes[key]).toMatchObject({
+        backend: "max",
+        harness: "claude",
+        transport: "session",
+        fallback: null,
+        model: SONNET,
+      });
+    }
+  });
+
+  test("an IU / non-Claude model override is refused with a reason; the default stays", () => {
+    for (const key of MAX_ONLY) {
+      for (const model of [HAIKU_5_5, DEEPSEEK_PRO, DEEPSEEK_V41_FLASH, "gpt-6.1-sol"]) {
+        const { routes, overrides } = buildRoutingTable({
+          [`AGENT_GATEWAY_MODEL_${key.toUpperCase()}`]: model,
+        });
+        expect(routes[key].model).toBe(SONNET);
+        expect(routes[key].backend).toBe("max");
+        expect(routes[key].fallback).toBeNull();
+        expect(overrides).toEqual([
+          { tool: key, field: "model", value: model, refused: expect.stringContaining("Max only") },
+        ]);
+      }
+    }
+  });
+
+  test("a Max-servable Claude model override is accepted and stays on max", () => {
+    const { routes, overrides } = buildRoutingTable({
+      AGENT_GATEWAY_MODEL_DISPATCH_IMPLEMENT: "claude-sonnet-5",
+    });
+    expect(routes.dispatch_implement).toMatchObject({
+      model: "claude-sonnet-5",
+      backend: "max",
+      harness: "claude",
+      fallback: null,
+    });
+    expect(overrides).toEqual([
+      { tool: "dispatch_implement", field: "model", value: "claude-sonnet-5" },
+    ]);
+  });
+
+  test("a backend=iu or harness=opencode override is refused", () => {
+    for (const key of MAX_ONLY) {
+      const upper = key.toUpperCase();
+      const { routes, overrides } = buildRoutingTable({
+        [`AGENT_GATEWAY_BACKEND_${upper}`]: "iu",
+        [`AGENT_GATEWAY_HARNESS_${upper}`]: "opencode",
+      });
+      expect(routes[key].backend).toBe("max");
+      expect(routes[key].harness).toBe("claude");
+      expect(routes[key].fallback).toBeNull();
+      expect(overrides).toEqual([
+        { tool: key, field: "backend", value: "iu", refused: expect.stringContaining("Max only") },
+        {
+          tool: key,
+          field: "harness",
+          value: "opencode",
+          refused: expect.stringContaining("Max only"),
+        },
+      ]);
+    }
+  });
+
+  test("a per-job model never moves a Max-only route onto IU (withModel returns the route unchanged)", () => {
+    for (const key of MAX_ONLY) {
+      const route = routeFor(key);
+      for (const model of [HAIKU_5_5, DEEPSEEK_PRO, "gpt-6.1-sol"]) {
+        expect(withModel(route, model)).toBe(route);
+        expect(maxOnlyModelRefusal(key, model)).toContain("Max only");
+      }
+      expect(withModel(route, "claude-sonnet-5").backend).toBe("max");
+      expect(withModel(route, "claude-sonnet-5").fallback).toBeNull();
+      expect(maxOnlyModelRefusal(key, "claude-sonnet-5")).toBeNull();
+    }
+    expect(maxOnlyModelRefusal("dispatch", HAIKU_5_5)).toBeNull();
+  });
+
+  test("dispatch_editorial and dispatch keep their IU route", () => {
+    const { routes } = buildRoutingTable({});
+    for (const key of ["dispatch", "dispatch_editorial"] as const) {
+      expect(routes[key]).toMatchObject({
+        model: HAIKU_5_5,
+        backend: "iu",
+        harness: "opencode",
+        fallback: { backend: "max", model: SONNET },
+      });
+    }
   });
 });

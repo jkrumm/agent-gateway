@@ -259,7 +259,7 @@ describe("isSalvageable", () => {
     expect(isSalvageable({ ok: false, error: r.error, noOutput: r.noOutput })).toBe(true);
   });
 
-  // Regression for the opencode harness (2026-09-24, AGENT_OC/AGENT_OC_IMPLEMENT):
+  // Regression for the opencode harness (2026-09-24, AGENT_OC; implement left it 2026-10-24):
   // `runOpencodeAttempt` (opencode-runner.ts) has no CLI envelope to classify — its own
   // unparseable-final-text and schema-validation failures both go through the exact same
   // `unclassifiedOutputFailure` helper the claude path uses, so `isSalvageable` needs no

@@ -60,7 +60,7 @@ Logs: `~/Library/Logs/agent-gateway.jsonl` (structured, both processes), `agent-
 | `GITHUB_TOKEN` | fallback GitHub credential for `dispatch` artifacts (primary is `secrets-run read op://mini/github/token`) |
 | `RESEARCH_GATEWAY_URL`, `RESEARCH_GATEWAY_TOKEN` | lets review angle workers validate external claims |
 | `AGENT_GATEWAY_MODEL_<TOOL>`, `AGENT_GATEWAY_BACKEND_<TOOL>` | per-tool routing override (`iu` \| `max`); a gateway id never lands on `max`, and a backend override on `adversary`/`read_image`/`read_drawing` (fixed `iu-openai` transport) is refused |
-| `AGENT_GATEWAY_HARNESS_<TOOL>` (`claude` \| `opencode`), `AGENT_GATEWAY_VARIANT_<TOOL>` | per-tool harness/reasoning-effort override — `dispatch`/`dispatch_implement` default to `opencode` — a session on the shared OpenCode server over IU's native Anthropic leg (model: `GET /api/routing`), refused on a fixed-transport tool same as the model/backend overrides |
+| `AGENT_GATEWAY_HARNESS_<TOOL>` (`claude` \| `opencode`), `AGENT_GATEWAY_VARIANT_<TOOL>` | per-tool harness/reasoning-effort override — `dispatch`/`dispatch_editorial` default to `opencode` (`dispatch_implement` and its escalation are Max-only on `claude`, no IU) — a session on the shared OpenCode server over IU's native Anthropic leg (model: `GET /api/routing`), refused on a fixed-transport tool same as the model/backend overrides |
 | `AGENT_GATEWAY_WORKER_FALLBACK=none` | disable both fallback directions |
 | `AGENT_GATEWAY_REVIEW_OCR=0` | disable the OpenCodeReview (`ocr` CLI) phase-1 review input |
 | `AGENT_GATEWAY_JOB_CONCURRENCY` (3) | running-job cap for the session lane (everything but `triage`/`decide`) |

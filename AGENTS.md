@@ -470,9 +470,10 @@ opencode angle needs both the MODEL and HARNESS overrides; pinning one back to
 `review` needs the model override plus `AGENT_GATEWAY_BACKEND_=max`) — see
 `docs/routing-and-quota.md` §Review-angle A/B (Wave 4).
 
-A third OpenCode route, `dispatch_implement_escalation`, serves attempt-3+ retries of an
-implement episode (model in `GET /api/routing`); it carries no Max fallback, so the caller
-retries instead.
+`dispatch_implement` and its attempt-3+ escalation `dispatch_implement_escalation` run on Max only
+(Sonnet over `claude -p`, `fallback: null`; owner rule 2026-10-24: no code written on IU tokens) —
+an override or per-job `model` that would move them onto IU or a non-Claude model is refused;
+editorial and investigate stay on IU.
 
 Live table: **`GET /api/routing`**. Overrides: `AGENT_GATEWAY_MODEL_<TOOL>=<id>`,
 `AGENT_GATEWAY_BACKEND_<TOOL>=iu|max`, `AGENT_GATEWAY_THINKING_TOKENS_<TOOL>=<n>` (read
@@ -493,12 +494,15 @@ dispatch_editorial) controls depth with `variant` instead, and Haiku 5.5 has non
 No route runs on GLM (retired 2026-09-23). `session-runner.ts`'s `buildWorkerEnv` exports `MAX_THINKING_TOKENS`
 only for non-Claude models — a Claude route's `thinkingTokens` (currently none
 set) would be a no-op there anyway, since thinking on Claude is controlled a
-different way. JUDGE (`otel`, the only route left on Claude) carries no
-`thinkingTokens` — it stays on Claude.
+different way. JUDGE (`otel`) carries no `thinkingTokens` — it stays on Claude, as do the two Max-only implement routes.
 
-**`dispatch`/`dispatch_implement` run on a second harness, OpenCode, not
-`claude -p`** (2026-09-24, `harness: "opencode"` on `ToolRoute` — AGENT_OC/
-AGENT_OC_IMPLEMENT — every other tool stays `"claude"`). An OpenCode session talks
+**Implement can now fail on a quota wall.** With no IU fallback, a `dispatch_implement` episode whose
+Max accounts are all walled fails closed (`Claude AI usage limit reached … no iu fallback`) instead
+of spilling to IU; callers retry later. The escalation seat is the same config as implement.
+
+**`dispatch`/`dispatch_editorial` run on a second harness, OpenCode, not
+`claude -p`** (2026-09-24, `harness: "opencode"` on `ToolRoute` — AGENT_OC; `dispatch_implement`
+left it 2026-10-24 for Max-only `claude -p` — every other tool stays `"claude"`). An OpenCode session talks
 to Haiku 5.5 EU over the IU native Anthropic route through the `iu-anthropic` provider
 (2026-10-14, `docs/routing-and-quota.md` § Wave 5; before that `deepseek-v4.1-flash` over the
 OpenAI-compatible `iu-chat` route, which stays the SINGLE_SHOT and OCR model). Measured against the previous
@@ -508,7 +512,7 @@ blind diff review preferred it on 2 of 3, lost the third on inverted
 volume-floor logic in a HyperDX config — not a clean sweep, and 95-98% cache
 hit vs the previous model's 8%. `variant` (opencode's reasoning-effort knob, folded into
 the model ref as `provider/model#variant` in 2.x) is carried only by the routes whose model exposes
-one (the `DeepSeek-V4-Pro` escalation at `"max"`; Haiku 5.5 has none); opencode's
+one (no default route carries one now — Haiku 5.5 has none); opencode's
 model/harness combination is validated against the model registry
 (`server/lib/models.ts` — id, wire, harnesses, limits, rates, `verified`; also
 served as `models` by `GET /api/routing`) AFTER every override

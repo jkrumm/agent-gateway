@@ -145,12 +145,34 @@ describe("runDispatch — in-place refusals before anything runs", () => {
     }
   });
 
-  test("in-place implement is refused before any worktree exists when the repo carries a .opencode/ plugin dir — dispatch_implement runs the opencode harness by default", async () => {
+  test("in-place editorial is refused before any worktree exists when the repo carries a .opencode/ plugin dir — dispatch_editorial runs the opencode harness by default", async () => {
     fx.write(".opencode/plugin.js", "module.exports = () => {}\n");
     try {
       await expect(
-        runDispatch({ cwd: fx.repo, brief: "b", tier: "implement", workspace: "in-place" }),
+        runDispatch({
+          cwd: fx.repo,
+          brief: "b",
+          tier: "implement",
+          workspace: "in-place",
+          kind: "editorial",
+        }),
       ).rejects.toThrow(/dispatch refused:.*\.opencode/);
+      expect(await fx.linkedWorktrees()).toEqual([]);
+    } finally {
+      releaseRepoLease(fx.repo);
+    }
+  });
+
+  test("runDispatch refuses a non-Claude per-job model on implement with the Max-only reason, before any worktree exists", async () => {
+    try {
+      await expect(
+        runDispatch({
+          cwd: fx.repo,
+          brief: "b",
+          tier: "implement",
+          model: "claude-haiku-5-5-eu",
+        }),
+      ).rejects.toThrow(/dispatch refused: dispatch_implement runs on Max only/);
       expect(await fx.linkedWorktrees()).toEqual([]);
     } finally {
       releaseRepoLease(fx.repo);

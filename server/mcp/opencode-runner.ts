@@ -1,6 +1,6 @@
 // ── OpenCode harness — the second worker engine ─────────────────────────────────────
 //
-// `dispatch`/`dispatch_implement` (AGENT_OC/AGENT_OC_IMPLEMENT, server/lib/routing.ts) run on
+// `dispatch` and `dispatch_editorial` (AGENT_OC, server/lib/routing.ts) run on
 // OpenCode instead of `claude -p` — see routing.ts's module-header Harness paragraph for why.
 // Since Wave 3 (docs/opencode-v2.md) an episode is a SESSION on the one agw-owned OpenCode v2
 // server (opencode-server.ts), driven over HTTP through the `OpencodeClient` port

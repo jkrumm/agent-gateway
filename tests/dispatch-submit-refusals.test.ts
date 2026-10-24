@@ -76,17 +76,19 @@ describe("static refusals are synchronous 400s with no job row", () => {
     await expectRefused(impl({ revisionOf: "dispatch/../master" }), /revisionOf must name/);
   });
 
-  test("in-place on the opencode harness in a repo carrying its own opencode config", async () => {
-    fx.write(".opencode/plugin.js", "module.exports = () => {}\n");
-    await expectRefused(impl({ workspace: "in-place" }), /dispatch refused:.*\.opencode/);
-  });
-
-  test("...an editorial in-place episode is refused the same way (dispatch_editorial is on opencode too)", async () => {
+  test("in-place editorial on the opencode harness in a repo carrying its own opencode config (implement code runs on claude, Max-only)", async () => {
     fx.write(".opencode/plugin.js", "module.exports = () => {}\n");
     await expectRefused(
       impl({ workspace: "in-place", kind: "editorial" }),
       /dispatch refused:.*\.opencode/,
     );
+  });
+
+  test("a non-Claude per-job model on implement is refused (Max-only, owner rule 2026-10-24); editorial may still use one", async () => {
+    await expectRefused(impl({ model: "claude-haiku-5-5-eu" }), /runs on Max only/);
+    await expectRefused(impl({ model: "gpt-6.1-sol" }), /runs on Max only/);
+    const { status } = await post(impl({ kind: "editorial", model: "gpt-6.1-sol" }));
+    expect(status).toBe(200);
   });
 
   test("...but an in-place episode pinned to a Claude model (claude harness) is accepted in that repo", async () => {

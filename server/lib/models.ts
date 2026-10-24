@@ -228,8 +228,8 @@ const MODELS: readonly ModelEntry[] = [
   },
   // Probed 2026-10-05 (scripts/probe-implement.ts, opencode harness, variant "max"): two
   // replayed real implement briefs, both passed their reference tests — 8 and 5 turns,
-  // 51 s / 70 s, $0.061 / $0.067. The dispatch implement attempt-3+ escalation seat
-  // (routing.ts AGENT_OC_ESCALATION); gpt-6.1-sol stays verified-for-Responses only.
+  // 51 s / 70 s, $0.061 / $0.067. Formerly the dispatch implement attempt-3+ escalation seat
+  // (Max-only since 2026-10-24, no route uses it now); gpt-6.1-sol stays verified-for-Responses only.
   {
     id: "DeepSeek-V4-Pro",
     name: "DeepSeek V4 Pro",

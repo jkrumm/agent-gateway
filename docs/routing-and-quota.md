@@ -6,6 +6,8 @@ demand when touching routing or the fallback retry logic.
 
 ## Backends
 
+**Owner rule (2026-10-24): `dispatch_implement` and `dispatch_implement_escalation` run on Max only — no code is written on IU tokens.** Both are Sonnet on `max` over `claude -p` with `fallback: null` (`MAX_ONLY_TOOLS` in `routing.ts`): a model override that Max cannot serve, a `iu` backend override and an `opencode` harness override are refused at table-build time, and a per-job `model` that Max cannot serve is refused at submit (`dispatchSubmitRefusal`) and ignored by `withModel`. With no IU fallback, an exhausted Max account pool fails the attempt closed (`resolveAttemptAccount`: no IU spill). Editorial and investigate stay on IU.
+
 **`iu`** injects `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` from
 `getIuConfig()` (the IU unified endpoint's native Anthropic transport, metered
 per token, serves Claude _and_ gateway ids — a gateway id additionally gets
@@ -354,6 +356,8 @@ once this tier retired — nothing else in the codebase referenced it).
 
 ### AGENT_OC / AGENT_OC_IMPLEMENT
 
+*2026-10-24: AGENT_OC_IMPLEMENT is gone — `dispatch_implement` is Max-only (owner rule: no code written on IU tokens), `dispatch_editorial` points at AGENT_OC. What follows is history.*
+
 _Superseded by § Wave 5 for the model: dispatch and the OC review angles run `claude-haiku-5-5-eu`; the decision record below is the 2026-09-24 flash move._
 
 AGENT_OC / AGENT_OC_IMPLEMENT — dispatch (investigate/author) and dispatch_implement,
@@ -548,9 +552,11 @@ PRs. Everything routed through `routeFor` is now off Claude except `otel`.
 
 ### dispatch_editorial
 
-*Wave 10: now the same OpenCode Haiku 5.5 route as `dispatch_implement` (§ Wave 10).* dispatch_editorial — 2026-10-10. `kind: "editorial"` on a dispatch routes the episode to the Claude harness on Sonnet (Max, IU reverse fallback), the PROSE shape: AGENTS.md, docs and prose briefs are editorial judgment a cheap model was not measured on. Claude on `dispatch` itself is otherwise opt-in only (`AGENT_GATEWAY_HARNESS_DISPATCH=claude` plus a Claude `AGENT_GATEWAY_MODEL_DISPATCH`).
+*Wave 10: the same OpenCode Haiku 5.5 route as `dispatch` (§ Wave 10); `dispatch_implement` left it 2026-10-24 and is Max-only.* dispatch_editorial — 2026-10-10. `kind: "editorial"` on a dispatch routes the episode to the Claude harness on Sonnet (Max, IU reverse fallback), the PROSE shape: AGENTS.md, docs and prose briefs are editorial judgment a cheap model was not measured on. Claude on `dispatch` itself is otherwise opt-in only (`AGENT_GATEWAY_HARNESS_DISPATCH=claude` plus a Claude `AGENT_GATEWAY_MODEL_DISPATCH`).
 
 ### escalation
+
+*2026-10-24: superseded — `dispatch_implement` and `dispatch_implement_escalation` run on Max only (Sonnet over `claude -p`, no IU fallback); the history below is why they were on IU before.*
 
 escalation — `dispatch_implement_escalation`, the attempt-3+ retry seat for an implement
 episode (warden reads `routes.dispatch_implement_escalation.model` from `GET /api/routing`),

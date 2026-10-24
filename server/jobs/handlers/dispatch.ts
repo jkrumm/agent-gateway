@@ -14,7 +14,13 @@ import {
   type DispatchOutput,
   type WorkerOutput,
 } from "./dispatch-verdict.ts";
-import { routeFor, withModel, type Harness, type RoutedTool } from "../../lib/routing.ts";
+import {
+  maxOnlyModelRefusal,
+  routeFor,
+  withModel,
+  type Harness,
+  type RoutedTool,
+} from "../../lib/routing.ts";
 import {
   DEFAULT_DISPATCH_TIER,
   DEFAULT_DISPATCH_WORKSPACE,
@@ -147,8 +153,10 @@ export const DISPATCH_INPUT = z.object({
     .optional()
     .describe(
       "Optional model override (a verified registry id — see GET /api/routing). Defaults to " +
-        "the route's own model on the metered IU lane (a Claude model on Max is only the " +
-        "reactive fallback); only override on explicit request, a Claude override spends Max quota.",
+        "the route's own model (investigate/author/editorial: the metered IU lane, a Claude model on " +
+        "Max is only the reactive fallback; implement: Sonnet on Max only). Only override on " +
+        "explicit request, a Claude override spends Max quota. For implement (code) a non-Claude " +
+        "model is REFUSED — code is never written on IU tokens (owner rule 2026-10-24).",
     ),
   sensitive: z
     .boolean()
@@ -642,6 +650,9 @@ export function assertDispatchRequestAllowed(
   effectiveSensitive: boolean,
 ): void {
   const { cwd, tier, workspace, revisionOf, kind, model } = input;
+  // A per-job model that would leave Max on a code-writing route (owner rule 2026-10-24).
+  const maxOnly = model ? maxOnlyModelRefusal(dispatchRouteKey(tier, kind), model) : null;
+  if (maxOnly) throw new Error(`dispatch refused: ${maxOnly}`);
   assertSensitiveTierAllowed(tier, effectiveSensitive);
   if (workspace === "in-place") {
     assertInPlaceAllowed(tier, effectiveSensitive);

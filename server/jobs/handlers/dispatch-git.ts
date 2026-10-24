@@ -1236,7 +1236,8 @@ const MAX_COPY_FILES = 5_000;
  * cost-driven, and must never be relaxed: `stripProjectSettings` (below) exists because a
  * repo's `.claude/settings.json` can override the handler's environment, including
  * `GIT_DENY_CREDENTIALS_ENV` (via its `env` block — a live hole closed 2026-08-03) — and,
- * now that dispatch/dispatch_implement run the opencode harness (routing.ts's AGENT_OC), a
+ * now that dispatch (investigate/author) and dispatch_editorial run the opencode harness (routing.ts's
+ * AGENT_OC; implement is Max-only on claude since 2026-10-24), a
  * `.opencode/` directory can carry a PLUGIN, which executes arbitrary code the moment
  * opencode loads it (opencode's own config schema has no `env` block to override an env var
  * through, unlike claude's — the risk there is code execution, not env override).
@@ -1678,7 +1679,8 @@ function describeLeftover(path: string): { main: string; branch: string } {
  * a fresh worktree; it is listed anyway, because "conventionally" is not a guarantee.
  *
  * `opencode.json`/`opencode.jsonc` and `.opencode/` were added 2026-09-24, when
- * dispatch/dispatch_implement moved onto the opencode harness (routing.ts's AGENT_OC) — a
+ * dispatch/dispatch_implement moved onto the opencode harness (routing.ts's AGENT_OC; applies to
+ * investigate/author/editorial now, implement left it 2026-10-24) — a
  * repo-local opencode config or plugin directory is the exact same vector `.claude/
  * settings.json` was for claude: it would execute inside the episode's worktree otherwise.
  * `.opencode` is a directory, not a file — `stripProjectSettings`/`restoreStrippedSettings`
