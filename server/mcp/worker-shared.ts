@@ -207,6 +207,40 @@ async function pickAccountViaCli(lane: string): Promise<AccountSelection> {
 }
 
 /** Registry id of the default account (`CLAUDE_CONFIG_DIR` unset); undefined when unknown. */
+/** `claude-account pick --lane <lane> --dry --why`'s answer: no shell line (never sourced),
+ *  no pick-log write — just the trailing `# picked=<id> reason=<reason> stale=<bool>` comment the
+ *  CLI prints whenever `--why` is given, on exit 0 (a real account or the default) or exit 3
+ *  (the spill signal, `picked` is `"spill"`). */
+export interface AccountLanePick {
+  picked: string;
+  reason: string;
+  stale: boolean;
+}
+
+const PICK_WHY_LINE_RE = /^#\s*picked=(\S+)\s+reason=(\S+)\s+stale=(true|false)\s*$/;
+
+/** Pure: parse `claude-account pick --lane <lane> --dry --why`'s stdout + exit code. Any exit
+ *  other than 0 or 3 is unavailable (the CLI failed or the registry was unreadable); the
+ *  comment line can be anywhere in stdout, not necessarily the last line. Never throws. */
+export function parseAccountPickWhy(stdout: string, exitCode: number): AccountLanePick | null {
+  if (exitCode !== 0 && exitCode !== 3) return null;
+  const lines = stdout.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = PICK_WHY_LINE_RE.exec(lines[i]!.trim());
+    if (m) return { picked: m[1]!, reason: m[2]!, stale: m[3] === "true" };
+  }
+  return null;
+}
+
+/** One lane's dry-run pick, for display only: no shell line is consumed, no pick-log line is
+ *  written. A single spawn (unlike `pickClaudeAccount`, which follows up with an `account` call
+ *  to resolve the registry id) — `--why`'s comment already names the id. `null` on any failure. */
+export async function pickAccountDryWhy(lane: string): Promise<AccountLanePick | null> {
+  const out = await runAccountCli(["pick", "--lane", lane, "--dry", "--why"], accountCliEnv());
+  if (!out) return null;
+  return parseAccountPickWhy(out.stdout, out.exitCode);
+}
+
 async function defaultAccountViaCli(): Promise<string | undefined> {
   const out = await runAccountCli(["account"], accountCliEnv());
   return out?.stdout.trim() || undefined;
