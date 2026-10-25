@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { appLogger as logger } from "../logger.ts";
 
 /** Env var names that look like a credential. Matched case-insensitively against the
  *  inherited environment and deleted before the worker is spawned. Deliberately broad —
@@ -173,21 +174,44 @@ async function runAccountCli(
   args: string[],
   env: Record<string, string>,
 ): Promise<{ stdout: string; exitCode: number } | null> {
+  let timedOut = false;
   try {
     const proc = Bun.spawn([accountBin(), ...args], {
       stdout: "pipe",
-      stderr: "ignore",
+      stderr: "pipe",
       env,
     });
-    const timer = setTimeout(() => proc.kill("SIGKILL"), ACCOUNT_CLI_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill("SIGKILL");
+    }, ACCOUNT_CLI_TIMEOUT_MS);
     try {
-      const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
       // Exit 3 is the picker's spill signal; for any other subcommand it is just a failure.
-      return exitCode === 0 || (exitCode === 3 && args[0] === "pick") ? { stdout, exitCode } : null;
+      if (exitCode === 0 || (exitCode === 3 && args[0] === "pick")) return { stdout, exitCode };
+      logger.warn(
+        {
+          event: "worker.account_cli_failed",
+          args,
+          exitCode,
+          timedOut,
+          stderr: stderr.slice(0, 200),
+        },
+        "claude-account CLI call failed",
+      );
+      return null;
     } finally {
       clearTimeout(timer);
     }
-  } catch {
+  } catch (err) {
+    logger.warn(
+      { event: "worker.account_cli_failed", args, error: String(err) },
+      "claude-account CLI spawn failed",
+    );
     return null;
   }
 }
@@ -206,7 +230,6 @@ async function pickAccountViaCli(lane: string): Promise<AccountSelection> {
   return { pick, ...(account ? { account } : {}) };
 }
 
-/** Registry id of the default account (`CLAUDE_CONFIG_DIR` unset); undefined when unknown. */
 /** `claude-account pick --lane <lane> --dry --why`'s answer: no shell line (never sourced),
  *  no pick-log write — just the trailing `# picked=<id> reason=<reason> stale=<bool>` comment the
  *  CLI prints whenever `--why` is given, on exit 0 (a real account or the default) or exit 3
@@ -241,6 +264,7 @@ export async function pickAccountDryWhy(lane: string): Promise<AccountLanePick |
   return parseAccountPickWhy(out.stdout, out.exitCode);
 }
 
+/** Registry id of the default account (`CLAUDE_CONFIG_DIR` unset); undefined when unknown. */
 async function defaultAccountViaCli(): Promise<string | undefined> {
   const out = await runAccountCli(["account"], accountCliEnv());
   return out?.stdout.trim() || undefined;

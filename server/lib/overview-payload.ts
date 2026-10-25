@@ -13,8 +13,8 @@ import {
 import {
   buildAccountQuotas,
   buildLanePicks,
-  type AccountLanePick,
   type AccountQuota,
+  type LanePicks,
 } from "./claude-usage.ts";
 import { appLogger as logger } from "../logger.ts";
 
@@ -94,7 +94,7 @@ function readCachedOverview(): OverviewOutput | null {
 export type OverviewPayload = Omit<AgentsSnapshot, "projects"> &
   ReturnType<typeof mergeOverviewIntoSnapshot> & {
     warden: WardenBoard;
-    quota: { accounts: Record<string, AccountQuota>; picks: Record<string, AccountLanePick> };
+    quota: { accounts: Record<string, AccountQuota>; picks: LanePicks };
   };
 
 /** Fresh (cached ≤45 s) snapshot + the latest completed overview job, merged by agent id,
@@ -106,7 +106,7 @@ export async function buildOverviewPayload(): Promise<{
   merged: ReturnType<typeof mergeOverviewIntoSnapshot>;
   warden: WardenBoard;
   quota: Record<string, AccountQuota>;
-  picks: Record<string, AccountLanePick>;
+  picks: LanePicks;
   payload: OverviewPayload;
 }> {
   const [snapshot, warden, quota, picks] = await Promise.all([

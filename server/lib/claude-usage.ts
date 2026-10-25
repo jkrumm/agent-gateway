@@ -293,25 +293,32 @@ export const LANE_PICKS = [
   "headless",
 ] as const;
 
-let lastGoodPicks: Record<string, AccountLanePick> | null = null;
-let picksLastAttempt = 0;
-let picksInflight: Promise<Record<string, AccountLanePick>> | null = null;
+export type LanePicks = Partial<Record<(typeof LANE_PICKS)[number], AccountLanePick>>;
 
-function refreshLanePicks(): Promise<Record<string, AccountLanePick>> {
+let lastGoodPicks: LanePicks | null = null;
+let picksLastAttempt = 0;
+let picksInflight: Promise<LanePicks> | null = null;
+let picksGeneration = 0;
+
+function refreshLanePicks(): Promise<LanePicks> {
   if (picksInflight) return picksInflight;
+  const gen = picksGeneration;
   picksLastAttempt = Date.now();
-  const run = (async (): Promise<Record<string, AccountLanePick>> => {
+  const run = (async (): Promise<LanePicks> => {
     const results = await Promise.all(LANE_PICKS.map((lane) => pickAccountDryWhy(lane)));
-    const out: Record<string, AccountLanePick> = {};
-    LANE_PICKS.forEach((lane, i) => {
-      const r = results[i];
-      if (r) out[lane] = r;
-    });
+    // A lane whose fresh pick failed keeps its previous entry — one lane's hiccup must not blank
+    // out the other five, and a total failure must not overwrite the last good batch with `{}`.
+    const out: LanePicks = Object.fromEntries(
+      LANE_PICKS.map((lane, i) => [lane, results[i] ?? lastGoodPicks?.[lane]]).filter(
+        (entry): entry is [(typeof LANE_PICKS)[number], AccountLanePick] => entry[1] != null,
+      ),
+    );
+    if (gen !== picksGeneration) return out; // reset mid-flight (tests): drop the result
     picksLastAttempt = Date.now();
     lastGoodPicks = out;
     return out;
   })().finally(() => {
-    picksInflight = null;
+    if (gen === picksGeneration) picksInflight = null;
   });
   picksInflight = run;
   return run;
@@ -319,9 +326,9 @@ function refreshLanePicks(): Promise<Record<string, AccountLanePick>> {
 
 /** Every lane's picked account, `--dry --why` (display only — no shell line sourced, no pick-log
  *  write), same `MEMO_MS` stale-while-revalidate window as `readClaudeUsage` so the overview
- *  never spawns 6 `claude-account` processes per request. A failing or missing CLI yields `{}`,
- *  never throws. */
-export function buildLanePicks(): Promise<Record<string, AccountLanePick>> {
+ *  never spawns 6 `claude-account` processes per request. A lane that fails to refresh keeps its
+ *  last good pick; the whole result is `{}` only when no lane has ever resolved. Never throws. */
+export function buildLanePicks(): Promise<LanePicks> {
   if (lastGoodPicks) {
     if (Date.now() - picksLastAttempt >= MEMO_MS) void refreshLanePicks();
     return Promise.resolve(lastGoodPicks);
@@ -330,11 +337,23 @@ export function buildLanePicks(): Promise<Record<string, AccountLanePick>> {
   return refreshLanePicks();
 }
 
-/** Test-only — drops all cached picks state. */
+/** Test-only — drops all cached picks state; bumps the generation so a refresh already in
+ *  flight cannot write `lastGoodPicks` after this returns. */
 export function __resetLanePicksForTests(): void {
+  picksGeneration += 1;
   lastGoodPicks = null;
   picksLastAttempt = 0;
   picksInflight = null;
+}
+
+/** Test-only — makes the cached picks look older than the memo window. */
+export function __expireLanePicksForTests(): void {
+  picksLastAttempt = 0;
+}
+
+/** Test-only — resolves when no lane-picks refresh is in flight. */
+export async function __settleLanePicksForTests(): Promise<void> {
+  await picksInflight;
 }
 
 /** Width of the account id column, shared by the quota header and the agent rows: the longest

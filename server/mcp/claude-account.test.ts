@@ -117,6 +117,22 @@ describe("parseAccountPickWhy", () => {
       ),
     ).toBeNull();
   });
+  test("CRLF line endings are tolerated", () => {
+    expect(
+      parseAccountPickWhy("unset CLAUDE_CONFIG_DIR\r\n# picked=iu reason=home stale=false\r\n", 0),
+    ).toEqual({ picked: "iu", reason: "home", stale: false });
+  });
+  test("two comment lines: the last one wins", () => {
+    expect(
+      parseAccountPickWhy(
+        "# picked=iu reason=home stale=false\n# picked=me reason=pace stale=true\n",
+        0,
+      ),
+    ).toEqual({ picked: "me", reason: "pace", stale: true });
+  });
+  test("exit 3 with no comment line → null", () => {
+    expect(parseAccountPickWhy("spill\n", 3)).toBeNull();
+  });
 });
 
 describe("pickAccountDryWhy", () => {

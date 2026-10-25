@@ -4,9 +4,11 @@ import { join } from "path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   __expireClaudeUsageForTests,
+  __expireLanePicksForTests,
   __resetClaudeUsageForTests,
   __resetLanePicksForTests,
   __settleClaudeUsageForTests,
+  __settleLanePicksForTests,
   accountColumnWidth,
   __resetPostedUsageForTests,
   buildAccountQuotas,
@@ -180,6 +182,58 @@ describe("buildLanePicks (fake CLI)", () => {
     __resetLanePicksForTests();
     process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN = join(dir, "nope");
     expect(await buildLanePicks()).toEqual({});
+  });
+
+  test("a later failed refresh keeps serving the picks from the last good one", async () => {
+    const state = join(dir, "state");
+    writeFileSync(state, "ok");
+    fakeCli(
+      `[ "$(cat ${state})" = ok ] || exit 1\necho "export CLAUDE_CONFIG_DIR='/tmp/x'"\necho "# picked=me reason=home stale=false"`,
+    );
+    const first = await buildLanePicks();
+    expect(first.wave).toEqual({ picked: "me", reason: "home", stale: false });
+
+    writeFileSync(state, "down");
+    __expireLanePicksForTests();
+    await buildLanePicks();
+    await __settleLanePicksForTests();
+    expect(await buildLanePicks()).toEqual(first);
+  });
+
+  test("partial failure: the failing lane keeps its previous pick, the others move on", async () => {
+    const state = join(dir, "state");
+    writeFileSync(state, "1");
+    fakeCli(
+      `P=$(cat ${state})\nif [ "$3" = "wave" ] && [ "$P" = "2" ]; then exit 1; fi\necho "export CLAUDE_CONFIG_DIR='/tmp/x'"\necho "# picked=p$P reason=home stale=false"`,
+    );
+    const first = await buildLanePicks();
+    expect(first.wave).toEqual({ picked: "p1", reason: "home", stale: false });
+
+    writeFileSync(state, "2");
+    __expireLanePicksForTests();
+    await buildLanePicks();
+    await __settleLanePicksForTests();
+    const after = await buildLanePicks();
+    expect(after.wave).toEqual(first.wave); // the failing lane kept its previous pick
+    expect(after.fan).toEqual({ picked: "p2", reason: "home", stale: false }); // others moved on
+  });
+
+  test("SWR: a stale read returns the previous picks at once and only one refresh runs for concurrent callers", async () => {
+    const counter = join(dir, "n");
+    fakeCli(
+      `echo x >> ${counter}\necho "export CLAUDE_CONFIG_DIR='/tmp/x'"\necho "# picked=me reason=home stale=false"`,
+    );
+    const first = await buildLanePicks();
+    expect((await Bun.file(counter).text()).trim().split("\n")).toHaveLength(LANE_PICKS.length);
+
+    __expireLanePicksForTests();
+    const [a, b] = await Promise.all([buildLanePicks(), buildLanePicks()]);
+    expect(a).toBe(first); // stale result served immediately, unchanged
+    expect(b).toBe(first);
+    await __settleLanePicksForTests();
+    expect((await Bun.file(counter).text()).trim().split("\n")).toHaveLength(
+      LANE_PICKS.length * 2, // the cold batch plus exactly one background refresh batch
+    );
   });
 });
 
