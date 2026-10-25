@@ -319,5 +319,9 @@ miss is retried at most every 60 s. Dispatch jobs read the session→account pin
 (`readSessionAccount`, keyed by the job's recorded session id).
 
 The JSON overview (`/api/overview`, hence the Argo push) adds `quota: {accounts: {<id>: …}}` with the
-same per-account object `GET /api/usage` returns. The server stays loopback-only; Tinycast reads
-`quota` from Argo.
+same per-account object `GET /api/usage` returns, plus a sibling `picks: {<lane>: {picked, reason,
+stale}}` for the 6 routing lanes (`interactive`, `wave`, `fan`, `agent-gateway:review`,
+`agent-gateway:dispatch`, `headless`) — each lane's `claude-account pick --lane <lane> --dry --why`
+answer (`server/lib/claude-usage.ts`'s `buildLanePicks`: the 6 lanes fetched together, same 15 s
+memo/SWR window as `accounts`, `{}` on a failing or missing CLI, never a shell line sourced or a
+pick-log line written). The server stays loopback-only; Tinycast reads `quota` from Argo.

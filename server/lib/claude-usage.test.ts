@@ -5,10 +5,13 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   __expireClaudeUsageForTests,
   __resetClaudeUsageForTests,
+  __resetLanePicksForTests,
   __settleClaudeUsageForTests,
   accountColumnWidth,
   __resetPostedUsageForTests,
   buildAccountQuotas,
+  buildLanePicks,
+  LANE_PICKS,
   mergeAccountQuota,
   parseClaudeUsage,
   readClaudeUsage,
@@ -134,6 +137,49 @@ describe("readClaudeUsage (fake CLI)", () => {
     const q = await buildAccountQuotas();
     expect(q.me?.five_hour_pct).toBe(4);
     expect(q.me?.source).toBe("post");
+  });
+});
+
+describe("buildLanePicks (fake CLI)", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "lane-picks-"));
+    __resetLanePicksForTests();
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN;
+    __resetLanePicksForTests();
+  });
+
+  function fakeCli(body: string): void {
+    const bin = join(dir, "claude-account");
+    writeFileSync(bin, `#!/bin/sh\n${body}\n`);
+    chmodSync(bin, 0o755);
+    process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN = bin;
+  }
+
+  test("all 6 lanes come back from one batch; a second call within the memo window spawns nothing more", async () => {
+    const counter = join(dir, "n");
+    fakeCli(
+      `echo x >> ${counter}\necho "export CLAUDE_CONFIG_DIR='/tmp/x'"\necho "# picked=me reason=home stale=false"`,
+    );
+    const picks = await buildLanePicks();
+    expect(Object.keys(picks).toSorted()).toEqual([...LANE_PICKS].toSorted());
+    expect(picks.wave).toEqual({ picked: "me", reason: "home", stale: false });
+    expect((await Bun.file(counter).text()).trim().split("\n")).toHaveLength(LANE_PICKS.length);
+
+    await buildLanePicks();
+    expect((await Bun.file(counter).text()).trim().split("\n")).toHaveLength(LANE_PICKS.length);
+  });
+
+  test("failing or missing CLI → {}, never throws", async () => {
+    fakeCli("exit 1");
+    expect(await buildLanePicks()).toEqual({});
+
+    __resetLanePicksForTests();
+    process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN = join(dir, "nope");
+    expect(await buildLanePicks()).toEqual({});
   });
 });
 

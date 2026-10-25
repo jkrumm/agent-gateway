@@ -41,10 +41,12 @@ import {
   __setDefaultAccountForTests,
   markAccountExhausted,
   pruneSessionAccounts,
+  pickAccountDryWhy,
   pickClaudeAccount,
   __setExhaustedMarkerForTests,
   __setExhaustionCheckForTests,
   parseAccountPick,
+  parseAccountPickWhy,
   quotaResetEpochS,
   readSessionAccount,
   recordSessionAccount,
@@ -81,6 +83,70 @@ describe("parseAccountPick", () => {
     expect(parseAccountPick("", 0)).toEqual({ kind: "unavailable" });
     expect(parseAccountPick("garbage", 0)).toEqual({ kind: "unavailable" });
     expect(parseAccountPick("unset CLAUDE_CONFIG_DIR", 2)).toEqual({ kind: "unavailable" });
+  });
+});
+
+describe("parseAccountPickWhy", () => {
+  test("iu pick: the default account", () => {
+    expect(
+      parseAccountPickWhy("unset CLAUDE_CONFIG_DIR\n# picked=iu reason=home stale=false\n", 0),
+    ).toEqual({ picked: "iu", reason: "home", stale: false });
+  });
+  test("me pick: a second account's config dir", () => {
+    expect(
+      parseAccountPickWhy(
+        "export CLAUDE_CONFIG_DIR='/Users/x/.claude-me'\n# picked=me reason=pace stale=true\n",
+        0,
+      ),
+    ).toEqual({ picked: "me", reason: "pace", stale: true });
+  });
+  test("spill: exit 3, picked is literally 'spill'", () => {
+    expect(
+      parseAccountPickWhy("spill\n# picked=spill reason=no-eligible-account stale=false\n", 3),
+    ).toEqual({ picked: "spill", reason: "no-eligible-account", stale: false });
+  });
+  test("garbage output → null", () => {
+    expect(parseAccountPickWhy("garbage\n", 0)).toBeNull();
+    expect(parseAccountPickWhy("", 0)).toBeNull();
+  });
+  test("non-zero, non-spill exit → null even with a comment line present", () => {
+    expect(
+      parseAccountPickWhy(
+        "unset CLAUDE_CONFIG_DIR\n# picked=iu reason=registry-error stale=false\n",
+        4,
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("pickAccountDryWhy", () => {
+  const dir = mkdtempSync(join(tmpdir(), "acct-pickwhy-"));
+  const bin = join(dir, "claude-account");
+  const argsDump = join(dir, "args.txt");
+  const prevBin = process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN;
+  afterEach(() => {
+    if (prevBin === undefined) delete process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN;
+    else process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN = prevBin;
+  });
+
+  test("passes --lane, --dry, --why and parses the answer; one spawn, no account lookup", async () => {
+    writeFileSync(
+      bin,
+      `#!/bin/sh\necho "$@" > '${argsDump}'\necho "export CLAUDE_CONFIG_DIR='${ME_DIR}'"\necho "# picked=me reason=home stale=false"\n`,
+    );
+    chmodSync(bin, 0o755);
+    process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN = bin;
+    expect(await pickAccountDryWhy("wave")).toEqual({
+      picked: "me",
+      reason: "home",
+      stale: false,
+    });
+    expect(readFileSync(argsDump, "utf8").trim()).toBe("pick --lane wave --dry --why");
+  });
+
+  test("missing binary → null, never throws", async () => {
+    process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN = join(dir, "nope");
+    expect(await pickAccountDryWhy("wave")).toBeNull();
   });
 });
 

@@ -3,7 +3,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { z } from "zod";
 import { appLogger as logger } from "../logger.ts";
-import { accountCliEnv } from "../mcp/worker-shared.ts";
+import { accountCliEnv, pickAccountDryWhy, type AccountLanePick } from "../mcp/worker-shared.ts";
 
 // Multi-account Claude Max quota (dotfiles docs/claude-accounts.md §Displays). The quota cache
 // is owned by the dotfiles CLI `claude-account`; `claude-account usage --json` reads only its
@@ -276,6 +276,65 @@ export async function buildAccountQuotas(): Promise<Record<string, AccountQuota>
     );
   }
   return out;
+}
+
+// ── Per-lane account picks (overview payload only) ──────────────────────────────────────────
+
+export type { AccountLanePick };
+
+/** The lanes `GET /api/overview`'s `quota.picks` carries — every lane `routing.ts`/the dotfiles
+ *  picker know about, not every usage lane ever logged. */
+export const LANE_PICKS = [
+  "interactive",
+  "wave",
+  "fan",
+  "agent-gateway:review",
+  "agent-gateway:dispatch",
+  "headless",
+] as const;
+
+let lastGoodPicks: Record<string, AccountLanePick> | null = null;
+let picksLastAttempt = 0;
+let picksInflight: Promise<Record<string, AccountLanePick>> | null = null;
+
+function refreshLanePicks(): Promise<Record<string, AccountLanePick>> {
+  if (picksInflight) return picksInflight;
+  picksLastAttempt = Date.now();
+  const run = (async (): Promise<Record<string, AccountLanePick>> => {
+    const results = await Promise.all(LANE_PICKS.map((lane) => pickAccountDryWhy(lane)));
+    const out: Record<string, AccountLanePick> = {};
+    LANE_PICKS.forEach((lane, i) => {
+      const r = results[i];
+      if (r) out[lane] = r;
+    });
+    picksLastAttempt = Date.now();
+    lastGoodPicks = out;
+    return out;
+  })().finally(() => {
+    picksInflight = null;
+  });
+  picksInflight = run;
+  return run;
+}
+
+/** Every lane's picked account, `--dry --why` (display only — no shell line sourced, no pick-log
+ *  write), same `MEMO_MS` stale-while-revalidate window as `readClaudeUsage` so the overview
+ *  never spawns 6 `claude-account` processes per request. A failing or missing CLI yields `{}`,
+ *  never throws. */
+export function buildLanePicks(): Promise<Record<string, AccountLanePick>> {
+  if (lastGoodPicks) {
+    if (Date.now() - picksLastAttempt >= MEMO_MS) void refreshLanePicks();
+    return Promise.resolve(lastGoodPicks);
+  }
+  if (!picksInflight && Date.now() - picksLastAttempt < MEMO_MS) return Promise.resolve({});
+  return refreshLanePicks();
+}
+
+/** Test-only — drops all cached picks state. */
+export function __resetLanePicksForTests(): void {
+  lastGoodPicks = null;
+  picksLastAttempt = 0;
+  picksInflight = null;
 }
 
 /** Width of the account id column, shared by the quota header and the agent rows: the longest

@@ -3,7 +3,12 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { renderText, stripAnsi, type Agent, type AgentsSnapshot } from "./agents.ts";
-import { __resetClaudeUsageForTests, type AccountQuota } from "./claude-usage.ts";
+import {
+  __resetClaudeUsageForTests,
+  __resetLanePicksForTests,
+  LANE_PICKS,
+  type AccountQuota,
+} from "./claude-usage.ts";
 import { buildOverviewPayload } from "./overview-payload.ts";
 
 const NOW = new Date(2026, 9, 24, 12, 0, 0).getTime();
@@ -91,21 +96,29 @@ describe("renderText with quota", () => {
 
 describe("buildOverviewPayload", () => {
   let dir: string;
+  let bin: string;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "overview-quota-"));
-    const bin = join(dir, "claude-account");
+    bin = join(dir, "claude-account");
     writeFileSync(
       bin,
-      `#!/bin/sh\necho '{"accounts":[{"id":"iu","enabled":true,"five_hour":5,"seven_day":6,"age_s":1},{"id":"me","enabled":false}]}'\n`,
+      `#!/bin/sh
+case "$1" in
+  pick) echo "export CLAUDE_CONFIG_DIR='/tmp/x'"; echo "# picked=me reason=home stale=false" ;;
+  usage) echo '{"accounts":[{"id":"iu","enabled":true,"five_hour":5,"seven_day":6,"age_s":1},{"id":"me","enabled":false}]}' ;;
+esac
+`,
     );
     chmodSync(bin, 0o755);
     process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN = bin;
     __resetClaudeUsageForTests();
+    __resetLanePicksForTests();
   });
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
     delete process.env.AGENT_GATEWAY_CLAUDE_ACCOUNT_BIN;
     __resetClaudeUsageForTests();
+    __resetLanePicksForTests();
   });
 
   test("payload carries quota.accounts (disabled included), same object as /api/usage", async () => {
@@ -113,5 +126,20 @@ describe("buildOverviewPayload", () => {
     expect(payload.quota.accounts).toBe(q);
     expect(payload.quota.accounts.iu).toMatchObject({ five_hour_pct: 5, seven_day_pct: 6 });
     expect(payload.quota.accounts.me?.enabled).toBe(false);
+  });
+
+  test("payload carries quota.picks for all 6 lanes, same object as buildLanePicks", async () => {
+    const { payload, picks } = await buildOverviewPayload();
+    expect(payload.quota.picks).toBe(picks);
+    expect(Object.keys(payload.quota.picks).toSorted()).toEqual([...LANE_PICKS].toSorted());
+    expect(payload.quota.picks.wave).toEqual({ picked: "me", reason: "home", stale: false });
+  });
+
+  test("a claude-account that doesn't understand 'pick' yields picks: {}, never throws", async () => {
+    writeFileSync(bin, `#!/bin/sh\necho '{"accounts":[]}'\n`);
+    chmodSync(bin, 0o755);
+    __resetLanePicksForTests();
+    const { payload } = await buildOverviewPayload();
+    expect(payload.quota.picks).toEqual({});
   });
 });

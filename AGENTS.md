@@ -401,7 +401,9 @@ failure). `GET /api/usage` → `{ok, data, accounts}`: `accounts` is keyed by id
 `five_hour_mins_left, auth_ok, exhausted_until, enabled, plan, updated_at` (epoch ms), `source`; a
 POST newer than the CLI sample overrides per window. `POST /api/usage` takes an optional `account`
 (`/^[a-z][a-z0-9-]{0,15}$/`, default `iu`); `data` stays the last `iu` POST (back-compat).
-`/api/overview` adds `quota: {accounts}` and per-agent `account`; `/api/overview.txt` gets a quota
+`/api/overview` adds `quota: {accounts, picks}` and per-agent `account`; `picks` is the 6 routing
+lanes' `claude-account pick --lane <lane> --dry --why` answer (`{picked, reason, stale}`), same
+15 s memo/SWR window as `accounts`, `{}` when the CLI is down. `/api/overview.txt` gets a quota
 header line per enabled account and an account column. See `docs/agent-overview-internals.md`
 § Quota header and account column.
 
