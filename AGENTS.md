@@ -882,7 +882,8 @@ fallow — never a gate, never thrown into the review. Disable with
 `AGENT_GATEWAY_REVIEW_OCR=0`. Runs only at review depth `deep` (router-judged, gating default-on; `AGENT_GATEWAY_REVIEW_DEPTH_GATING=0` restores always). Skipped below 100 changed diff lines
 (`AGENT_GATEWAY_REVIEW_OCR_MIN_LINES`, 0 = always): on the 111-review corpus it filed 0
 blocking findings under 100 lines at full cost (~3 min, ~$0.06 — it explores the repo
-either way), and 9 in the 74 reviews above. The IU key is handed to the third-party `ocr` binary
+either way), and 9 in the 74 reviews above. Also skipped above 30 changed files
+(`AGENT_GATEWAY_REVIEW_OCR_MAX_FILES`, 0 = no cap; ~0.23 M prompt tokens per file, $2-3 per run past 30). Paused until 2026-11-02 (IU cap cooldown, `AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL`, empty = no pause; delete `OCR_PAUSED_UNTIL_DEFAULT` after expiry). The IU key is handed to the third-party `ocr` binary
 via env — accepted because its agent tools are read-only (file read/find/
 search via `git`, no shell tool) and it reads LLM config only from env/
 `~/.opencodereview`, never the repo; a repo's own `.opencodereview/rule.json`

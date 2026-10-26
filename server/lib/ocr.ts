@@ -405,6 +405,27 @@ function truncateForPrompt(line: string): string {
   return trimmed ? trimmed.slice(0, STDERR_LINE_FOR_PROMPT_CHARS) : "no stderr";
 }
 
+/** Owner decision 2026-10-26: no OCR runs while the IU API is over its rolling cap. Delete this
+ *  constant (and the pause branch in `runOcrReview`) after it expires. Override with
+ *  `AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL` (ISO date/time; empty string = no pause; invalid =
+ *  warning, no pause). */
+export const OCR_PAUSED_UNTIL_DEFAULT = "2026-11-02T00:00:00Z";
+
+/** The instant OCR resumes, or undefined when it is not paused. */
+export function ocrPausedUntil(): Date | undefined {
+  const raw = process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL ?? OCR_PAUSED_UNTIL_DEFAULT;
+  if (raw === "") return undefined;
+  const until = new Date(raw);
+  if (Number.isNaN(until.getTime())) {
+    logger.warn(
+      { event: "review.ocr", tool: "review_ocr", pausedUntil: raw },
+      "AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL is not a valid date — OCR is not paused",
+    );
+    return undefined;
+  }
+  return until;
+}
+
 /** Below this many changed diff lines OCR is skipped. Measured 2026-10-20 on the 111-review
  *  corpus: under 100 lines OCR filed 0 blocking findings in 37 reviews and 5% of all findings,
  *  while costing the same ~3 min and ~$0.06 as on a large diff (it explores the repo either
@@ -428,12 +449,38 @@ export function countChangedLines(diff: string): number {
   return n;
 }
 
+/** Above this many changed files OCR is skipped. Its prompt tokens scale ~0.23 M per reviewed
+ *  file (0.7 M at 1-3 files, 5.4 M at 16-30, 10.5 M at 31+), so a run over ~30 files costs
+ *  $2-3 on IU — and those are whole-wave diffs where the angle reviewers already run. Override
+ *  with `AGENT_GATEWAY_REVIEW_OCR_MAX_FILES` (0 = no cap). */
+export const OCR_MAX_FILES_DEFAULT = 30;
+
+export function ocrMaxFiles(): number {
+  const raw = Number(process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES);
+  return Number.isFinite(raw) && raw >= 0 && process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES !== ""
+    ? raw
+    : OCR_MAX_FILES_DEFAULT;
+}
+
+/** Files in a unified diff, one per `diff --git` header. */
+export function countChangedFiles(diff: string): number {
+  let n = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("diff --git ")) n++;
+  }
+  return n;
+}
+
 export interface RunOcrReviewOptions {
   cwd: string;
   scope: string;
   /** Changed lines in the reviewed diff; below `ocrMinChangedLines()` OCR is skipped. Omitted =
    *  no size gate. */
   changedLines?: number;
+  /** Changed files in the reviewed diff; above `ocrMaxFiles()` OCR is skipped. Omitted = no cap. */
+  changedFiles?: number;
+  /** Clock for the pause check; tests inject it. Defaults to the current time. */
+  now?: Date;
   refBaseOid?: string;
   context?: string;
   jobId?: string;
@@ -499,6 +546,23 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
       return { block: skippedBlock("AGENT_GATEWAY_REVIEW_OCR=0"), ran: false };
     }
 
+    const pausedUntil = ocrPausedUntil();
+    if (pausedUntil && (opts.now ?? new Date()) < pausedUntil) {
+      const until = pausedUntil.toISOString();
+      logger.info(
+        {
+          event: "review.ocr",
+          tool: "review_ocr",
+          project: opts.cwd,
+          status: "skipped",
+          reason: "paused",
+          pausedUntil: until,
+        },
+        "ocr skipped — paused (IU cap cooldown)",
+      );
+      return { block: skippedBlock(`OCR paused until ${until} (IU cap cooldown)`), ran: false };
+    }
+
     const minLines = ocrMinChangedLines();
     if (opts.changedLines !== undefined && opts.changedLines < minLines) {
       logger.info(
@@ -516,6 +580,28 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
       return {
         block: skippedBlock(
           `diff has ${opts.changedLines} changed lines, below the ${minLines}-line gate`,
+        ),
+        ran: false,
+      };
+    }
+
+    const maxFiles = ocrMaxFiles();
+    if (opts.changedFiles !== undefined && maxFiles > 0 && opts.changedFiles > maxFiles) {
+      logger.info(
+        {
+          event: "review.ocr",
+          tool: "review_ocr",
+          project: opts.cwd,
+          status: "skipped",
+          reason: "too_many_files",
+          changedFiles: opts.changedFiles,
+          maxFiles,
+        },
+        "ocr skipped — diff above the file cap",
+      );
+      return {
+        block: skippedBlock(
+          `diff touches ${opts.changedFiles} files, above the ${maxFiles}-file OCR cap`,
         ),
         ran: false,
       };

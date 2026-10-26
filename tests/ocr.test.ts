@@ -3,11 +3,16 @@
 // reasoning `tests/routing.test.ts` and `tests/review-scope.test.ts` apply to their own
 // process-spawning callers.
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  OCR_MAX_FILES_DEFAULT,
   OCR_MIN_CHANGED_LINES_DEFAULT,
+  OCR_PAUSED_UNTIL_DEFAULT,
+  countChangedFiles,
   countChangedLines,
+  ocrMaxFiles,
   ocrMinChangedLines,
+  ocrPausedUntil,
   runOcrReview,
   OCR_EFFORT,
   ocrArgs,
@@ -426,6 +431,16 @@ describe("ocrArgs", () => {
 });
 
 describe("OCR diff-size gate", () => {
+  // The default pause would short-circuit these gates; they test the gates behind it.
+  const prevPause = process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL;
+  beforeAll(() => {
+    process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = "";
+  });
+  afterAll(() => {
+    if (prevPause === undefined) delete process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL;
+    else process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = prevPause;
+  });
+
   test("countChangedLines counts +/- lines, never the file headers", () => {
     const diff = [
       "diff --git a/x.ts b/x.ts",
@@ -462,5 +477,157 @@ describe("OCR diff-size gate", () => {
     expect(res.block).toBe(
       "OpenCodeReview: skipped (diff has 12 changed lines, below the 100-line gate)",
     );
+  });
+});
+
+describe("OCR file-count cap", () => {
+  // The default pause would short-circuit these gates; they test the gates behind it.
+  const prevPause = process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL;
+  beforeAll(() => {
+    process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = "";
+  });
+  afterAll(() => {
+    if (prevPause === undefined) delete process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL;
+    else process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = prevPause;
+  });
+
+  test("countChangedFiles counts diff --git headers, not content lines", () => {
+    const diff = [
+      "diff --git a/x.ts b/x.ts",
+      "+++ b/x.ts",
+      "+diff --git is just content here",
+      "diff --git a/y.ts b/y.ts",
+      "deleted file mode 100644",
+    ].join("\n");
+    expect(countChangedFiles(diff)).toBe(2);
+    expect(countChangedFiles("")).toBe(0);
+  });
+
+  test("the cap defaults to 30 and takes a numeric override, 0 included", () => {
+    const prev = process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES;
+    try {
+      delete process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES;
+      expect(ocrMaxFiles()).toBe(OCR_MAX_FILES_DEFAULT);
+      expect(OCR_MAX_FILES_DEFAULT).toBe(30);
+      process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES = "12";
+      expect(ocrMaxFiles()).toBe(12);
+      process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES = "0";
+      expect(ocrMaxFiles()).toBe(0);
+      process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES = "nope";
+      expect(ocrMaxFiles()).toBe(OCR_MAX_FILES_DEFAULT);
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES;
+      else process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES = prev;
+    }
+  });
+
+  test("a diff above the cap is skipped before ocr is spawned, with the reason in the block", async () => {
+    const prev = process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES;
+    try {
+      delete process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES;
+      const res = await runOcrReview({
+        cwd: process.cwd(),
+        scope: "HEAD~1",
+        changedLines: 5000,
+        changedFiles: 31,
+      });
+      expect(res.ran).toBe(false);
+      expect(res.block).toBe(
+        "OpenCodeReview: skipped (diff touches 31 files, above the 30-file OCR cap)",
+      );
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES;
+      else process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES = prev;
+    }
+  });
+
+  test("0 disables the cap", async () => {
+    const prev = process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES;
+    try {
+      process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES = "0";
+      const res = await runOcrReview({
+        cwd: process.cwd(),
+        scope: "HEAD~1",
+        changedLines: 12,
+        changedFiles: 500,
+      });
+      // Falls through the file cap to the min-lines gate instead.
+      expect(res.block).toContain("below the 100-line gate");
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES;
+      else process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES = prev;
+    }
+  });
+});
+
+describe("OCR time-boxed pause", () => {
+  const prev = process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL;
+  const restore = () => {
+    if (prev === undefined) delete process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL;
+    else process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = prev;
+  };
+
+  test("defaults to the owner's cooldown date", () => {
+    try {
+      delete process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL;
+      expect(ocrPausedUntil()?.toISOString()).toBe(
+        new Date(OCR_PAUSED_UNTIL_DEFAULT).toISOString(),
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  test("is skipped before the date, ahead of the size gates, with the reason in the block", async () => {
+    try {
+      process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = "2026-11-02T00:00:00Z";
+      const res = await runOcrReview({
+        cwd: process.cwd(),
+        scope: "HEAD~1",
+        changedLines: 12,
+        now: new Date("2026-10-30T00:00:00Z"),
+      });
+      expect(res.ran).toBe(false);
+      expect(res.block).toBe(
+        "OpenCodeReview: skipped (OCR paused until 2026-11-02T00:00:00.000Z (IU cap cooldown))",
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  test("resumes at the date: the next gate decides", async () => {
+    try {
+      process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = "2026-11-02T00:00:00Z";
+      const res = await runOcrReview({
+        cwd: process.cwd(),
+        scope: "HEAD~1",
+        changedLines: 12,
+        now: new Date("2026-11-02T00:00:00Z"),
+      });
+      expect(res.block).toContain("below the 100-line gate");
+    } finally {
+      restore();
+    }
+  });
+
+  test("an env override moves the date; empty disables the pause", () => {
+    try {
+      process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = "2027-01-01T00:00:00Z";
+      expect(ocrPausedUntil()?.toISOString()).toBe("2027-01-01T00:00:00.000Z");
+      process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = "";
+      expect(ocrPausedUntil()).toBeUndefined();
+    } finally {
+      restore();
+    }
+  });
+
+  test("an invalid date means no pause", () => {
+    try {
+      process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = "next tuesday";
+      expect(ocrPausedUntil()).toBeUndefined();
+    } finally {
+      restore();
+    }
   });
 });

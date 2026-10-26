@@ -657,3 +657,14 @@ nearly all real, and the most cross-file/config catches of any model — the cla
 angle reviewers miss. Also measured: `reasoning_effort: none` 2m04s but noisier;
 gpt-5.6-luna 3× 1m39s-1m53s, 4-6 real (overlaps the angles more); gpt-6-luna 3× ~1m30s,
 2-3 real (terser); gemini-3.8-flash 2× ~7m, 1-3 real (84 rounds at a 3.3s IU TTFT).
+
+OCR is also skipped above 30 changed files (`AGENT_GATEWAY_REVIEW_OCR_MAX_FILES`, 0 = no
+cap; `OCR_MAX_FILES_DEFAULT` in ocr.ts). Prompt tokens scale ~0.23 M per reviewed file (0.7 M
+at 1-3 files, 5.4 M at 16-30, 10.5 M at 31+), so a run past 30 files costs $2-3 on IU, and
+those are whole-wave diffs where the angle reviewers already run. The skip returns the same
+one-line skipped block as the min-lines gate.
+
+OCR is paused until 2026-11-02T00:00:00Z (`OCR_PAUSED_UNTIL_DEFAULT`, owner decision 2026-10-26: the
+IU API is over its $500 rolling cap). The pause is checked before the size gates, resumes by
+itself with no deploy, and `AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL` overrides it (ISO date/time;
+empty = no pause; invalid = warning, no pause). Delete the constant once it expires.
