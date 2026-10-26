@@ -51,7 +51,7 @@ Previous plan archived: `docs/waves/archive/2026-10-factory-phase0.md` (and `202
   (v1.12.13, built 10-08), effort still `low`, no repo-wide drift. Separate volume spike: 10-13..19 ran 140-200 OCR runs/day
   (~$110 of the $197) on small diffs. Nothing of ours to pin; the lever is how often OCR runs.
 - **Replay (`scripts/replay-depth.ts`, router IU $0.24, 18 of 44 reviews routable; rest are torn-down worktrees/uncommitted):**
-  old prompt in production logs, 103 `review.depth` events: deep 85 (14 fallback), standard 24... i.e. ~69% of routed reviews
+  old prompt in production logs, 103 `review.depth` events: deep 71 routed + 14 fallback, standard 24, light 8: ~69% of routed reviews
   deep, so gating alone saved little. New narrower prompt on the replay: deep 11, standard 5, light 2. Lost blocking
   findings under gating: 2, both on modelpick `03152018` (`light`, found only by resilience/typescript). Fixed by making `light`
   keep the router's individually chosen angles; no OCR-only finding class was lost (the one OCR-only catch, `db29a4c7`, is deep).
