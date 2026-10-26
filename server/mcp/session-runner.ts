@@ -1098,8 +1098,8 @@ export function classifyErrorEnvelope(
  *  set it HIGHER than the real window and a clean auto-compact becomes a hard API
  *  rejection mid-session — which is why 1M is not a safe blanket default (a smaller
  *  gateway model can hard-cap well under it). Anything absent falls back to 200k:
- *  deliberately conservative, not measured. `modelpick`'s `bun run pick` measures
- *  these; re-run it when adding a row. */
+ *  deliberately conservative, not measured. `modelpick`'s ccbench measures
+ *  these (picks: modelpick `STACK.md`); re-measure when adding a row. */
 const GATEWAY_CONTEXT_TOKENS: Record<string, number> = {
   "glm-5.3-flash": 1_000_000, // measured — still accepted at a 1.1M probe ceiling
   "DeepSeek-V4-Flash": 1_000_000, // measured 2026-09-20 (modelpick ccbench), still accepted at the 1.1M probe ceiling
