@@ -8,12 +8,7 @@ import { textComplete, type IuUsage } from "../../lib/iu-openai.ts";
 import { dataBlock, newFenceNonce } from "../../lib/prompt-fence.ts";
 import { parseJsonLoose, singleShotJson } from "../../lib/single-shot.ts";
 import { getModel } from "../../lib/models.ts";
-import {
-  countChangedFiles,
-  countChangedLines,
-  runOcrReview,
-  type RunOcrReviewResult,
-} from "../../lib/ocr.ts";
+import { countChangedLines, runOcrReview, type RunOcrReviewResult } from "../../lib/ocr.ts";
 import {
   REACT_DOCTOR_FAILED_PREFIX,
   REACT_DOCTOR_TIMEOUT_MS,
@@ -1342,7 +1337,6 @@ export async function runReview(
         cwd: effectiveCwd,
         scope: resolvedScope,
         changedLines: countChangedLines(diffResult.stdout),
-        changedFiles: countChangedFiles(diffResult.stdout),
         refBaseOid: refMode ? baseOid : undefined,
         context,
         jobId,

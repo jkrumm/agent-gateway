@@ -69,7 +69,8 @@ Previous plan archived: `docs/waves/archive/2026-10-factory-phase0.md` (and `202
   on clean master with the mini's headless gitconfig; not touched here).
 - **Open for the orchestrator:** to get under half, either an OCR file cap (e.g. skip/limit OCR above ~30 files, where it costs
   $2-3 per run) or opt-in OCR (`depth=deep` from the caller only). Needs a deploy (`make reload`) to take effect; not done.
-- **OCR file cap shipped (orchestrator follow-up):** `AGENT_GATEWAY_REVIEW_OCR_MAX_FILES` (default 30, 0 = no cap) skips OCR
-  above 30 changed files with a logged reason, same skipped block as the min-lines gate. Needs a deploy (`make reload`) to take effect.
-- **OCR pause (owner, 2026-10-26):** `OCR_PAUSED_UNTIL_DEFAULT = 2026-11-02T00:00:00Z` skips every OCR run while the IU API is over its
-  $500 cap; resumes on its own. Delete the constant after expiry.
+- **OCR file cap dropped (owner, 2026-10-26):** the 30-file cap was shipped (347b371) and removed again: a capped OCR is an
+  ineffective OCR, so OCR gates decide only whether it runs. CLI upgraded to v1.13.3 (its `--max-tokens-budget` is deliberately unused).
+- **OCR pause + spend gate (owner, 2026-10-26):** `OCR_PAUSED_UNTIL_DEFAULT = 2026-11-02T00:00:00Z` skips every OCR run; resumes on its
+  own (delete the constant after expiry). Independently OCR skips, fail closed, while IU rolling 30d >= $400 per usage-tracker's
+  `~/.local/share/iu-portal/latest.json`. Needs a deploy (`make reload`) to take effect.

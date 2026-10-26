@@ -115,11 +115,15 @@ the review is `standard`. The effective depth is logged on `review.depth`
 Depth is a gate by default; `AGENT_GATEWAY_REVIEW_DEPTH_GATING=0` turns it off (everything runs,
 OCR included, depth only logged). The router's individually chosen angles run at every depth:
 
-| Depth      | Angles run                             | OCR                                        |
-| ---------- | -------------------------------------- | ------------------------------------------ |
-| `light`    | senior-dev + router angles + adversary | off                                        |
-| `standard` | floor + router angles + adversary      | off                                        |
-| `deep`     | floor + router angles + adversary      | on (≥100 changed lines, ≤30 changed files) |
+| Depth      | Angles run                             | OCR                     |
+| ---------- | -------------------------------------- | ----------------------- |
+| `light`    | senior-dev + router angles + adversary | off                     |
+| `standard` | floor + router angles + adversary      | off                     |
+| `deep`     | floor + router angles + adversary      | on (≥100 changed lines) |
+
+OCR is the tool for cross-file and config-drift risk on diffs the router classifies `deep`. It runs
+complete or not at all: a capped OCR is an ineffective OCR, so every OCR gate (depth, 100-line
+minimum, date pause, spend gate) decides whether it runs and none of them truncates a run.
 
 fallow and react-doctor run at every depth. Explicit `angles` still choose the angle set; the
 gate then only decides OCR. `scripts/replay-depth.ts` replays the router over stored done reviews
@@ -144,9 +148,11 @@ External tools run in parallel with agents:
   renders an explicit `react-doctor failed` line.
 - **OpenCodeReview (`ocr`)** — cross-file consistency, config drift, precise line-anchored
   findings (if installed on PATH; `AGENT_GATEWAY_REVIEW_OCR=0` disables; skipped below
-  100 changed lines, `AGENT_GATEWAY_REVIEW_OCR_MIN_LINES` overrides; skipped above 30 changed
-  files, `AGENT_GATEWAY_REVIEW_OCR_MAX_FILES` overrides, 0 = no cap; paused until
-  2026-11-02 (IU cap cooldown), `AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL` overrides, empty = no pause)
+  100 changed lines, `AGENT_GATEWAY_REVIEW_OCR_MIN_LINES` overrides; paused until 2026-11-02
+  (IU cap cooldown), `AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL` overrides, empty = no pause; skipped
+  while the IU rolling 30d spend is >= $400 or its snapshot is missing/stale,
+  `AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX` overrides, 0 = off). These decide whether OCR runs, never
+  how much of it runs: there is deliberately no file, token or round cap.
 
 ## Output Schema
 

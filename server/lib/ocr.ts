@@ -1,6 +1,6 @@
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { chmod, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { getIuConfig, recordIuUsage, type IuUsage } from "./iu-openai.ts";
 import { trackExternalProc } from "../mcp/session-runner.ts";
 import { IDLE_TIMEOUT_MS } from "./idle-timeout.ts";
@@ -426,6 +426,66 @@ export function ocrPausedUntil(): Date | undefined {
   return until;
 }
 
+/** OCR is skipped while the IU rolling-30-day spend is at or above this many USD. Override with
+ *  `AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX` (0 = disable the gate). */
+export const OCR_BUDGET_MAX_ROLLING30_DEFAULT = 400;
+
+/** A budget snapshot older than this no longer says anything about the current spend. */
+const OCR_BUDGET_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+
+export function ocrBudgetMax(): number {
+  const raw = process.env.AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX;
+  const n = Number(raw);
+  return raw !== undefined && raw !== "" && Number.isFinite(n) && n >= 0
+    ? n
+    : OCR_BUDGET_MAX_ROLLING30_DEFAULT;
+}
+
+/** Where usage-tracker's host-side writer drops the IU spend snapshot. */
+export function ocrBudgetFile(): string {
+  return (
+    process.env.AGENT_GATEWAY_IU_BUDGET_FILE ||
+    join(homedir(), ".local", "share", "iu-portal", "latest.json")
+  );
+}
+
+/** Why OCR must not run on IU spend grounds, or undefined when it may. Reads the (tiny)
+ *  snapshot per review. Fails closed: a missing, unreadable, malformed or stale (>48 h)
+ *  snapshot blocks too, because the gate exists for the time the IU API is over its cap. */
+export async function ocrBudgetBlockReason(now: Date = new Date()): Promise<string | undefined> {
+  const max = ocrBudgetMax();
+  if (max === 0) return undefined;
+  const file = ocrBudgetFile();
+  let raw: string;
+  try {
+    raw = await readFile(file, "utf-8");
+  } catch (err) {
+    const missing = (err as NodeJS.ErrnoException).code === "ENOENT";
+    return missing ? "IU budget file missing" : "IU budget file unreadable";
+  }
+  let snap: { schema?: unknown; fetched_at?: unknown; rolling30_usd?: unknown };
+  try {
+    snap = JSON.parse(raw);
+  } catch {
+    return "IU budget file is not valid JSON";
+  }
+  if (!snap || typeof snap !== "object" || snap.schema !== 1) {
+    return "IU budget file has an unsupported schema";
+  }
+  const fetchedAt = typeof snap.fetched_at === "string" ? Date.parse(snap.fetched_at) : NaN;
+  if (Number.isNaN(fetchedAt)) return "IU budget file has no valid fetched_at";
+  if (now.getTime() - fetchedAt > OCR_BUDGET_MAX_AGE_MS) {
+    return "IU budget file is stale (fetched_at older than 48 h)";
+  }
+  const spend = snap.rolling30_usd;
+  if (typeof spend !== "number" || !Number.isFinite(spend)) {
+    return "IU budget file has no valid rolling30_usd";
+  }
+  if (spend >= max)
+    return `IU rolling 30d $${Math.round(spend * 100) / 100} >= $${max} budget gate`;
+  return undefined;
+}
+
 /** Below this many changed diff lines OCR is skipped. Measured 2026-10-20 on the 111-review
  *  corpus: under 100 lines OCR filed 0 blocking findings in 37 reviews and 5% of all findings,
  *  while costing the same ~3 min and ~$0.06 as on a large diff (it explores the repo either
@@ -449,37 +509,13 @@ export function countChangedLines(diff: string): number {
   return n;
 }
 
-/** Above this many changed files OCR is skipped. Its prompt tokens scale ~0.23 M per reviewed
- *  file (0.7 M at 1-3 files, 5.4 M at 16-30, 10.5 M at 31+), so a run over ~30 files costs
- *  $2-3 on IU — and those are whole-wave diffs where the angle reviewers already run. Override
- *  with `AGENT_GATEWAY_REVIEW_OCR_MAX_FILES` (0 = no cap). */
-export const OCR_MAX_FILES_DEFAULT = 30;
-
-export function ocrMaxFiles(): number {
-  const raw = Number(process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES);
-  return Number.isFinite(raw) && raw >= 0 && process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES !== ""
-    ? raw
-    : OCR_MAX_FILES_DEFAULT;
-}
-
-/** Files in a unified diff, one per `diff --git` header. */
-export function countChangedFiles(diff: string): number {
-  let n = 0;
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("diff --git ")) n++;
-  }
-  return n;
-}
-
 export interface RunOcrReviewOptions {
   cwd: string;
   scope: string;
   /** Changed lines in the reviewed diff; below `ocrMinChangedLines()` OCR is skipped. Omitted =
    *  no size gate. */
   changedLines?: number;
-  /** Changed files in the reviewed diff; above `ocrMaxFiles()` OCR is skipped. Omitted = no cap. */
-  changedFiles?: number;
-  /** Clock for the pause check; tests inject it. Defaults to the current time. */
+  /** Clock for the pause and budget-staleness checks; tests inject it. Defaults to the current time. */
   now?: Date;
   refBaseOid?: string;
   context?: string;
@@ -563,6 +599,22 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
       return { block: skippedBlock(`OCR paused until ${until} (IU cap cooldown)`), ran: false };
     }
 
+    const budgetReason = await ocrBudgetBlockReason(opts.now);
+    if (budgetReason) {
+      logger.info(
+        {
+          event: "review.ocr",
+          tool: "review_ocr",
+          project: opts.cwd,
+          status: "skipped",
+          reason: "budget",
+          detail: budgetReason,
+        },
+        "ocr skipped — IU budget gate",
+      );
+      return { block: skippedBlock(budgetReason), ran: false };
+    }
+
     const minLines = ocrMinChangedLines();
     if (opts.changedLines !== undefined && opts.changedLines < minLines) {
       logger.info(
@@ -580,28 +632,6 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
       return {
         block: skippedBlock(
           `diff has ${opts.changedLines} changed lines, below the ${minLines}-line gate`,
-        ),
-        ran: false,
-      };
-    }
-
-    const maxFiles = ocrMaxFiles();
-    if (opts.changedFiles !== undefined && maxFiles > 0 && opts.changedFiles > maxFiles) {
-      logger.info(
-        {
-          event: "review.ocr",
-          tool: "review_ocr",
-          project: opts.cwd,
-          status: "skipped",
-          reason: "too_many_files",
-          changedFiles: opts.changedFiles,
-          maxFiles,
-        },
-        "ocr skipped — diff above the file cap",
-      );
-      return {
-        block: skippedBlock(
-          `diff touches ${opts.changedFiles} files, above the ${maxFiles}-file OCR cap`,
         ),
         ran: false,
       };
@@ -656,7 +686,12 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
       await writeFile(bgFile, opts.context ?? "", { encoding: "utf-8", mode: 0o600 });
     }
 
-    const args = ocrArgs({ modeArgs, repo: opts.cwd, outFile, bgFile });
+    const args = ocrArgs({
+      modeArgs,
+      repo: opts.cwd,
+      outFile,
+      bgFile,
+    });
 
     // Minimal env, deliberately not a copy of process.env — same reasoning
     // buildWorkerEnv's scrub applies to a worker session: a spawned CLI has no reason to hold

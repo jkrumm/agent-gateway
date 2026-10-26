@@ -4,13 +4,16 @@
 // process-spawning callers.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
-  OCR_MAX_FILES_DEFAULT,
+  OCR_BUDGET_MAX_ROLLING30_DEFAULT,
   OCR_MIN_CHANGED_LINES_DEFAULT,
   OCR_PAUSED_UNTIL_DEFAULT,
-  countChangedFiles,
   countChangedLines,
-  ocrMaxFiles,
+  ocrBudgetBlockReason,
+  ocrBudgetMax,
   ocrMinChangedLines,
   ocrPausedUntil,
   runOcrReview,
@@ -430,16 +433,25 @@ describe("ocrArgs", () => {
   });
 });
 
-describe("OCR diff-size gate", () => {
-  // The default pause would short-circuit these gates; they test the gates behind it.
-  const prevPause = process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL;
+// The pause and budget gates sit ahead of the size gates and would short-circuit them; the size
+// tests open both (pause cleared, budget gate disabled) for their own describe block.
+function openGatesAheadOfSize(): void {
+  const keys = ["AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL", "AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX"];
+  const prev = keys.map((k) => process.env[k]);
   beforeAll(() => {
     process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = "";
+    process.env.AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX = "0";
   });
   afterAll(() => {
-    if (prevPause === undefined) delete process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL;
-    else process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = prevPause;
+    keys.forEach((k, i) => {
+      if (prev[i] === undefined) delete process.env[k];
+      else process.env[k] = prev[i];
+    });
   });
+}
+
+describe("OCR diff-size gate", () => {
+  openGatesAheadOfSize();
 
   test("countChangedLines counts +/- lines, never the file headers", () => {
     const diff = [
@@ -480,91 +492,14 @@ describe("OCR diff-size gate", () => {
   });
 });
 
-describe("OCR file-count cap", () => {
-  // The default pause would short-circuit these gates; they test the gates behind it.
-  const prevPause = process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL;
-  beforeAll(() => {
-    process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = "";
-  });
-  afterAll(() => {
-    if (prevPause === undefined) delete process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL;
-    else process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = prevPause;
-  });
-
-  test("countChangedFiles counts diff --git headers, not content lines", () => {
-    const diff = [
-      "diff --git a/x.ts b/x.ts",
-      "+++ b/x.ts",
-      "+diff --git is just content here",
-      "diff --git a/y.ts b/y.ts",
-      "deleted file mode 100644",
-    ].join("\n");
-    expect(countChangedFiles(diff)).toBe(2);
-    expect(countChangedFiles("")).toBe(0);
-  });
-
-  test("the cap defaults to 30 and takes a numeric override, 0 included", () => {
-    const prev = process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES;
-    try {
-      delete process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES;
-      expect(ocrMaxFiles()).toBe(OCR_MAX_FILES_DEFAULT);
-      expect(OCR_MAX_FILES_DEFAULT).toBe(30);
-      process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES = "12";
-      expect(ocrMaxFiles()).toBe(12);
-      process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES = "0";
-      expect(ocrMaxFiles()).toBe(0);
-      process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES = "nope";
-      expect(ocrMaxFiles()).toBe(OCR_MAX_FILES_DEFAULT);
-    } finally {
-      if (prev === undefined) delete process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES;
-      else process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES = prev;
-    }
-  });
-
-  test("a diff above the cap is skipped before ocr is spawned, with the reason in the block", async () => {
-    const prev = process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES;
-    try {
-      delete process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES;
-      const res = await runOcrReview({
-        cwd: process.cwd(),
-        scope: "HEAD~1",
-        changedLines: 5000,
-        changedFiles: 31,
-      });
-      expect(res.ran).toBe(false);
-      expect(res.block).toBe(
-        "OpenCodeReview: skipped (diff touches 31 files, above the 30-file OCR cap)",
-      );
-    } finally {
-      if (prev === undefined) delete process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES;
-      else process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES = prev;
-    }
-  });
-
-  test("0 disables the cap", async () => {
-    const prev = process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES;
-    try {
-      process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES = "0";
-      const res = await runOcrReview({
-        cwd: process.cwd(),
-        scope: "HEAD~1",
-        changedLines: 12,
-        changedFiles: 500,
-      });
-      // Falls through the file cap to the min-lines gate instead.
-      expect(res.block).toContain("below the 100-line gate");
-    } finally {
-      if (prev === undefined) delete process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES;
-      else process.env.AGENT_GATEWAY_REVIEW_OCR_MAX_FILES = prev;
-    }
-  });
-});
-
 describe("OCR time-boxed pause", () => {
   const prev = process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL;
+  const prevBudget = process.env.AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX;
   const restore = () => {
     if (prev === undefined) delete process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL;
     else process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = prev;
+    if (prevBudget === undefined) delete process.env.AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX;
+    else process.env.AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX = prevBudget;
   };
 
   test("defaults to the owner's cooldown date", () => {
@@ -598,6 +533,7 @@ describe("OCR time-boxed pause", () => {
 
   test("resumes at the date: the next gate decides", async () => {
     try {
+      process.env.AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX = "0";
       process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = "2026-11-02T00:00:00Z";
       const res = await runOcrReview({
         cwd: process.cwd(),
@@ -629,5 +565,116 @@ describe("OCR time-boxed pause", () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe("OCR budget gate", () => {
+  const NOW = new Date("2026-10-27T12:00:00Z");
+  const keys = [
+    "AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL",
+    "AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX",
+    "AGENT_GATEWAY_IU_BUDGET_FILE",
+  ];
+  const prev = keys.map((k) => process.env[k]);
+  let dir: string;
+  let file: string;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), "ocr-budget-"));
+    file = join(dir, "latest.json");
+    process.env.AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL = "";
+    delete process.env.AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX;
+    process.env.AGENT_GATEWAY_IU_BUDGET_FILE = file;
+  });
+  afterAll(async () => {
+    keys.forEach((k, i) => {
+      if (prev[i] === undefined) delete process.env[k];
+      else process.env[k] = prev[i];
+    });
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const snapshot = (over: Record<string, unknown> = {}) =>
+    writeFile(
+      file,
+      JSON.stringify({
+        schema: 1,
+        fetched_at: "2026-10-27T06:00:00Z",
+        rolling30_usd: 120,
+        limit_usd: 500,
+        ...over,
+      }),
+    );
+
+  test("the threshold defaults to 400 and takes an override, 0 included", () => {
+    expect(OCR_BUDGET_MAX_ROLLING30_DEFAULT).toBe(400);
+    expect(ocrBudgetMax()).toBe(400);
+    process.env.AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX = "250";
+    expect(ocrBudgetMax()).toBe(250);
+    process.env.AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX = "0";
+    expect(ocrBudgetMax()).toBe(0);
+    process.env.AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX = "nope";
+    expect(ocrBudgetMax()).toBe(400);
+    delete process.env.AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX;
+  });
+
+  test("spend under the threshold lets OCR run", async () => {
+    await snapshot({ rolling30_usd: 399.99 });
+    expect(await ocrBudgetBlockReason(NOW)).toBeUndefined();
+  });
+
+  test("spend at or above the threshold blocks, naming the numbers", async () => {
+    await snapshot({ rolling30_usd: 400 });
+    expect(await ocrBudgetBlockReason(NOW)).toBe("IU rolling 30d $400 >= $400 budget gate");
+    await snapshot({ rolling30_usd: 512.345 });
+    expect(await ocrBudgetBlockReason(NOW)).toBe("IU rolling 30d $512.35 >= $400 budget gate");
+  });
+
+  test("the gate is skipped through runOcrReview with the reason in the block", async () => {
+    await snapshot({ rolling30_usd: 480 });
+    const res = await runOcrReview({
+      cwd: process.cwd(),
+      scope: "HEAD~1",
+      changedLines: 5000,
+      now: NOW,
+    });
+    expect(res.ran).toBe(false);
+    expect(res.block).toBe("OpenCodeReview: skipped (IU rolling 30d $480 >= $400 budget gate)");
+  });
+
+  test("budget max 0 disables the gate even over the cap or without a file", async () => {
+    process.env.AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX = "0";
+    try {
+      await snapshot({ rolling30_usd: 900 });
+      expect(await ocrBudgetBlockReason(NOW)).toBeUndefined();
+      await rm(file, { force: true });
+      expect(await ocrBudgetBlockReason(NOW)).toBeUndefined();
+    } finally {
+      delete process.env.AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX;
+    }
+  });
+
+  test("fails closed: missing, malformed, wrong schema, stale", async () => {
+    await rm(file, { force: true });
+    expect(await ocrBudgetBlockReason(NOW)).toBe("IU budget file missing");
+
+    await writeFile(file, "{not json");
+    expect(await ocrBudgetBlockReason(NOW)).toBe("IU budget file is not valid JSON");
+
+    await snapshot({ schema: 2 });
+    expect(await ocrBudgetBlockReason(NOW)).toBe("IU budget file has an unsupported schema");
+
+    await snapshot({ fetched_at: "garbage" });
+    expect(await ocrBudgetBlockReason(NOW)).toBe("IU budget file has no valid fetched_at");
+
+    await snapshot({ rolling30_usd: "120" });
+    expect(await ocrBudgetBlockReason(NOW)).toBe("IU budget file has no valid rolling30_usd");
+
+    await snapshot({ fetched_at: "2026-10-25T11:59:00Z" });
+    expect(await ocrBudgetBlockReason(NOW)).toBe(
+      "IU budget file is stale (fetched_at older than 48 h)",
+    );
+    await snapshot({ fetched_at: "2026-10-25T12:01:00Z" });
+    expect(await ocrBudgetBlockReason(NOW)).toBeUndefined();
   });
 });

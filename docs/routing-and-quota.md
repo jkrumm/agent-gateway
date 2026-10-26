@@ -658,13 +658,27 @@ angle reviewers miss. Also measured: `reasoning_effort: none` 2m04s but noisier;
 gpt-5.6-luna 3× 1m39s-1m53s, 4-6 real (overlaps the angles more); gpt-6-luna 3× ~1m30s,
 2-3 real (terser); gemini-3.8-flash 2× ~7m, 1-3 real (84 rounds at a 3.3s IU TTFT).
 
-OCR is also skipped above 30 changed files (`AGENT_GATEWAY_REVIEW_OCR_MAX_FILES`, 0 = no
-cap; `OCR_MAX_FILES_DEFAULT` in ocr.ts). Prompt tokens scale ~0.23 M per reviewed file (0.7 M
-at 1-3 files, 5.4 M at 16-30, 10.5 M at 31+), so a run past 30 files costs $2-3 on IU, and
-those are whole-wave diffs where the angle reviewers already run. The skip returns the same
-one-line skipped block as the min-lines gate.
-
 OCR is paused until 2026-11-02T00:00:00Z (`OCR_PAUSED_UNTIL_DEFAULT`, owner decision 2026-10-26: the
-IU API is over its $500 rolling cap). The pause is checked before the size gates, resumes by
+IU API is over its $500 rolling cap). The pause is checked before every other gate, resumes by
 itself with no deploy, and `AGENT_GATEWAY_REVIEW_OCR_PAUSED_UNTIL` overrides it (ISO date/time;
 empty = no pause; invalid = warning, no pause). Delete the constant once it expires.
+
+Spend gate: after the pause and before the min-lines gate, OCR is skipped while the IU rolling-30-day
+spend is at or above `OCR_BUDGET_MAX_ROLLING30_DEFAULT` ($400; `AGENT_GATEWAY_REVIEW_OCR_BUDGET_MAX`,
+0 = gate off). The spend comes from usage-tracker's host-side snapshot
+`~/.local/share/iu-portal/latest.json` (`AGENT_GATEWAY_IU_BUDGET_FILE`; schema 1: `fetched_at`,
+`rolling30_usd`, `limit_usd`), read per review. It fails closed: a missing, unreadable, malformed,
+wrong-schema or >48 h old snapshot also skips, with the cause in the skipped block. Gate order:
+date pause, spend gate, min lines. These decide whether OCR runs, never how much of it runs
+(owner decision 2026-10-26: a capped OCR is an ineffective OCR, so there is no file, token or round cap).
+
+ocr CLI v1.12.13 -> v1.13.3 (installed 2026-10-26, checksum-verified; the old binary is kept at
+`~/.local/bin/ocr.v1.12.13` for rollback). What matters to us: ocr now has `--max-tokens-budget`
+(total input+output tokens, checked before every LLM round; a group over budget gets one final round
+and is reported failed(budget), v1.13.1 surfaces that stop on the run-level state). We deliberately
+do not pass it: it truncates a run, and a truncated OCR is an ineffective one. Also in v1.13.x: a
+grace-round task_done counts as completion (v1.13.1), deleted files are readable via
+`file_read_diff` and listed under their own path (v1.13.0), and a prompt-overflow group is recorded
+as a failed review (v1.13.0). Every flag `ocrArgs` passes parses unchanged (checked with
+`ocr review --preview`, no LLM call). The rest (ChatGPT auth, ACP, language allowlists, MCP
+pagination) does not touch our path.
