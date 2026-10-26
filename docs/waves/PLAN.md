@@ -1,48 +1,47 @@
-# OpenCode v2 — archived
+# Review spend — cut the IU cost of /review without losing the findings that matter
+**Goal:** `/review`'s IU spend drops by well over half, measured on usage-tracker. Gating is decided on
+replayed evidence, not on a hunch, and no blocking finding class is lost silently.
+**Gate:** `make check` green; replay evidence recorded in Left behind; deploy per AGENTS.md (orchestrator's call
+if it needs a restart while jobs run). **No new paid experiments beyond what replay already stored.** Any live
+review run to confirm costs IU money, so at most 2, on small diffs.
+Previous plan archived: `docs/waves/archive/2026-10-factory-phase0.md` (and `2026-10-opencode-v2.md`).
 
-All waves are done. The full plan, with every wave's measurements and **Left behind**, is
-`docs/waves/archive/2026-10-opencode-v2.md`. Wave 12 (factory Phase 0, 2026-10-22) is active; Wave 11's close-out stays above it so
-the wave watcher can still read the `done` flip.
+## Established — do not re-derive (orchestrator, 2026-10-26, from usage-tracker + modelpick)
 
-## Wave 11 — sharpen and close the loops            <!-- status: done -->
-- [x] Decision-model context iteration in warden `scripts/lifecycle/shadow.py`. Today 6 of 8 noise items are called `new`, the attach target is right 1 of 7 times, and confidence ≥ 0.95 is right only 11 of 16 times. Add the signals the LLM triage uses that the shadow context lacks: alert source/fingerprint history, why past items were ignored, and repo noise patterns. Re-run `scripts/shadow-replay.py` on a larger labelled set (≥ 100) and record the before/after table in `docs/decision-shadow.md`. Never promote by hand; the promotion rule stays the improve loop's.
-- [x] Cost truth for Haiku above 100K: compare agw's computed per-message cost with what IU's usage/billing reports (Argo `/usage/records` or IU's own usage endpoint). Correct the registry rates if they differ, and record it.
-- [x] Review angles A/B on real findings (`findings.json`), not regex hints. Decide whether `review_angle_frontend` moves off Sonnet-on-Max.
-- [x] Regenerate the architecture diagrams with the archify skill from the code: shared OpenCode server, steer, re-attach, decide lane, single-shot lane. Update the jkrumm.com copy, and replace the hand-patched HTML.
-- [x] Fix `/wave` in `~/SourceRoot/dotfiles/skills/wave/SKILL.md` (or wherever it lives; grep). A wave must never end its turn while waiting on a background monitor or shell (Waves 4 and 5 ended with "1 shell still running" and never chained or resumed). Bounded polling only, and the close-out spawns or stops explicitly. Also fix `wave-watch.sh`'s STALL heuristic, which fired twice on Wave 8 while it legitimately waited on warden's merge train: count warden/agw job activity for the wave as progress.
-- [x] Final docs truth pass across agent-gateway, warden, dotfiles, brain, hermes-agent and jkrumm.com for everything Waves 8–11 changed. Gate, deploy, verify. Then hand the open list to warden's improve loop (`rd say warden-improve …`) and archive this plan to `docs/waves/archive/2026-10-opencode-v2.md`.
+- **The owner's IU cap is $500 over a rolling 30 days, judged on IU's portal; it stood at $573.** usage-tracker
+  (`~/.local/share/usage-tracker/usage.db`, read-only) attributes the last 30 days of `billing='iu'`:
+  `agent-gateway-iu` `review_ocr` (deepseek-v4.1-flash) **$197** over 1,693 runs, with 3.5 B cache-read, 211 M
+  input and 123 M output tokens; per-run averages grew from ~0.8 M cache to **5–7 M** since 10-21 (10-25 avg
+  6.96 M, max 33 M; output avg 207 k). `review:adversary` on gpt-5.6-terra $86 is **history**: moved to
+  deepseek on 2026-10-23 (`routing.ts` ~277). `agent-gateway-opencode` `review:angle` on claude-haiku-5-5-eu
+  $48 (27 k rows, 897 M cache-read), `review:synthesis` haiku $5, `review:router` $5, and the opencode lanes
+  `agent-gateway:review` deepseek $15 and `review:angle` deepseek $5. **Review ≈ $370 of ~$575 tracked.**
+  Query: `select substr(ts,1,10), sub_tool, model, count(*), round(sum(cost_usd),2),
+  round(sum(cache_read_tokens)/1e6) from usage_record where source like 'agent-gateway%' and ts>=date('now','-30
+  days') group by 1,2,3`.
+- Depth classification exists (`b5c3756`): `review_router` answers `light|standard|deep`, logged as
+  `review.depth`. `AGENT_GATEWAY_REVIEW_DEPTH_GATING=1` is **off** (light → senior-dev + adversary; standard →
+  floor + router angles, no OCR; deep → everything + OCR). `scripts/replay-depth.ts` replays the router over
+  stored reviews and reports lost blocking findings. OCR also has `AGENT_GATEWAY_REVIEW_OCR=0` and
+  `..._OCR_MIN_LINES` (default 100). OCR runs `--effort low` since a 2026-09-25 bake-off
+  (docs/routing-and-quota.md § review_ocr).
+- Owner direction: DeepSeek stays the estate default everywhere. Keep OCR's value (cross-file and config
+  findings the angles miss) where a diff earns it.
+
+## Wave 1 — Measure, gate, trim            <!-- status: active -->
+- [ ] Explain OCR's per-run growth since ~10-21: correlate usage-tracker `review_ocr` rows (tokens per run) with
+      review jobs (diff size, repo, scope; agent-gateway's own job store/logs). Is it larger diffs, `ocr`
+      exploring whole repos (worktree vs scope), a CLI upgrade, or effort/pass settings drifting? Fix a cause
+      if it is ours, e.g. pin its file scope to the diff or cap rounds/turns if the CLI allows.
+- [ ] Run `scripts/replay-depth.ts` over the stored corpus. Report the depth distribution, the blocking findings
+      that would be lost under gating (which angle or OCR found them), and the projected spend at each depth
+      using the per-run costs above.
+- [ ] If the replay loses no blocking finding class (or only ones another angle also catches), enable
+      `AGENT_GATEWAY_REVIEW_DEPTH_GATING=1` as the default (code default and docs, not just env), so OCR runs only
+      on `deep`. Otherwise propose the narrowest gate the evidence supports (e.g. raise `OCR_MIN_LINES`, OCR
+      only on caller `depth=deep`) and implement that.
+- [ ] Look at the haiku angle cost ($48, 27 k rows): rows are per step, so check whether angles re-read the
+      same files repeatedly (cache-read 897 M). Tighten only if there is a cheap, clear win.
+- [ ] Docs (`docs/routing-and-quota.md`, `server/skills/review/README.md`, AGENTS.md), tests, `make check`, commit,
+      push. Left behind: before/after projected $/30d per sub_tool, and what the owner gives up.
 **Left behind:**
-shipped: agw a9813ed + 8562f8d + 21187c4 (deployed, `make verify` green), warden 7a787eb + aecf273 (deployed), dotfiles 0ac5bbb + 56460c4 + 8ce9d56, jkrumm.com f802e21, brain 6b7d865.
-- **Decision-model context (not a win):** `shadow._signals` adds the alert signature's earlier outcomes, the source's outcome mix and past ignored examples (as-of safe, private repos excluded in SQL); question wording mirrors the LLM triage rules. On a faithful 101-item replay set (the Wave 6 set was skewed: it dropped repo-less noise alerts, scored human-aborted tasks as noise and limited candidates to the true repo) `pplx-decider-v1-27b` went 75% → 77% action, attach target 5/10 → 5/10, accuracy at confidence ≥ 0.95 92% → 87%. The other models are flat. Of its 23 misses, 10 are repeated `hermes_log` lines labelled `new` (label artifact), 6 are noise alerts the policy ignore list should own. Verdict: lane stays shadow; promotion is the improve loop's (`docs/decision-shadow.md`). Replay: `python3 scripts/shadow-replay.py` (default = faithful set, `--legacy`, `--no-signals`).
-- **Cost truth:** no correction. IU exposes no usage/billing endpoint and returns no `usage.cost` for Haiku 5.5 on either leg; the registry matches Anthropic's list price exactly (checked via /research: $0.10/$0.50, cache write $0.125, read $0.01, 5x above 100K per request incl. cache tokens). Bedrock's own price and IU's invoice stay unverifiable from here; reconcile recipe in `docs/routing-and-quota.md` § Wave 11.
-- **`frontend` angle moved** to the Haiku 5.5 OpenCode route (Sonnet on Max as reverse lane): `scripts/bench-frontend.ts` on three weatherorb commits, 2 reps; on the one anchored truth (`4ea52bf` names what was wrong in `5de4e2d`) Haiku named the double-delivered token 2/2 and the swallowed sign-out error 1/2, Sonnet 1/2 and 1/2, neither the other two; 18 s vs 163 s; Haiku files ~2x the findings (accessibility nits). `otel` is the only route left on Claude. Live: `GET /api/routing` shows the new route; review job aa33c017 (frontend angle only) ran its angle session on `claude-haiku-5-5-eu` opencode iu. The dead `effectiveFallback` branch is gone. Revert line and its caveat (no IU retry on the reverted Max route) in the doc.
-- **Diagrams:** regenerated `agent-platform` (11 nodes) and `dispatch-path` from the specs, new `episode-lifecycle` sequence (submit, steer, drain-detach, boot re-attach); copied byte-identical to `jkrumm.com/public/diagrams/`. `visual-check` reports `viewer/viewport-overflow` on all three (page height 2000-2450 px vs 900-1320), also on the untouched `estate` diagram, so it is the viewer's layout here, not this change; not fixed. Perceptual review: first viewport of two diagrams only.
-- **`/wave` fixed** (dotfiles 0ac5bbb): new section "Never end the turn while waiting" (bounded foreground waits, background work collected or stopped before the close-out, the close-out ends in a spawn or an explicit stop); `wave-watch.sh` STALL signature now includes agw job states and `warden list open`, so waiting on a dispatch or the merge train is progress.
-- **Reviews (agw 8fb6625..HEAD, warden 7a787eb):** fixed the privacy leak in the signal aggregates (blocking), predicate before LIMIT, history fenced as data, stale routing comments, bench-frontend hardening (median, `.ok` checks, flag validation, failed-run column), the frontend revert caveat. Not taken: shared bench module (fallow duplicate advisory against `bench-routes.ts` stays; `make check` is green), extracting `triage_candidates` into intake.py and shared rule-text constants (the replay copies the live candidate rule), splitting `_signals`, `runCell`, a `SAFE_CLAUDE_ROUTE` constant.
-- **Docs truth pass:** agw AGENTS.md/review README/routing doc/deploy.sh hint, brain model-routing, dotfiles agent-platform + architecture diagram table. Warden LOOP.md already measures shadow and routes.
-- **Open for the improve loop:** (1) shadow promotion check on live rows (`shadow.py report`); noise alerts it calls `new` at ≥ 0.95 belong in the policy ignore list; (2) review outcomes on frontend-heavy PRs after the route move (revert = one env line); (3) real implement-tier dispatch error rate (`session.opencode_error`, `[GET … after Nms]`) since 2.0.29; (4) the OpenCode server restart is still destructive to attached episodes; (5) viewport overflow in archify `visual-check` for tall diagrams; (6) dotfiles `make check` fails on unrelated launchd labels (`hermes-serve*`, weatherorb).
-
-## Wave 12 — Factory Phase 0: investigate reads the host            <!-- status: done -->
-Why: ~30 of the 74 items that reached the owner in 14 days (Round 5 audit,
-`~/SourceRoot/dotfiles/docs/waves/PLAN.md` §Established facts) are one contradiction:
-`agw-readonly` allows only git/rg/cat/ls/head/tail/wc/jq/curl
-(`server/mcp/opencode-server.ts:122-140`) while warden's investigate brief promises host
-reads (`warden/scripts/loop/work.py:264`), so investigate episodes ask "grant access or
-close?". This is Phase 0 of the factory design (`~/SourceRoot/dotfiles/docs/factory/BRIEF.md`):
-only fixes no open design decision can invalidate. warden Wave 8 runs in parallel and
-consumes this wave's verb set and verdict field; it reads both from **Left behind**.
-
-- [x] **Host read verbs in `agw-readonly`**, exactly this set, read-only by construction: `make logs`, `make verify`, `make status` (bare in the episode cwd, or `make -C ~/SourceRoot/<repo> …`); `launchctl print <domain>/<label>` and `launchctl list`; `tail`/`head` with an explicit line bound on `~/Library/Logs/**`; `curl` GET to loopback only (`localhost`, `127.0.0.1`), no `-X`/`-d`/`--data*`/`-T`/`-F`. Explicit denies stay first: every other `make` target (`deploy`, `setup`, `restart`, `*-setup`, `*-teardown`, `secrets-*`), `launchctl kickstart|bootout|bootstrap|load|unload|kill`, any non-loopback `curl`. Unit tests for both sides (allowed and denied command lines, including flag-smuggling attempts like `make logs deploy` and `curl localhost -X POST`).
-- [x] **A host-access gap is a signal, not a question.** When an investigate episode still cannot read what it needs, the verdict says so in a structured field (reuse an existing category/kind field if the schema has one, else add `blocked_on: "host_access"`) instead of asking the owner. Record the exact field and value in **Left behind** — warden Wave 8 keys on it.
-- [x] **Policy lines in `server/skills/dispatch/_common.md`** (the drain in warden Wave 8 runs on them): only product direction, spend, irreversible data loss and other people are owner decisions — everything else is decided with the cheap reversible default (park, revert, leave the PR unmerged); retention and upgrade windows follow the repo's docs, else the conservative default; roadmap sequencing defers to the repo's `docs/waves/PLAN.md` (file it there, don't ask); KeepAlive vs watchdog follows the repo's documented framework; of two PRs for one fix, keep the newer green one and close the other; security/data-loss findings that have a code fix revise first; `[chronic]` means a deeper investigate, never a page; "already fixed on master" resolves.
-- [x] Gate: `make check`, `/review` on the diff, `make deploy`, `make verify`. Prove it live: one real investigate job on a host-shaped question (e.g. "why did <a recent Kuma DOWN> fire", repo homelab or dotfiles) reads the host through the new verbs and returns a verdict without an access question. Record the job id and the verbs it used.
-**Left behind:**
-shipped: agw 69deb89 + the `_common.md` no-pipes line (this close-out commit); `make install-opencode-agent` + `make deploy` + `make verify` green (the opencode config was stale, so the agent was reinstalled first, no jobs running).
-- **Verb set** (`hostReadShellRules()` in `server/mcp/opencode-server.ts`, spliced into `READ_ONLY_SHELL_RULES` before the `*>*` deny): allowed `make logs|verify|status` (bare, or `make -C <SourceRoot>/<repo> <target>` for `~/SourceRoot`, `$HOME/SourceRoot` and the absolute form; exact match, so `make logs deploy` and any extra word after `-C <dir> <target>` are denied), `launchctl print *` / `launchctl list [*]`, loopback `curl` (the existing `curl *` allow, now with write-flag denies for `localhost`/`127.0.0.1` in token AND clustered form: `-X -d -T -F -K --request --data* --upload-file --form --json --config --url`). Denied explicitly: `launchctl kickstart|bootout|bootstrap|load|unload|kill|remove|enable|disable`, `;`/`&`/`|`/`$(`/backtick/`<(` chains on `make` and `launchctl`, `tail -f/-F/--follow` incl. clustered (`-qF`). New in the self-access denies: `*:7705*` (the gateway's own unauthenticated job API, also for loopback GETs).
-- **Not tightened, by decision:** non-loopback `curl` stays allowed (the review angles' research-gateway recipe POSTs to a non-loopback host; denying it would break external-fact validation), and `tail`/`head` on `~/Library/Logs` were already covered by the generic `tail *`/`head *` allows (a bare `tail` is 10 lines; only follows are denied). A worker's `read`/`grep` tools still cannot reach `~/Library/Logs` (`external_directory` deny) — shell `tail -n N` is the route.
-- **Pipes and `2>&1` are refused** (`*>*` and the chain denies): a worker that writes `launchctl print … 2>&1 | head` gets `permission.rejected` on every call. `_common.md` now says "one plain command per call"; the first live run failed exactly this way.
-- **Host-access gap signal (warden Wave 8 keys on it):** no schema change (`DISPATCH_SCHEMA_VERSION` stays 7). The verdict is `nextAction: "human"`, `escalationCategory: "blocker"`, `rootCause: "host-access-gap"`, with the exact command needed in `verdict`. Pinned by `tests/opencode-server.test.ts` (the literal strings must stay in `_common.md`).
-- **Policy lines** are in `server/skills/dispatch/_common.md` under "Choosing `human`" ("Decide these yourself"), all eight from the brief. Prompt edits need no reload (read per run).
-- **Review (job e5a4c9a7):** 1 blocking (clustered curl flags such as `-sXPOST` reaching the job API) fixed with clustered denies and `*:7705*`; improvements taken: SourceRoot anchoring for `make -C`, `launchctl`/`make` substitution denies, clustered tail follows, an ordering-invariant test, a prompt/allowlist drift test. Not taken: extracting the rules into their own module (the ordering test pins the invariant instead), scoping `launchctl print` to `gui/<uid>/com.jkrumm.*` (`print` can show a service's env values; accepted exposure, owner decision if it matters). The senior-dev and security angles failed in that review (their shell tool was denied), so no security-angle verdict exists; the review was not re-run after the fixes.
-- **Live proof:** investigate job `2db20b08-3b35-47cb-a376-95ff7b38aee2` (repo dotfiles, 21 s, `nextAction: none`) used `launchctl print gui/501/com.jkrumm.agent-gateway`, `tail -n 20 /Users/jkrumm/Library/Logs/agent-gateway.err`, `make -C /Users/jkrumm/SourceRoot/agent-gateway verify` (all completed) and returned a verdict without an access question. The question was agent-gateway-shaped, not a Kuma DOWN alert. The earlier run `76b61ef0` (pipes and `2>&1`) is the negative case that produced the `_common.md` line.
-- **Gate:** `make check` green on the first full run (1913 pass); the second run failed one test, `tests/review-detach.test.ts` ("detach keeps the worktree…", 5 s timeout, `posix_spawn git` ENOENT), which also fails alone on clean master (`git stash`) while the host load average is ~37. Flaky under load, not from this change; not fixed.
