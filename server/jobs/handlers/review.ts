@@ -126,7 +126,7 @@ async function mapWithConcurrency<T, R>(
 
 // ── Input schema ─────────────────────────────────────────────────────────────
 
-// Review depth decides how much of the pipeline a diff earns when `AGENT_GATEWAY_REVIEW_DEPTH_GATING=1`.
+// Review depth decides how much of the pipeline a diff earns (default; `AGENT_GATEWAY_REVIEW_DEPTH_GATING=0` disables).
 export const REVIEW_DEPTHS = ["light", "standard", "deep"] as const;
 export type ReviewDepth = (typeof REVIEW_DEPTHS)[number];
 
@@ -170,7 +170,7 @@ export const REVIEW_INPUT = z.object({
     .enum(REVIEW_DEPTHS)
     .optional()
     .describe(
-      "Review depth: light (mechanical/docs/test-only/rename/config-value), standard (ordinary local logic), deep (cross-file logic, auth/secrets, data/migration, concurrency, public API contract). Wins over the router's pick. Only changes what runs when AGENT_GATEWAY_REVIEW_DEPTH_GATING=1; omit to let the router decide.",
+      "Review depth: light (mechanical/docs/test-only/rename/config-value), standard (ordinary local logic), deep (auth/secrets, destructive data ops/migration, concurrency/crash-recovery, public contract with outside callers). Wins over the router's pick. Changes what runs unless AGENT_GATEWAY_REVIEW_DEPTH_GATING=0; omit to let the router decide.",
     ),
   model: z
     .string()
@@ -942,27 +942,28 @@ export function resolveReviewDepth(
   if (router?.depth) {
     return { depth: router.depth, source: "router", reason: router.depthReason ?? "" };
   }
-  return { depth: "deep", source: "fallback", reason: "no router depth; keeping full review" };
+  return {
+    depth: "standard",
+    source: "fallback",
+    reason: "no router depth; full angle set, no OCR",
+  };
 }
 
-/** `AGENT_GATEWAY_REVIEW_DEPTH_GATING=1` turns depth into a gate; off (default) every depth runs
- *  today's full pipeline and depth is only logged. */
+/** Depth is a gate by default; `AGENT_GATEWAY_REVIEW_DEPTH_GATING=0` turns it off, after which
+ *  every depth runs the full pipeline (OCR included) and depth is only logged. */
 export function reviewDepthGating(): boolean {
-  return process.env.AGENT_GATEWAY_REVIEW_DEPTH_GATING === "1";
+  return process.env.AGENT_GATEWAY_REVIEW_DEPTH_GATING !== "0";
 }
 
-/** The angle set a depth earns when gating is on. `light` keeps only senior-dev (plus the
- *  adversary, which is not an angle here); `standard` and `deep` keep today's floor + router. */
+/** The angle set a depth earns when gating is on. `light` keeps senior-dev plus the router's angles
+ *  (plus the adversary, which is not an angle here); `standard` and `deep` keep today's floor + router. */
 export function gatedAngles(
   depth: ReviewDepth,
   floor: AgentConfig[],
   routed: AgentConfig[],
 ): AgentConfig[] {
   if (depth === "light")
-    return capAngles(
-      floor.filter((a) => a.angle === "senior-dev"),
-      MAX_ANGLES,
-    );
+    return capAngles([...floor.filter((a) => a.angle === "senior-dev"), ...routed], MAX_ANGLES);
   return capAngles([...floor, ...routed], MAX_ANGLES);
 }
 
@@ -1422,7 +1423,7 @@ export async function runReview(
       ocrPromise = ocrRunsAtDepth(depthDecision.depth)
         ? startOcr()
         : Promise.resolve({
-            block: `OpenCodeReview: skipped (review depth ${depthDecision.depth}; AGENT_GATEWAY_REVIEW_DEPTH_GATING=1)`,
+            block: `OpenCodeReview: skipped (review depth ${depthDecision.depth}; AGENT_GATEWAY_REVIEW_DEPTH_GATING)`,
             ran: false,
           });
     }

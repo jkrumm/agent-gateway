@@ -86,28 +86,31 @@ describe("resolveReviewDepth precedence", () => {
     });
   });
 
-  test("no caller and no router depth (router failed or explicit angles) falls back to deep", () => {
-    expect(resolveReviewDepth(undefined, undefined).depth).toBe("deep");
+  test("no caller and no router depth (router failed or explicit angles) falls back to standard", () => {
+    expect(resolveReviewDepth(undefined, undefined).depth).toBe("standard");
     expect(resolveReviewDepth(undefined, { angles: [] } as never).source).toBe("fallback");
     expect(resolveReviewDepth(undefined, {}).source).toBe("fallback");
   });
 });
 
-describe("depth gating (AGENT_GATEWAY_REVIEW_DEPTH_GATING=1)", () => {
+describe("depth gating (default on, AGENT_GATEWAY_REVIEW_DEPTH_GATING=0 opts out)", () => {
   const floor = [architect, senior, frontend];
   const routed = [security];
 
-  test("flag off is the default and nothing is gated", () => {
+  test("gating is on by default; only the exact value 0 turns it off", () => {
     delete process.env.AGENT_GATEWAY_REVIEW_DEPTH_GATING;
+    expect(reviewDepthGating()).toBe(true);
+    process.env.AGENT_GATEWAY_REVIEW_DEPTH_GATING = "0";
     expect(reviewDepthGating()).toBe(false);
     for (const depth of ["light", "standard", "deep"] as const) {
       expect(ocrRunsAtDepth(depth)).toBe(true);
     }
   });
 
-  test("flag on: light is senior-dev only", () => {
+  test("light is senior-dev plus whatever the router individually picked", () => {
     process.env.AGENT_GATEWAY_REVIEW_DEPTH_GATING = "1";
-    expect(gatedAngles("light", floor, routed)).toEqual([senior]);
+    expect(gatedAngles("light", floor, routed)).toEqual([senior, security]);
+    expect(gatedAngles("light", floor, [])).toEqual([senior]);
   });
 
   test("flag on: standard keeps the floor and the router angles", () => {
@@ -127,8 +130,9 @@ describe("depth gating (AGENT_GATEWAY_REVIEW_DEPTH_GATING=1)", () => {
     expect(ocrRunsAtDepth("deep")).toBe(true);
   });
 
-  test("only the exact value 1 turns gating on", () => {
-    process.env.AGENT_GATEWAY_REVIEW_DEPTH_GATING = "true";
-    expect(reviewDepthGating()).toBe(false);
+  test("default: OCR runs only at deep", () => {
+    delete process.env.AGENT_GATEWAY_REVIEW_DEPTH_GATING;
+    expect(ocrRunsAtDepth("standard")).toBe(false);
+    expect(ocrRunsAtDepth("deep")).toBe(true);
   });
 });

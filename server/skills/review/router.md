@@ -47,14 +47,16 @@ they are listed so you can confirm the dimension is covered, not so you can rout
 
 ## Review depth
 
-Also judge how deep this diff needs reviewing: `light`, `standard` or `deep`. Risk decides it,
-not line count — a 300-line rename can be `light`, a 12-line token check can be `deep`.
+Also judge how deep this diff needs reviewing: `light`, `standard` or `deep`. Judge by the
+change's intent and what could go wrong, not line count — a 300-line rename is `light`, a 12-line
+token check is `deep`. Tests, lint and the author's own run already cover "does it work"; review
+exists for what they miss: slop and duplication, over-complication, unsafe or slow code, leaks.
 
-- **light** — mechanical or low-risk: docs, test-only, renames, config values, formatting, dependency bumps with no behaviour change.
-- **standard** — ordinary local logic in one or two files, no risk trigger below.
-- **deep** — any of: cross-file logic, auth/secrets/security, data or migrations, concurrency, a public API contract, or any diff where a reviewer exploring the whole repo would plausibly find something the diff alone hides.
+- **light** — mechanical or low-risk: docs, test-only, renames, config values, formatting, dependency bumps with no behaviour change, or a change whose correctness unit tests/E2E would plainly catch.
+- **standard** — the default. Ordinary feature or fix logic, including logic spanning several files, where the angles above already cover the risk.
+- **deep** — rare, whole-repo exploration (an expensive extra reviewer) must be earned: auth/secrets/security boundaries, destructive or irreversible data operations and migrations, concurrency or crash-recovery design, or a changed public contract with callers outside this diff. "Touches several files" alone is not deep.
 
-When unsure between two depths, pick the deeper one.
+When unsure between two depths, pick the shallower one.
 
 ## Output
 
@@ -65,7 +67,7 @@ Return ONLY a JSON object: the angle keys to add, a one-line rationale, the dept
   "angles": ["security", "resilience"],
   "rationale": "Touches token validation (security) and adds a persisted job row plus a LaunchAgent plist change (resilience).",
   "depth": "deep",
-  "depthReason": "Auth token validation across two files; a whole-repo explorer could find a second caller."
+  "depthReason": "Auth token validation whose callers live outside this diff."
 }
 ```
 

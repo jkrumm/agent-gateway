@@ -635,10 +635,12 @@ against the Anthropic angles, which is the point of the seat.
 
 The `review_router` single-shot also answers `depth` (`light` | `standard` | `deep`) and a one-line
 `depthReason`. No route changes: it rides the same `review_router` call. Caller `depth` > router >
-fallback `deep`. Logged always as `review.depth`. With `AGENT_GATEWAY_REVIEW_DEPTH_GATING=1` (default
-off) light runs senior-dev + adversary, standard runs the floor + router angles without OCR, and
-deep runs everything with OCR. Off changes nothing but the log line. Replay the router over stored
-reviews with `scripts/replay-depth.ts` before enabling the flag; it reports lost blocking findings.
+fallback `standard`. Logged always as `review.depth`. Gating is on by default
+(`AGENT_GATEWAY_REVIEW_DEPTH_GATING=0` disables): the router's chosen angles run at every depth;
+light drops the rest of the floor to senior-dev, standard keeps the floor, and only deep runs OCR.
+The router's `deep` is deliberately narrow (auth/secrets, destructive data ops, concurrency or
+crash-recovery, public contract) and defaults shallower when unsure. Replay the router over stored
+reviews with `scripts/replay-depth.ts` after changing those rules; it reports lost blocking findings.
 Full table and reasoning: `server/skills/review/README.md` § Depth.
 
 ### review_ocr
