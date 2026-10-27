@@ -8,8 +8,6 @@ import { listJobRecords } from "../jobs/store.ts";
 import { getGitStatus } from "./git.ts";
 import { accountColumnWidth, renderQuotaHeader, type AccountQuota } from "./claude-usage.ts";
 import { readSessionAccount } from "../mcp/worker-shared.ts";
-import type { WardenBoard } from "./warden-board.ts";
-import { renderWardenBlock } from "./warden-board.ts";
 import {
   RESET,
   BOLD,
@@ -657,7 +655,7 @@ const MAX_STANDING_CHARS = MAX_LINE_CHARS - 8;
 export const MIN_COLS = 40;
 export const MAX_COLS = 200;
 export const DEFAULT_COLS = 110;
-// MIN_TITLE_CHARS lives in ./render-text-utils.ts (shared with warden-board.ts).
+// MIN_TITLE_CHARS lives in ./render-text-utils.ts.
 // Below this width, "  [N agents]" on the project line would routinely be the difference
 // between fitting and wrapping on a phone terminal — drop it, the agent list itself still
 // shows the count.
@@ -680,7 +678,7 @@ export function parseCols(raw: string | undefined): number {
 // output must stay byte-identical when the flag is absent. Every coloured span resets before
 // the newline, so a truncated line or a terminal that dies mid-stream never leaks colour into
 // whatever follows. The palette, `stripAnsi`, and the clamp/truncate/age helpers below all
-// live in ./render-text-utils.ts — shared with warden-board.ts's `renderWardenBlock`.
+// live in ./render-text-utils.ts.
 
 /** A per-agent line/bar-bucket is coloured by its `overview` recommendation when enrichment is
  *  present, else by its deterministic `state` — EXCEPT `needs_you` always wins regardless of
@@ -856,15 +854,7 @@ export interface RenderTextOptions {
    *  `DEFAULT_COLS`), every visible width re-derives from it instead — see the constants above
    *  `parseCols`. */
   cols?: number;
-  /** warden's board (server/lib/warden-board.ts), rendered as a block after the agent roster.
-   *  Omitted (undefined) — an old snapshot, or a caller that never fetches it — drops the
-   *  block entirely, same "absent means don't render" convention as `enrichment`. */
-  warden?: WardenBoard;
 }
-
-// The warden block itself (opt-in via `opts.warden`) is built by warden-board.ts's
-// `renderWardenBlock` — see that module for `WARDEN_IN_FLIGHT_STATES`/`wardenItemPriority`/
-// the block layout. `renderText` below only calls it and pushes the returned lines.
 
 /** Renders the same snapshot GET /api/agents returns as compact plain text for `watch`.
  *  `GET /api/overview.txt` calls this with `opts.enrichment`/`opts.overview` to swap the
@@ -1004,10 +994,6 @@ export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): 
         }
       }
     }
-  }
-
-  if (opts?.warden) {
-    lines.push(...renderWardenBlock(opts.warden, { color, lineMax, generatedAt }));
   }
 
   return `${lines.join("\n")}\n`;

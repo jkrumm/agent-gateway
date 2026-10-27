@@ -687,9 +687,9 @@ The Claude harness (`claude -p`) is explicit opt-in: `AGENT_GATEWAY_HARNESS_DISP
 paired with a Claude `AGENT_GATEWAY_MODEL_DISPATCH`, the `kind: "editorial"` param (route
 `dispatch_editorial`: AGENTS.md/docs/prose briefs run on a Claude model), or the automatic
 Max reverse fallback after an IU failure — so it works with that
-repo's own `AGENTS.md`/`CLAUDE.md`/rules/skills in context. Callers are warden and
-interactive sessions; an observer like Hermes files work through `warden run`, not
-directly. One episode, one verdict. Mid-run, the caller can inject new facts
+repo's own `AGENTS.md`/`CLAUDE.md`/rules/skills in context. Callers are interactive
+sessions and other automation; an observer like Hermes files unattended work through
+`agw dispatch` or an `rd wave` tab, not directly. One episode, one verdict. Mid-run, the caller can inject new facts
 with `job_steer` / `agw steer` (a running OpenCode episode only); anything beyond that —
 redirecting the whole task — is an `rd wave` tab + `rd say`, not this.
 

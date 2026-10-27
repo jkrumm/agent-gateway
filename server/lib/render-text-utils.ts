@@ -1,8 +1,4 @@
-// Shared, pure plain-text/ANSI rendering primitives — split out of server/lib/agents.ts so
-// server/lib/warden-board.ts's `renderWardenBlock` can share them without either module
-// importing a *value* from the other (agents.ts imports `renderWardenBlock` from
-// warden-board.ts; a reverse value import back into agents.ts would be a cycle). Neither file
-// owns these — both are callers.
+// Shared, pure plain-text/ANSI rendering primitives, split out of server/lib/agents.ts.
 
 // ── ANSI colour (opt-in, `?color=1`/`?ansi=1` on the .txt routes) ──────────────────────────────
 //

@@ -1,8 +1,8 @@
 // Bounds of server/lib/iu-openai.ts's request-body construction for textComplete and
-// visionRead. iuFetch calls the global `fetch` directly (no injected fetchImpl like
-// warden-board.ts's boundary), so this stubs `globalThis.fetch` — same functional-response
-// shape the rest of the repo uses (`(async (...) => Response) as typeof fetch`), just at the
-// global rather than a parameter.
+// visionRead. iuFetch calls the global `fetch` directly (no injected fetchImpl parameter),
+// so this stubs `globalThis.fetch` — same functional-response shape the rest of the repo
+// uses (`(async (...) => Response) as typeof fetch`), just at the global rather than a
+// parameter.
 //
 // AGENT_GATEWAY_IU_USAGE_LOG/IU_API_KEY/IU_BASE_URL are set before the first import below so
 // recordIuUsage's NDJSON sink never touches the real ~/.local/share path and getIuConfig
