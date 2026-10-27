@@ -71,6 +71,23 @@ describe("decide", () => {
     expect(row).toMatchObject({ tool: "decide", model: "pplx-decider-v1-27b", input_tokens: 100 });
   });
 
+  test("a job-less call writes job_id/cwd as null — decide has no repo, ever", async () => {
+    await runDecide({ state: "s", questions });
+    const row = JSON.parse(readFileSync(sink, "utf8").trim().split("\n").at(-1) ?? "{}");
+    expect(row.job_id).toBeNull();
+    expect(row.cwd).toBeNull();
+  });
+
+  test("executeJob's job id reaches the usage row; cwd stays null", async () => {
+    await executeJob(
+      { id: "job-789", tool: "decide", params: { state: "s", questions } } as never,
+      () => {},
+    );
+    const row = JSON.parse(readFileSync(sink, "utf8").trim().split("\n").at(-1) ?? "{}");
+    expect(row.job_id).toBe("job-789");
+    expect(row.cwd).toBeNull();
+  });
+
   test("caps the state at the model's limit and reports what was cut", async () => {
     const cap = DECISION_MODELS.clef.maxStateChars;
     const out = await runDecide({ state: "x".repeat(cap + 50), questions, model: "clef" });

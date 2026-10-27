@@ -357,6 +357,13 @@ export async function recordIuUsage(rec: {
    *  through to `usage?.costUsd`. */
   costUsd?: number | null;
   outcome?: "ok" | "error";
+  /** The agent-gateway job this call ran for, when there is one — e.g. review/check/dispatch's
+   *  own job id. Omitted (written `null`) for a call outside the job system (read_image,
+   *  read_drawing) — never guessed. */
+  jobId?: string;
+  /** Absolute repo path the job runs against — the same `cwd` the caller's job was submitted
+   *  with. Omitted (written `null`) for a tool with no repo (triage, decide, prose). */
+  cwd?: string;
 }): Promise<void> {
   const sink = usageSinkPath();
   try {
@@ -383,6 +390,8 @@ export async function recordIuUsage(rec: {
         outcome: rec.outcome ?? "ok",
         latency_ms: rec.latencyMs,
         bytes: rec.bytes ?? null,
+        job_id: rec.jobId ?? null,
+        cwd: rec.cwd ?? null,
       }) + "\n";
     await appendFile(sink, line);
   } catch (err) {
@@ -408,6 +417,9 @@ export async function visionRead(opts: {
   model: string;
   tool?: string;
   timeoutMs?: number;
+  /** Forwarded to `recordIuUsage` as-is — see its own fields for when to pass these. */
+  jobId?: string;
+  cwd?: string;
 }): Promise<VisionResult> {
   const model = opts.model;
   const mimeType = opts.mimeType ?? "image/png";
@@ -452,6 +464,8 @@ export async function visionRead(opts: {
       requestId: data.id,
       latencyMs,
       outcome: "error",
+      jobId: opts.jobId,
+      cwd: opts.cwd,
     });
     throw new Error("Vision call returned no content.");
   }
@@ -462,6 +476,8 @@ export async function visionRead(opts: {
     usage: data.usage,
     requestId: data.id,
     latencyMs,
+    jobId: opts.jobId,
+    cwd: opts.cwd,
   });
   return { text: data.text, model, latencyMs, usage: data.usage };
 }
@@ -510,6 +526,9 @@ export async function textComplete(opts: {
   maxTokens?: number;
   jsonObject?: boolean;
   timeoutMs?: number;
+  /** Forwarded to `recordIuUsage` as-is — see its own fields for when to pass these. */
+  jobId?: string;
+  cwd?: string;
 }): Promise<TextCompleteResult> {
   const model = opts.model;
   const t0 = performance.now();
@@ -535,6 +554,8 @@ export async function textComplete(opts: {
       requestId: data.id,
       latencyMs,
       outcome: "error",
+      jobId: opts.jobId,
+      cwd: opts.cwd,
     });
     throw new Error("Text completion returned no content.");
   }
@@ -545,6 +566,8 @@ export async function textComplete(opts: {
     usage: data.usage,
     requestId: data.id,
     latencyMs,
+    jobId: opts.jobId,
+    cwd: opts.cwd,
   });
   return { text: data.text, model, latencyMs, usage: data.usage };
 }

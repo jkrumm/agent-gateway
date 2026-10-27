@@ -853,7 +853,7 @@ export async function runNarrative(
   const cancelled = jobId !== undefined && isCancelled ? () => isCancelled(jobId) : undefined;
   const polished = await polishPage(rendered, {
     polish: params.polish,
-    deps: defaultProseDeps("narrative", cancelled),
+    deps: defaultProseDeps("narrative", cancelled, { jobId, cwd }),
     isCancelled: cancelled,
     onStart: () =>
       onProgress?.({ turns: 1, lastAction: "narrative: polishing", lastActivityAt: Date.now() }),

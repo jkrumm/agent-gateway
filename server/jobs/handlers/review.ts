@@ -864,10 +864,12 @@ export async function routeExtraAngles(
 }
 
 /** The router's full answer: extra angles plus the review depth it judged the diff at. `depth`
- *  is undefined whenever the router failed or omitted it — the caller falls back to `deep`. */
+ *  is undefined whenever the router failed or omitted it — the caller falls back to `deep`.
+ *  `ctx` is forwarded to `recordIuUsage` for the usage-tracker's project attribution. */
 export async function routeReview(
   diff: string,
   bump?: (label: string) => void,
+  ctx?: { jobId?: string; cwd?: string },
 ): Promise<{
   angles: AgentConfig[];
   depth?: ReviewDepth;
@@ -910,6 +912,8 @@ export async function routeReview(
       prompt,
       schema: ROUTER_OUTPUT,
       route: routeFor("review_router"),
+      jobId: ctx?.jobId,
+      cwd: ctx?.cwd,
     }));
   } catch (err) {
     logger.warn(
@@ -1013,11 +1017,13 @@ const ADVERSARY_OUTPUT = z.object({
   findings: z.array(ANGLE_FINDING),
 });
 
-async function runAdversaryAngle(opts: {
+export async function runAdversaryAngle(opts: {
   diff: string;
   contextBlock: string;
   promptPath: string;
   bump?: (label: string) => void;
+  jobId?: string;
+  cwd?: string;
 }): Promise<AngleResult> {
   const angle = "adversary";
   try {
@@ -1043,6 +1049,8 @@ async function runAdversaryAngle(opts: {
         tool: "review:adversary",
         reasoningEffort,
         maxTokens: ADVERSARY_MAX_TOKENS,
+        jobId: opts.jobId,
+        cwd: opts.cwd,
       });
     const result = await complete(ADVERSARY_EFFORT).catch((err: unknown) => {
       if (!String(err).includes("returned no content")) throw err;
@@ -1340,6 +1348,7 @@ export async function runReview(
         refBaseOid: refMode ? baseOid : undefined,
         context,
         jobId,
+        jobCwd: cwd,
         onActivity: bump,
         signal: ocrSignal,
       }).catch(
@@ -1398,7 +1407,9 @@ export async function runReview(
 
     // ── Phase 1.5: Dynamic angle routing ─────
     const explicit = angles && angles.length > 0;
-    const routed = explicit ? undefined : await routeReview(diffResult.stdout, bump);
+    const routed = explicit
+      ? undefined
+      : await routeReview(diffResult.stdout, bump, { jobId, cwd });
     const depthDecision = resolveReviewDepth(reviewDepth, routed);
     const gating = reviewDepthGating();
     logger.info(
@@ -1453,6 +1464,8 @@ export async function runReview(
           contextBlock,
           promptPath: adversaryPath,
           bump,
+          jobId,
+          cwd,
         })
       : Promise.resolve(null);
 

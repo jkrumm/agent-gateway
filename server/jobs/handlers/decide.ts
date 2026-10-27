@@ -45,7 +45,7 @@ export async function runDecide(
         }, 2000)
       : undefined;
   try {
-    return await runDecision({ ...params, signal: abort.signal });
+    return await runDecision({ ...params, signal: abort.signal, jobId });
   } finally {
     clearInterval(watcher);
   }

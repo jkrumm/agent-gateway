@@ -95,6 +95,7 @@ export async function runTriage(
     schema: validator,
     route,
     isCancelled: jobId !== undefined && isCancelled ? () => isCancelled(jobId) : undefined,
+    jobId,
   });
 
   logger.info(

@@ -315,11 +315,17 @@ async function findOcrSessionUsage(
  *  instead of) producing its own `OcrSummary` — idle kill, non-zero exit, unparseable JSON
  *  output, or an early abort. NEVER throws: telemetry on a failure path must not turn into a
  *  second failure that shadows the real one. */
-async function recordOcrFailureUsage(input: {
+export async function recordOcrFailureUsage(input: {
+  /** The directory `ocr` actually ran in — used only to locate its session log, never as the
+   *  usage row's `cwd` (see `jobCwd`). */
   repoPath: string;
   startedAtMs: number;
   model: string;
   durationMs: number;
+  jobId?: string;
+  /** The review job's own `cwd` param, recorded as the usage row's `cwd` — see
+   *  `RunOcrReviewOptions.jobCwd`. */
+  jobCwd?: string;
 }): Promise<void> {
   try {
     const recovered = await findOcrSessionUsage(input.repoPath, input.startedAtMs);
@@ -337,6 +343,8 @@ async function recordOcrFailureUsage(input: {
       cacheWriteTokens: recovered.cacheWriteTokens,
       latencyMs: input.durationMs,
       outcome: "error",
+      jobId: input.jobId,
+      cwd: input.jobCwd,
     });
   } catch (err) {
     logger.warn(
@@ -510,6 +518,8 @@ export function countChangedLines(diff: string): number {
 }
 
 export interface RunOcrReviewOptions {
+  /** The directory `ocr` actually runs in — the throwaway ref-mode worktree, not the caller's
+   *  repo, in `pr`/`branch` mode. Never use this for usage-tracker attribution; see `jobCwd`. */
   cwd: string;
   scope: string;
   /** Changed lines in the reviewed diff; below `ocrMinChangedLines()` OCR is skipped. Omitted =
@@ -520,6 +530,10 @@ export interface RunOcrReviewOptions {
   refBaseOid?: string;
   context?: string;
   jobId?: string;
+  /** The review job's own `cwd` param — the caller's stable repo path, forwarded to
+   *  `recordIuUsage` for project attribution. Distinct from `cwd` above, which is the ref-mode
+   *  worktree `ocr` actually reads and is deleted once the job ends. */
+  jobCwd?: string;
   onActivity?: (label: string) => void;
   /** Aborted by the caller when the review exits early (throw, all-angles-failed) so the
    *  child never outlives the worktree it reads, nor keeps billing tokens nobody will read. */
@@ -768,7 +782,14 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
     const durationMs = Math.round(performance.now() - startMs);
 
     if (opts.signal?.aborted) {
-      await recordOcrFailureUsage({ repoPath: opts.cwd, startedAtMs, model, durationMs });
+      await recordOcrFailureUsage({
+        repoPath: opts.cwd,
+        startedAtMs,
+        model,
+        durationMs,
+        jobId: opts.jobId,
+        jobCwd: opts.jobCwd,
+      });
       return { block: skippedBlock("review exited early"), ran: true };
     }
 
@@ -784,7 +805,14 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
         },
         "ocr killed — idle watchdog",
       );
-      await recordOcrFailureUsage({ repoPath: opts.cwd, startedAtMs, model, durationMs });
+      await recordOcrFailureUsage({
+        repoPath: opts.cwd,
+        startedAtMs,
+        model,
+        durationMs,
+        jobId: opts.jobId,
+        jobCwd: opts.jobCwd,
+      });
       return {
         block: failedBlock(
           `idle — no output for ${Math.round(IDLE_TIMEOUT_MS / 1000)}s, last: ${truncateForPrompt(lastActivityLine)}`,
@@ -805,7 +833,14 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
         },
         "ocr exited non-zero",
       );
-      await recordOcrFailureUsage({ repoPath: opts.cwd, startedAtMs, model, durationMs });
+      await recordOcrFailureUsage({
+        repoPath: opts.cwd,
+        startedAtMs,
+        model,
+        durationMs,
+        jobId: opts.jobId,
+        jobCwd: opts.jobCwd,
+      });
       return {
         block: failedBlock(`exit ${exitCode}: ${truncateForPrompt(lastActivityLine)}`),
         ran: true,
@@ -821,12 +856,26 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
         { event: "review.ocr", tool: "review_ocr", project: opts.cwd, error: String(err) },
         "ocr output did not parse as JSON",
       );
-      await recordOcrFailureUsage({ repoPath: opts.cwd, startedAtMs, model, durationMs });
+      await recordOcrFailureUsage({
+        repoPath: opts.cwd,
+        startedAtMs,
+        model,
+        durationMs,
+        jobId: opts.jobId,
+        jobCwd: opts.jobCwd,
+      });
       return { block: failedBlock("output did not parse as JSON"), ran: true };
     }
 
     const usageArgs = ocrSummaryToUsage(parsed.summary);
-    await recordIuUsage({ tool: "review_ocr", model, latencyMs: durationMs, ...usageArgs });
+    await recordIuUsage({
+      tool: "review_ocr",
+      model,
+      latencyMs: durationMs,
+      ...usageArgs,
+      jobId: opts.jobId,
+      cwd: opts.jobCwd,
+    });
 
     logger.info(
       {

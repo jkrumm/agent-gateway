@@ -16,6 +16,7 @@ import {
   ocrBudgetMax,
   ocrMinChangedLines,
   ocrPausedUntil,
+  recordOcrFailureUsage,
   runOcrReview,
   OCR_EFFORT,
   ocrArgs,
@@ -676,5 +677,55 @@ describe("OCR budget gate", () => {
     );
     await snapshot({ fetched_at: "2026-10-25T12:01:00Z" });
     expect(await ocrBudgetBlockReason(NOW)).toBeUndefined();
+  });
+});
+
+describe("recordOcrFailureUsage — usage attribution", () => {
+  async function readRow(sink: string): Promise<Record<string, unknown>> {
+    const text = await Bun.file(sink).text();
+    return JSON.parse(text.trim().split("\n").at(-1) ?? "{}");
+  }
+
+  test(
+    "tags the review_ocr row with the caller's job id and the job's own cwd — never the " +
+      "throwaway ref-mode worktree path `repoPath` locates the session log under",
+    async () => {
+      const sink = join(tmpdir(), `agent-gateway-ocr-failure-usage-test-${Date.now()}.jsonl`);
+      process.env.AGENT_GATEWAY_IU_USAGE_LOG = sink;
+      try {
+        await recordOcrFailureUsage({
+          repoPath: "/tmp/agent-gateway-review-worktree-xyz",
+          startedAtMs: Date.now(),
+          model: "deepseek-v4.1-flash",
+          durationMs: 42,
+          jobId: "job-456",
+          jobCwd: "/Users/jkrumm/SourceRoot/agent-gateway",
+        });
+        const row = await readRow(sink);
+        expect(row.tool).toBe("review_ocr");
+        expect(row.job_id).toBe("job-456");
+        expect(row.cwd).toBe("/Users/jkrumm/SourceRoot/agent-gateway");
+      } finally {
+        await rm(sink, { force: true });
+      }
+    },
+  );
+
+  test("writes null job_id/cwd when the caller has neither (no job, or a direct call)", async () => {
+    const sink = join(tmpdir(), `agent-gateway-ocr-failure-usage-test-${Date.now()}-b.jsonl`);
+    process.env.AGENT_GATEWAY_IU_USAGE_LOG = sink;
+    try {
+      await recordOcrFailureUsage({
+        repoPath: "/tmp/agent-gateway-review-worktree-xyz",
+        startedAtMs: Date.now(),
+        model: "deepseek-v4.1-flash",
+        durationMs: 1,
+      });
+      const row = await readRow(sink);
+      expect(row.job_id).toBeNull();
+      expect(row.cwd).toBeNull();
+    } finally {
+      await rm(sink, { force: true });
+    }
   });
 });

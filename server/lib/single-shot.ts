@@ -105,6 +105,9 @@ export async function singleShotJson<T>(opts: {
   /** Polled before each retry attempt (never before the first); true aborts with
    *  `SingleShotCancelledError`. */
   isCancelled?: () => boolean;
+  /** Forwarded to `recordIuUsage` on every attempt — see its own fields for when to pass these. */
+  jobId?: string;
+  cwd?: string;
 }): Promise<SingleShotResult<T>> {
   const { tool, schema, route } = opts;
   const entry = getModel(route.model);
@@ -124,6 +127,8 @@ export async function singleShotJson<T>(opts: {
       tool,
       maxTokens,
       jsonObject,
+      jobId: opts.jobId,
+      cwd: opts.cwd,
     });
     latencyMs += result.latencyMs;
     usage = addUsage(usage, result.usage);
@@ -289,7 +294,7 @@ function toIuUsage(u: AnthropicUsage | null | undefined): IuUsage {
 
 /** Record one Messages call's usage row. `ok` only for a call whose content was used. */
 function recordAnthropicUsage(
-  ctx: { tool: string; model: string },
+  ctx: { tool: string; model: string; jobId?: string; cwd?: string },
   data: { id?: string | null; usage?: AnthropicUsage | null },
   latencyMs: number,
   outcome: "ok" | "error",
@@ -302,6 +307,8 @@ function recordAnthropicUsage(
     latencyMs,
     cacheWriteTokens: data.usage?.cache_creation_input_tokens ?? 0,
     outcome,
+    jobId: ctx.jobId,
+    cwd: ctx.cwd,
   });
 }
 
@@ -309,7 +316,7 @@ function recordAnthropicUsage(
  *  on a best-effort basis before the parse error is thrown. */
 async function parseMessage(
   res: Response,
-  ctx: { tool: string; model: string },
+  ctx: { tool: string; model: string; jobId?: string; cwd?: string },
   t0: number,
 ): Promise<AnthropicMessage> {
   let json: unknown;
@@ -419,6 +426,9 @@ export async function anthropicComplete(opts: {
   /** Polled before each retry attempt (never before the first); true aborts with
    *  `SingleShotCancelledError`. */
   isCancelled?: () => boolean;
+  /** Forwarded to `recordIuUsage` — see its own fields for when to pass these. */
+  jobId?: string;
+  cwd?: string;
 }): Promise<AnthropicCompleteResult> {
   if (getModel(opts.model)?.wire !== "anthropic") {
     throw new Error(`${opts.tool}: ${opts.model} is not an anthropic-wire model`);
@@ -432,7 +442,7 @@ export async function anthropicComplete(opts: {
   };
   if (opts.system) body.system = opts.system;
 
-  const ctx = { tool: opts.tool, model: opts.model };
+  const ctx = { tool: opts.tool, model: opts.model, jobId: opts.jobId, cwd: opts.cwd };
   const t0 = performance.now();
   const data = await postMessage(body, ctx, t0, opts.isCancelled);
   const latencyMs = Math.round(performance.now() - t0);

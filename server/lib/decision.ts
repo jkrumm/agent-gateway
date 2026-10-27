@@ -96,6 +96,8 @@ export async function runDecision(opts: {
   model?: string;
   /** Aborts the request (job cancel / drain). Merged with the hang guard. */
   signal?: AbortSignal;
+  /** Forwarded to `recordIuUsage` — `decide` has no repo, so no `cwd` is ever recorded. */
+  jobId?: string;
 }): Promise<DecisionOutput> {
   const model = opts.model ?? defaultDecisionModel();
   if (!isDecisionModel(model))
@@ -135,6 +137,7 @@ export async function runDecision(opts: {
       model,
       latencyMs: Date.now() - startedAt,
       outcome: "error",
+      jobId: opts.jobId,
     }).catch(() => {});
     throw err;
   }
@@ -159,6 +162,7 @@ export async function runDecision(opts: {
       cacheReadTokens: 0,
       costUsd,
     },
+    jobId: opts.jobId,
   });
   const answers: Record<string, DecisionAnswerOut> = {};
   for (const [id, answer] of Object.entries(result.answers)) {

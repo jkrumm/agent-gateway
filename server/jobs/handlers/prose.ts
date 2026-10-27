@@ -513,8 +513,15 @@ export interface ProseDeps {
 }
 
 /** The real adapters: the reviewer is `singleShotJson` on the chat wire, the writer is the
- *  anthropic-wire single-shot. `isCancelled` is polled before each retry of either call. */
-export function defaultProseDeps(tool: string, isCancelled?: () => boolean): ProseDeps {
+ *  anthropic-wire single-shot. `isCancelled` is polled before each retry of either call.
+ *  `ctx.jobId`/`ctx.cwd` are forwarded to `recordIuUsage` — `prose`'s own job has no repo, so
+ *  only `narrative` (which polishes its rendered page through this same function) passes a
+ *  `cwd`. */
+export function defaultProseDeps(
+  tool: string,
+  isCancelled?: () => boolean,
+  ctx?: { jobId?: string; cwd?: string },
+): ProseDeps {
   return {
     loadVoice: () => readVoiceGuide({ required: true }),
     review: async ({ model, prompt, verdictFirst }) => {
@@ -525,11 +532,21 @@ export function defaultProseDeps(tool: string, isCancelled?: () => boolean): Pro
         schema: reviewSchema(verdictFirst),
         route,
         isCancelled,
+        jobId: ctx?.jobId,
+        cwd: ctx?.cwd,
       });
       return { data: out.data, model: out.model, usage: out.usage };
     },
     write: async ({ model, system, prompt }) => {
-      const out = await anthropicComplete({ tool, model, system, prompt, isCancelled });
+      const out = await anthropicComplete({
+        tool,
+        model,
+        system,
+        prompt,
+        isCancelled,
+        jobId: ctx?.jobId,
+        cwd: ctx?.cwd,
+      });
       return { text: out.text, usage: out.usage };
     },
   };
@@ -786,7 +803,7 @@ export async function runProse(
   if (refusal) throw new Error(refusal);
   const models = resolveProseModels(params);
   const cancelled = jobId !== undefined && isCancelled ? () => isCancelled(jobId) : undefined;
-  return runProsePipeline(params, models, defaultProseDeps("prose", cancelled), {
+  return runProsePipeline(params, models, defaultProseDeps("prose", cancelled, { jobId }), {
     onStage: (label) => onProgress?.({ turns: 1, lastAction: label, lastActivityAt: Date.now() }),
     isCancelled: cancelled,
   });

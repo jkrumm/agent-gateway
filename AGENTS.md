@@ -930,6 +930,12 @@ the 60s SDK timeout. Billed IU per-token, zero Max.
   cost several-fold. `cost_usd` is written only when the gateway reports `usage.cost`;
   otherwise it stays null and usage-tracker prices the row from its own table (off-peak
   aware) — it treats any numeric `cost_usd` as reported, so never write an estimate here.
+  Every `recordIuUsage` call that runs inside a job (review's `review_ocr`/`review:adversary`/
+  `review:router`, `prose`, `narrative`, `triage`, `decide`) also carries `job_id` (that job's
+  own id) and `cwd` (the job's own `cwd` param — the stable repo path, never a throwaway
+  ref-mode review worktree) for usage-tracker's project attribution; both are `null` when
+  there is no job (`read_image`/`read_drawing`) or no repo (`triage`/`decide`/`prose`'s own
+  job — `narrative` has one and passes it).
 
 ```bash
 # Register at user scope — handled by `make setup` in ~/SourceRoot/dotfiles.
