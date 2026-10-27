@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { CALLER_PATTERN } from "../../lib/caller.ts";
+import { CALLER_RULE, isValidCaller } from "../../lib/caller.ts";
 import type { JobTool } from "../../jobs/types.ts";
 import { submitJob, httpReachable, HTTP_DOWN_MESSAGE } from "../job-client.ts";
 import { logger } from "../logger.ts";
@@ -55,13 +55,20 @@ const DEFAULT_HINTS: ToolHints = {
 // submitted, so no handler schema has to know it.
 const CALLER_INPUT = z
   .string()
-  .regex(CALLER_PATTERN)
+  .refine(isValidCaller, CALLER_RULE)
   .optional()
   .describe(
     "Optional consumer slug (^[a-z0-9][a-z0-9-]{0,31}$, e.g. 'iris'). Tags the job's usage records so spend can be attributed per consumer. Omit unless you are a named service.",
   );
 
 export function registerJobSubmitTool(server: McpServer, spec: JobToolSpec): void {
+  // `caller` is the envelope's field and is lifted out of the args before submit: a tool param
+  // of the same name would be silently stripped from the job's params.
+  if ("caller" in spec.inputSchema) {
+    throw new Error(
+      `${spec.name}: inputSchema must not declare "caller" (reserved by the job envelope)`,
+    );
+  }
   server.registerTool(
     spec.name,
     {

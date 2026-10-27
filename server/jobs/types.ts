@@ -190,7 +190,7 @@ export function toJobView(job: JobRecord): JobView {
   return {
     id: job.id,
     tool: job.tool,
-    caller: job.caller ?? undefined,
+    ...(job.caller ? { caller: job.caller } : {}),
     status: job.status,
     result: job.result,
     error: job.error,

@@ -12,6 +12,7 @@ import "../server/lib/load-env.ts";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { isTerminal, type JobStatus } from "../server/jobs/types";
+import { CALLER_RULE, isValidCaller } from "../server/lib/caller.ts";
 import type { DispatchOutput } from "../server/jobs/handlers/dispatch-verdict.ts";
 import type { CheckOutput } from "../server/jobs/handlers/check.ts";
 import type { ReviewOutput } from "../server/jobs/handlers/review.ts";
@@ -211,7 +212,7 @@ export interface GlobalOptions {
   noWait: boolean;
   quiet: boolean;
   timeoutSec?: number;
-  /** Consumer slug sent as the job envelope's `caller` (validated by the server). */
+  /** Consumer slug sent as the job envelope's `caller` (validated by `isValidCaller`). */
   caller?: string;
 }
 
@@ -228,6 +229,11 @@ function parsePositiveInt(raw: string, flag: string): number {
     throw new CliUsageError(`${flag} must be a positive integer, got: ${raw}`);
   }
   return n;
+}
+
+function parseCaller(value: string): string {
+  if (!isValidCaller(value)) throw new CliUsageError(`--caller: ${CALLER_RULE}, got: "${value}"`);
+  return value;
 }
 
 export function parseArgs(argv: string[]): Parsed {
@@ -262,13 +268,13 @@ export function parseArgs(argv: string[]): Parsed {
       continue;
     }
     if (arg.startsWith("--caller=")) {
-      options.caller = arg.slice("--caller=".length);
+      options.caller = parseCaller(arg.slice("--caller=".length));
       continue;
     }
     if (arg === "--caller") {
       const value = argv[i + 1];
       if (value === undefined) throw new CliUsageError("--caller requires a value (a slug)");
-      options.caller = value;
+      options.caller = parseCaller(value);
       i++;
       continue;
     }
@@ -998,7 +1004,7 @@ async function submitJob(
   const r = await request(fetchFn, base, "/api/jobs", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(caller ? { ...body, caller } : body),
+    body: JSON.stringify(caller === undefined ? body : { ...body, caller }),
   });
   if (r.status === 200) {
     const data = r.data as { ok?: boolean; job?: { id?: string } };

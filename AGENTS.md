@@ -192,7 +192,7 @@ Instead:
    spend is attributable per consumer. It is **envelope-level**, not a tool param:
    `POST /api/jobs {"tool":"decide","params":{…},"caller":"iris"}`; MCP: the optional `caller`
    arg on every job tool (lifted out before submit); CLI: `agw --caller iris …`. A bad slug is a
-   400 (`<tool> refused: caller must match …`), no row created. It is stored on the `jobs` row
+   400 (`<tool> refused: caller must match …`; any non-slug value incl. `null`, empty or non-string), no row created; `agw` rejects it before sending (exit 2). One validator, `isValidCaller` in `server/lib/caller.ts`, serves the route, the MCP input and the CLI. It is stored on the `jobs` row
    (nullable `caller` column, append-only migration), immutable, and returned as `caller` in
    `GET /api/jobs/:id` / the submit response (omitted when absent). `executeJob` opens an
    `AsyncLocalStorage` context (`server/lib/caller.ts`), and both usage sinks read it where they

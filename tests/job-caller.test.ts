@@ -4,7 +4,10 @@
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync } from "node:fs";
+import { z } from "zod";
 import { __resetForTests } from "../server/jobs/store.ts";
+import { toJobView, type JobRecord } from "../server/jobs/types.ts";
+import { registerJobSubmitTool } from "../server/mcp/tools/_job-tool.ts";
 import { callerField, currentCaller, isValidCaller, withCaller } from "../server/lib/caller.ts";
 import { recordIuUsage } from "../server/lib/iu-openai.ts";
 import { writeAttribution } from "../server/mcp/session-core.ts";
@@ -63,12 +66,54 @@ describe("POST /api/jobs caller", () => {
     expect("caller" in (fetched.job ?? {})).toBe(false);
   });
 
-  test("an invalid slug is a 400 naming the rule, whatever the tool", async () => {
+  test("an invalid slug is a 400 naming the rule, whatever the tool or JSON type", async () => {
     for (const tool of ["decide", "triage", "check"]) {
       const { status, body } = await post({ tool, params: {}, caller: "Not A Slug" });
       expect(status).toBe(400);
       expect(body.error).toContain("caller must match");
     }
+    for (const caller of [null, 5, "", {}, ["iris"]]) {
+      const { status, body } = await post({ tool: "decide", params: {}, caller });
+      expect(status).toBe(400);
+      expect(body.error).toContain("caller must match");
+    }
+  });
+});
+
+describe("job view", () => {
+  test("carries the caller key only when one was sent", () => {
+    const record = (caller: string | null): JobRecord => ({
+      id: "j1",
+      tool: "triage",
+      params: {},
+      caller,
+      status: "pending",
+      result: null,
+      error: null,
+      progress: null,
+      attempts: 0,
+      createdAt: 1,
+      startedAt: null,
+      finishedAt: null,
+      cancelRequestedAt: null,
+      sessionId: null,
+      worktreeMeta: null,
+    });
+    expect(toJobView(record("iris")).caller).toBe("iris");
+    expect("caller" in toJobView(record(null))).toBe(false);
+  });
+});
+
+describe("registerJobSubmitTool", () => {
+  test("refuses a tool whose own inputSchema declares caller", () => {
+    const server = { registerTool: () => {} };
+    const spec = { name: "x", title: "x", description: "x", tool: "triage" as const };
+    expect(() =>
+      registerJobSubmitTool(server as never, { ...spec, inputSchema: { caller: z.string() } }),
+    ).toThrow(/must not declare "caller"/);
+    expect(() =>
+      registerJobSubmitTool(server as never, { ...spec, inputSchema: { cwd: z.string() } }),
+    ).not.toThrow();
   });
 });
 

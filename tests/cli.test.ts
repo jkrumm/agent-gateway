@@ -450,6 +450,10 @@ describe("mocked round trip", () => {
     expect(JSON.parse(posted[1] ?? "").caller).toBe("iris");
     expect("caller" in JSON.parse(posted[2] ?? "")).toBe(false);
     expect(() => parseArgs(["dispatch", "x", "--caller"])).toThrow(/--caller requires a value/);
+    for (const bad of ["", "Iris", "-x", "a b"]) {
+      expect(() => parseArgs(["--caller", bad, "dispatch", "x"])).toThrow(/caller must match/);
+    }
+    expect(() => parseArgs(["--caller=", "dispatch", "x"])).toThrow(/caller must match/);
   });
 
   test("a submit-time refusal exits 2", async () => {

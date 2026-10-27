@@ -93,14 +93,14 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
         set.status = 400;
         return { ok: false as const, error: refusal };
       }
-      const job = createJob(body.tool, body.params ?? {}, body.caller);
+      const job = createJob(body.tool, body.params ?? {}, body.caller as string | undefined);
       return { ok: true as const, job };
     },
     {
       body: t.Object({
         tool: t.String(),
         params: t.Optional(t.Record(t.String(), t.Unknown())),
-        caller: t.Optional(t.String()),
+        caller: t.Optional(t.Unknown()),
       }),
     },
   )
