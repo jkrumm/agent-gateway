@@ -335,6 +335,34 @@ function normalizeUsage(raw: unknown): IuUsage | undefined {
   };
 }
 
+/** The input/output/reasoning/total token fields alone, resolved with the same precedence
+ *  `recordIuUsage` documents — split out purely to keep that function's own cyclomatic
+ *  complexity under the audit gate; the fields and their fallbacks are unchanged. */
+function resolveTokenCounts(rec: { usage?: IuUsage }) {
+  return {
+    // `input_tokens` is the TOTAL prompt tokens INCLUDING cache reads (OpenAI convention,
+    // which is what both the gateway and ocr report; verified: cached_tokens <=
+    // prompt_tokens) — the usage-tracker collector subtracts `cache_read_tokens` to get
+    // the uncached count. Never subtract here.
+    input_tokens: rec.usage?.inputTokens ?? 0,
+    output_tokens: rec.usage?.outputTokens ?? 0,
+    reasoning_tokens: rec.usage?.reasoningTokens ?? 0,
+    total_tokens: rec.usage?.totalTokens ?? 0,
+  };
+}
+
+/** The cache-read/cache-write fields alone — same split rationale as `resolveTokenCounts`. */
+function resolveCacheTokens(rec: {
+  usage?: IuUsage;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+}) {
+  return {
+    cache_read_tokens: rec.cacheReadTokens ?? rec.usage?.cacheReadTokens ?? 0,
+    cache_write_tokens: rec.cacheWriteTokens ?? 0,
+  };
+}
+
 /** Append one usage row to the NDJSON sink. Best-effort: telemetry failure must
  * never break the tool, but it is logged (not silently dropped). Exported — `server/lib/ocr.ts`
  * bypasses `visionRead`/`textComplete` (it shells out to the `ocr` CLI, not a direct fetch)
@@ -376,16 +404,8 @@ export async function recordIuUsage(rec: {
         tool: rec.tool,
         model: rec.model,
         billing: "iu",
-        // `input_tokens` is the TOTAL prompt tokens INCLUDING cache reads (OpenAI convention,
-        // which is what both the gateway and ocr report; verified: cached_tokens <=
-        // prompt_tokens) — the usage-tracker collector subtracts `cache_read_tokens` to get
-        // the uncached count. Never subtract here.
-        input_tokens: rec.usage?.inputTokens ?? 0,
-        output_tokens: rec.usage?.outputTokens ?? 0,
-        reasoning_tokens: rec.usage?.reasoningTokens ?? 0,
-        total_tokens: rec.usage?.totalTokens ?? 0,
-        cache_read_tokens: rec.cacheReadTokens ?? rec.usage?.cacheReadTokens ?? 0,
-        cache_write_tokens: rec.cacheWriteTokens ?? 0,
+        ...resolveTokenCounts(rec),
+        ...resolveCacheTokens(rec),
         cost_usd: rec.costUsd !== undefined ? rec.costUsd : (rec.usage?.costUsd ?? null),
         outcome: rec.outcome ?? "ok",
         latency_ms: rec.latencyMs,
