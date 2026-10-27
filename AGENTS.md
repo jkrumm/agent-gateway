@@ -161,6 +161,7 @@ agw prose draft.md --medium vault --out draft.md   # text on stdout/--out, summa
 agw jobs --running · status|wait|cancel <jobId> · steer <jobId> <text> · routing · policy · health
 ```
 
+`--caller <slug>` (global, any submitting command) names the consumer; see **Job caller** below.
 `--no-wait` prints the jobId and exits; `--json` makes stdout machine-readable
 (progress stays on stderr); `--timeout` is opt-in, the default wait has no
 ceiling (`.claude/rules/agent-limits.md`). Exit codes: **0** done · **1**
@@ -186,6 +187,19 @@ Instead:
    (`POST /api/jobs`) and returns `{ jobId, status }` immediately. (Submit still runs the
    synchronous refusals; a `dispatch` with `branch` adds one `git ls-remote` against origin,
    capped at 5 s, under the MCP client's 10 s submit abort.)
+   **Job caller.** Every job may carry a `caller`: a lowercase slug
+   (`^[a-z0-9][a-z0-9-]{0,31}$`, e.g. `iris`) naming the consumer that submitted it, so
+   spend is attributable per consumer. It is **envelope-level**, not a tool param:
+   `POST /api/jobs {"tool":"decide","params":{…},"caller":"iris"}`; MCP: the optional `caller`
+   arg on every job tool (lifted out before submit); CLI: `agw --caller iris …`. A bad slug is a
+   400 (`<tool> refused: caller must match …`), no row created. It is stored on the `jobs` row
+   (nullable `caller` column, append-only migration), immutable, and returned as `caller` in
+   `GET /api/jobs/:id` / the submit response (omitted when absent). `executeJob` opens an
+   `AsyncLocalStorage` context (`server/lib/caller.ts`), and both usage sinks read it where they
+   write — `writeAttribution` (`agent-gateway-sessions.jsonl`, `caller`) and `recordIuUsage`
+   (`agent-gateway-iu` rows: single-shot `triage`/`decide`/`prose` and review OCR/router spend,
+   `caller`) — so a job's every usage row is tagged. No caller → no field, anywhere
+   (backwards compatible). usage-tracker groups by it; agent-gateway does not change that side.
 2. The HTTP server (LaunchAgent, durable) runs the job in the background and
    persists state to **bun:sqlite** (`~/.local/share/agent-gateway/jobs.db`), not
    `/tmp` for the same sweep reason as the logs (`server/jobs/store.ts`). The

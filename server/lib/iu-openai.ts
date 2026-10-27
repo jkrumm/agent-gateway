@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { appendFile, mkdir } from "node:fs/promises";
 import { z } from "zod";
 import { logger } from "../mcp/logger.ts";
+import { callerField } from "./caller.ts";
 import { IDLE_TIMEOUT_MS } from "./idle-timeout.ts";
 import { readTrimmedLines } from "../mcp/worker-shared.ts";
 
@@ -383,6 +384,7 @@ export async function recordIuUsage(rec: {
         outcome: rec.outcome ?? "ok",
         latency_ms: rec.latencyMs,
         bytes: rec.bytes ?? null,
+        ...callerField(),
       }) + "\n";
     await appendFile(sink, line);
   } catch (err) {

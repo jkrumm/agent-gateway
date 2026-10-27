@@ -1,5 +1,6 @@
 import { statSync } from "node:fs";
 import { Elysia, t } from "elysia";
+import { CALLER_RULE, isValidCaller } from "../lib/caller.ts";
 import { cancelJob, createJob, getJob, listJobs, queueStats } from "../jobs/store.ts";
 import { isJobTool, type JobTool } from "../jobs/types.ts";
 import { resolveDispatchTarget } from "../lib/dispatch-policy.ts";
@@ -41,6 +42,12 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
       if (!isJobTool(body.tool)) {
         set.status = 400;
         return { ok: false as const, error: `unknown tool: ${body.tool}` };
+      }
+      // The submitting consumer's slug, for per-consumer spend attribution. Envelope-level (not
+      // a tool param), so it applies to every tool without each handler's schema knowing it.
+      if (body.caller !== undefined && !isValidCaller(body.caller)) {
+        set.status = 400;
+        return { ok: false as const, error: `${body.tool} refused: ${CALLER_RULE}` };
       }
       // `update_pr` takes the same repo-policy gate as an implement dispatch, so a refused repo
       // never creates a job row. (`dispatch` is gated by `dispatchSubmitRefusal` below, which
@@ -86,13 +93,14 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
         set.status = 400;
         return { ok: false as const, error: refusal };
       }
-      const job = createJob(body.tool, body.params ?? {});
+      const job = createJob(body.tool, body.params ?? {}, body.caller);
       return { ok: true as const, job };
     },
     {
       body: t.Object({
         tool: t.String(),
         params: t.Optional(t.Record(t.String(), t.Unknown())),
+        caller: t.Optional(t.String()),
       }),
     },
   )

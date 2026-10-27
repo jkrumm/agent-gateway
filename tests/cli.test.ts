@@ -431,6 +431,27 @@ describe("mocked round trip", () => {
     expect(out).toBe("j1\n");
   });
 
+  test("--caller rides the envelope next to tool/params; absent sends no field", async () => {
+    const posted: string[] = [];
+    const handlers = {
+      "POST /api/jobs": (init?: RequestInit) => {
+        posted.push(init?.body as string);
+        return { body: { ok: true, job: { id: "j1" } } };
+      },
+    };
+    await runWith(["--caller", "iris", "dispatch", "--repo", "/repo", "--no-wait", "x"], handlers);
+    await runWith(["dispatch", "--repo", "/repo", "--no-wait", "--caller=iris", "x"], handlers);
+    await runWith(["dispatch", "--repo", "/repo", "--no-wait", "x"], handlers);
+    expect(JSON.parse(posted[0] ?? "")).toEqual({
+      tool: "dispatch",
+      params: { cwd: "/repo", brief: "x" },
+      caller: "iris",
+    });
+    expect(JSON.parse(posted[1] ?? "").caller).toBe("iris");
+    expect("caller" in JSON.parse(posted[2] ?? "")).toBe(false);
+    expect(() => parseArgs(["dispatch", "x", "--caller"])).toThrow(/--caller requires a value/);
+  });
+
   test("a submit-time refusal exits 2", async () => {
     const { code, err } = await runWith(["dispatch", "--repo", "/repo", "do it"], {
       "POST /api/jobs": () => ({

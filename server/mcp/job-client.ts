@@ -30,11 +30,15 @@ interface JobEnvelope {
 }
 
 /** Submit a job. Returns the created job view (status usually "pending"/"running"). */
-export async function submitJob(tool: JobTool, params: Record<string, unknown>): Promise<JobView> {
+export async function submitJob(
+  tool: JobTool,
+  params: Record<string, unknown>,
+  caller?: string,
+): Promise<JobView> {
   const res = await fetch(`${BASE}/api/jobs`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ tool, params }),
+    body: JSON.stringify({ tool, params, ...(caller ? { caller } : {}) }),
     signal: AbortSignal.timeout(10_000),
   });
   const data = (await res.json()) as JobEnvelope;

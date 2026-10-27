@@ -121,6 +121,7 @@ describe("triage job wiring", () => {
         id: "j1",
         tool: "triage",
         params: { prompt: "p", schema: SCHEMA },
+        caller: null,
         status: "running",
         result: null,
         error: null,
@@ -151,9 +152,10 @@ describe("triage MCP tool", () => {
     registerTriageTool(server as never);
     expect(registered).toHaveLength(1);
     expect(registered[0]?.name).toBe("triage");
-    expect(Object.keys(registered[0]?.config.inputSchema ?? {})).toEqual(
-      Object.keys(TRIAGE_INPUT.shape),
-    );
+    expect(Object.keys(registered[0]?.config.inputSchema ?? {})).toEqual([
+      ...Object.keys(TRIAGE_INPUT.shape),
+      "caller",
+    ]);
     expect(registered[0]?.config.description).toContain(
       `MODEL: ${describeRoute(routeFor("triage"))}`,
     );

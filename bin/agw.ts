@@ -211,6 +211,8 @@ export interface GlobalOptions {
   noWait: boolean;
   quiet: boolean;
   timeoutSec?: number;
+  /** Consumer slug sent as the job envelope's `caller` (validated by the server). */
+  caller?: string;
 }
 
 export interface Parsed {
@@ -257,6 +259,17 @@ export function parseArgs(argv: string[]): Parsed {
     }
     if (arg.startsWith("--timeout=")) {
       options.timeoutSec = parsePositiveInt(arg.slice("--timeout=".length), "--timeout");
+      continue;
+    }
+    if (arg.startsWith("--caller=")) {
+      options.caller = arg.slice("--caller=".length);
+      continue;
+    }
+    if (arg === "--caller") {
+      const value = argv[i + 1];
+      if (value === undefined) throw new CliUsageError("--caller requires a value (a slug)");
+      options.caller = value;
+      i++;
       continue;
     }
     if (arg === "--timeout") {
@@ -976,11 +989,16 @@ interface JobView {
   queuedBehind?: string;
 }
 
-async function submitJob(fetchFn: FetchLike, base: string, body: RequestBody): Promise<string> {
+async function submitJob(
+  fetchFn: FetchLike,
+  base: string,
+  body: RequestBody,
+  caller?: string,
+): Promise<string> {
   const r = await request(fetchFn, base, "/api/jobs", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify(caller ? { ...body, caller } : body),
   });
   if (r.status === 200) {
     const data = r.data as { ok?: boolean; job?: { id?: string } };
@@ -1136,7 +1154,7 @@ async function execute(
             : undefined;
         body = requestBody(command, { cwd, context: contextText });
       }
-      const jobId = await submitJob(ctx.fetchFn, base, body);
+      const jobId = await submitJob(ctx.fetchFn, base, body, options.caller);
       if (options.noWait) {
         if (options.json) io.out(`${JSON.stringify({ jobId }, null, 2)}\n`);
         else io.out(`${jobId}\n`);
@@ -1241,7 +1259,7 @@ async function executeProse(
     read: (p) => readFileSync(p, "utf8"),
     readStdin: ctx.readStdin ?? (() => readFileSync(0, "utf8")),
   });
-  const jobId = await submitJob(ctx.fetchFn, base, body);
+  const jobId = await submitJob(ctx.fetchFn, base, body, options.caller);
   if (options.noWait) {
     io.out(options.json ? `${JSON.stringify({ jobId }, null, 2)}\n` : `${jobId}\n`);
     return 0;
@@ -1442,6 +1460,7 @@ Global flags (any subcommand):
   --no-wait       submit and print the jobId, exit 0 (dispatch/check/review/update-pr/triage/decide/prose)
   --quiet         suppress the progress lines on stderr
   --timeout <s>   stop waiting after N seconds (default: no ceiling)
+  --caller <slug> consumer slug (^[a-z0-9][a-z0-9-]{0,31}$) that tags the job's usage records
   -h, --help      show help
 
 Exit codes:

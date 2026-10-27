@@ -25,7 +25,11 @@ describe("update_pr MCP tool", () => {
       const tool = tools.find((t) => t.name === "update_pr");
       expect(tool).toBeDefined();
       expect(tool?.inputSchema.required).toEqual(expect.arrayContaining(["cwd", "pr"]));
-      expect(Object.keys(tool?.inputSchema.properties ?? {}).toSorted()).toEqual(["cwd", "pr"]);
+      expect(Object.keys(tool?.inputSchema.properties ?? {}).toSorted()).toEqual([
+        "caller",
+        "cwd",
+        "pr",
+      ]);
     } finally {
       await client.close();
       await server.close();

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { CALLER_PATTERN } from "../../lib/caller.ts";
 import type { JobTool } from "../../jobs/types.ts";
 import { submitJob, httpReachable, HTTP_DOWN_MESSAGE } from "../job-client.ts";
 import { logger } from "../logger.ts";
@@ -50,13 +51,23 @@ const DEFAULT_HINTS: ToolHints = {
   openWorldHint: true,
 };
 
+// Every job tool accepts it; it is lifted out of the args before the tool's own params are
+// submitted, so no handler schema has to know it.
+const CALLER_INPUT = z
+  .string()
+  .regex(CALLER_PATTERN)
+  .optional()
+  .describe(
+    "Optional consumer slug (^[a-z0-9][a-z0-9-]{0,31}$, e.g. 'iris'). Tags the job's usage records so spend can be attributed per consumer. Omit unless you are a named service.",
+  );
+
 export function registerJobSubmitTool(server: McpServer, spec: JobToolSpec): void {
   server.registerTool(
     spec.name,
     {
       title: spec.title,
       description: spec.description,
-      inputSchema: spec.inputSchema,
+      inputSchema: { ...spec.inputSchema, caller: CALLER_INPUT },
       outputSchema: JOB_HANDLE_OUTPUT.shape,
       annotations: { ...DEFAULT_HINTS, ...spec.annotations },
     },
@@ -68,7 +79,8 @@ export function registerJobSubmitTool(server: McpServer, spec: JobToolSpec): voi
         };
       }
       try {
-        const job = await submitJob(spec.tool, args as Record<string, unknown>);
+        const { caller, ...params } = args as Record<string, unknown> & { caller?: string };
+        const job = await submitJob(spec.tool, params, caller);
         const data: JobHandle = {
           jobId: job.id,
           tool: spec.tool,

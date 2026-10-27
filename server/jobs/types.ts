@@ -97,6 +97,9 @@ export interface JobRecord {
   tool: JobTool;
   /** Tool input as passed by the caller. Validated by the handler's input schema at execution. */
   params: Record<string, unknown>;
+  /** The consumer that submitted the job (a slug such as "iris"), for per-consumer spend
+   *  attribution. Null when the submitter sent none. Immutable after creation. */
+  caller: string | null;
   status: JobStatus;
   /** Typed tool output once `status === "done"`. Null otherwise. */
   result: unknown | null;
@@ -144,6 +147,8 @@ export interface JobRecord {
 export interface JobView {
   id: string;
   tool: JobTool;
+  /** The submitting consumer's slug; omitted when the job was submitted without one. */
+  caller?: string;
   status: JobStatus;
   result: unknown | null;
   error: string | null;
@@ -185,6 +190,7 @@ export function toJobView(job: JobRecord): JobView {
   return {
     id: job.id,
     tool: job.tool,
+    caller: job.caller ?? undefined,
     status: job.status,
     result: job.result,
     error: job.error,

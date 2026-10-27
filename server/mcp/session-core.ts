@@ -13,6 +13,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import { logger as mcpLogger } from "./logger.ts";
 import { appLogger } from "../logger.ts";
+import { callerField } from "../lib/caller.ts";
 import { processKind } from "../lib/process-context.ts";
 import { IDLE_TIMEOUT_MS } from "../lib/idle-timeout.ts";
 import { usageLane } from "./worker-shared.ts";
@@ -143,7 +144,7 @@ export function writeAttribution(record: Record<string, unknown>): void {
   try {
     const log = attributionLog();
     mkdirSync(dirname(log), { recursive: true });
-    appendFileSync(log, JSON.stringify(record) + "\n", "utf-8");
+    appendFileSync(log, JSON.stringify({ ...record, ...callerField() }) + "\n", "utf-8");
   } catch {
     // Attribution is best-effort — never break a session over a log write.
   }

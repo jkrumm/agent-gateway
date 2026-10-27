@@ -1,3 +1,4 @@
+import { withCaller } from "../lib/caller.ts";
 import type { JobRecord } from "./types.ts";
 import type { ProgressSink } from "./store.ts";
 import { isCancelRequested, updateJobSessionId, updateJobWorktreeMeta } from "./store.ts";
@@ -23,6 +24,12 @@ import { runProse } from "./handlers/prose.ts";
  *  predicate is injected here instead, same shape store.ts's own `ShutdownDeps`-style DI uses
  *  elsewhere. */
 export function executeJob(job: JobRecord, onProgress: ProgressSink): Promise<unknown> {
+  // The job's `caller` becomes the ambient caller for everything the handler awaits, so the
+  // attribution / usage sinks tag their rows with it (server/lib/caller.ts).
+  return withCaller(job.caller, () => runHandler(job, onProgress));
+}
+
+function runHandler(job: JobRecord, onProgress: ProgressSink): Promise<unknown> {
   switch (job.tool) {
     case "check":
       return runCheck(job.params, onProgress, job.id, isCancelRequested, "check");

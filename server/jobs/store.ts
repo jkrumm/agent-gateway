@@ -90,6 +90,7 @@ interface JobRow {
   id: string;
   tool: string;
   params: string;
+  caller: string | null;
   status: string;
   result: string | null;
   error: string | null;
@@ -198,6 +199,14 @@ try {
 }
 try {
   db.run("ALTER TABLE jobs ADD COLUMN requeued_at INTEGER");
+} catch {
+  /* column already exists */
+}
+
+// Migration for dbs created before jobs carried a `caller` (the submitting consumer's slug,
+// null when none was sent). Append-only, same ignore-if-present pattern as above.
+try {
+  db.run("ALTER TABLE jobs ADD COLUMN caller TEXT");
 } catch {
   /* column already exists */
 }
@@ -458,6 +467,7 @@ function rowToRecord(row: JobRow): JobRecord {
     id: row.id,
     tool: row.tool as JobTool,
     params: JSON.parse(row.params) as Record<string, unknown>,
+    caller: row.caller,
     status: row.status as JobStatus,
     result: row.result === null ? null : JSON.parse(row.result),
     error: row.error,
@@ -559,18 +569,25 @@ export function initJobStore(opts: {
 }
 
 /** Submit a new job. Returns its id immediately; execution starts when a slot is free. */
-export function createJob(tool: JobTool, params: Record<string, unknown>): JobView {
+export function createJob(
+  tool: JobTool,
+  params: Record<string, unknown>,
+  caller?: string,
+): JobView {
   const id = crypto.randomUUID();
   const now = Date.now();
   db.run(
-    "INSERT INTO jobs (id, tool, params, status, attempts, created_at) VALUES (?, ?, ?, 'pending', 0, ?)",
-    [id, tool, JSON.stringify(params), now],
+    "INSERT INTO jobs (id, tool, params, caller, status, attempts, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?)",
+    [id, tool, JSON.stringify(params), caller ?? null, now],
   );
-  logger.info({ event: "job.create", jobId: id, tool }, "job created");
+  logger.info(
+    { event: "job.create", jobId: id, tool, ...(caller ? { caller } : {}) },
+    "job created",
+  );
   promote();
   // Re-read so the view reflects any immediate promotion to running.
   const row = fetchRow(id);
-  return viewOf(row ? rowToRecord(row) : fallbackRecord(id, tool, params, now));
+  return viewOf(row ? rowToRecord(row) : fallbackRecord(id, tool, params, now, caller));
 }
 
 export function getJob(id: string): JobView | null {
@@ -1547,11 +1564,13 @@ function fallbackRecord(
   tool: JobTool,
   params: Record<string, unknown>,
   now: number,
+  caller?: string,
 ): JobRecord {
   return {
     id,
     tool,
     params,
+    caller: caller ?? null,
     status: "pending",
     result: null,
     error: null,
