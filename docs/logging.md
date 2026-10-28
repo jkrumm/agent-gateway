@@ -13,7 +13,7 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 | `pid`        | number   | OS process ID                                        |
 | `source`     | string   | `"app"` (HTTP server) \| `"mcp"` (MCP process)       |
 | `event`      | string?  | Structured event type — see list below               |
-| `tool`       | string?  | MCP tool name: `"check"`                             |
+| `tool`       | string?  | MCP tool name: `"dispatch"`                          |
 | `jobId`      | string?  | Async job id (`jobs/store.ts`) the session ran inside, when it ran inside one — see `session.*` events |
 | `project`    | string?  | Absolute cwd of target repo                          |
 | `model`      | string?  | Claude model used in session                         |

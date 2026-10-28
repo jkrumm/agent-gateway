@@ -122,11 +122,13 @@ Full forensic story (why BTM denies this specific label/executable):
 
 ## MCP Server
 
-agent-gateway exposes workflow tools (`check`, `review`, `dispatch`, `update_pr`, `decide`, `overview`,
+agent-gateway exposes workflow tools (`dispatch`, `update_pr`, `decide`, `overview`,
 `narrative`, `triage`, `otel`, `prose`) plus the synchronous multimodal tools (`read_image`,
 `read_drawing`, `excalidraw_diagram`) plus the job-polling tools
 (`job_status`, `job_wait`, `job_steer`, `job_cancel`) as an MCP server — a **separate process** from the
 LaunchAgent, spawned on-demand by Claude Code via stdio transport.
+`check` and `review` are no longer MCP tools — they moved to agent-workflows (`agw check`, `agw review`);
+the HTTP job routes and the `agw-legacy check|review` CLI commands remain for its eval harness.
 `GET /api/agents` (below) is HTTP-only, deliberately outside this MCP
 surface — see `### agents, overview, narrative`. `otel` alone runs inline via
 `runSession`, never as a job — no `jobId`, no `job_wait` — by decision:
@@ -178,7 +180,7 @@ Exit 0 whenever the job finished, even if it kept the original.
 
 ### Async job model (durable, off the MCP transport)
 
-The long tools (`check`/`review`/`dispatch`/`overview`/`narrative`/`triage`/`decide`/`prose`) do
+The long tools (`dispatch`/`overview`/`narrative`/`triage`/`decide`/`prose`) do
 **not** block the MCP call. A 13-minute worker run held open as a single MCP
 request destabilizes the stdio transport (and the SDK's 60s client timeout).
 Instead:
