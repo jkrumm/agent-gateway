@@ -162,11 +162,11 @@ export function registerJobStatusTool(server: McpServer): void {
     "job_status",
     {
       title: "Job Status (one-shot)",
-      description: `Return the current state of a background job by id, without waiting. Prefer job_wait when you actually want the result — this is for a quick non-blocking peek (e.g. checking on a long review while doing other work).
+      description: `Return the current state of a background job by id, without waiting. Prefer job_wait when you actually want the result — this is for a quick non-blocking peek (e.g. checking on a long dispatch while doing other work).
 
 OUTPUT: \`status\` (pending/running/done/failed/interrupted/cancelled) and \`stillRunning\`. While running, \`turns\`/\`lastAction\` show live worker activity and \`idleMs\` is ms since its last event — a large/growing \`idleMs\` is the wedge signal (peek at git status rather than waiting forever). When status is "done", \`result\` holds the tool's structured output; when "failed"/"interrupted"/"cancelled", \`error\` explains why. A pending implement job (or update_pr) whose repo is busy carries \`queuedBehind\` (the running jobId) and starts by itself when that job finishes. To stop a job, call job_cancel.`,
       inputSchema: {
-        jobId: z.string().describe("The job id returned by check/review."),
+        jobId: z.string().describe("The job id returned by dispatch or another job tool."),
       },
       outputSchema: JOB_STATE_OUTPUT.shape,
       annotations: {
@@ -197,13 +197,13 @@ export function registerJobWaitTool(server: McpServer): void {
     "job_wait",
     {
       title: "Wait for Job",
-      description: `Block until a background job finishes (or the wait window elapses), then return its state. This is the normal way to consume check/review: submit → job_wait → use result.
+      description: `Block until a background job finishes (or the wait window elapses), then return its state. This is the normal way to consume a job tool (dispatch, overview, narrative, ...): submit → job_wait → use result.
 
 BEHAVIOR: polls internally and sends progress heartbeats, so it is safe for long jobs. Waits ~50s per call by default; if the job is still running when the window elapses it returns \`stillRunning: true\` — call job_wait again with the same jobId (loop until stillRunning is false). You may also do other work between calls.
-LONG JOBS: pass an explicit \`maxWaitMs\` to wait in ONE call instead of looping — a review (typically 5-11 min) otherwise costs ~9 round trips. Only do this if this server's \`~/.claude.json\` entry sets a \`timeout\` at least as large; without it the client aborts at 60s and the abort is a hard error, unlike the clean \`stillRunning\` the default returns.
+LONG JOBS: pass an explicit \`maxWaitMs\` to wait in ONE call instead of looping — a long dispatch episode (typically 5-11 min or more) otherwise costs ~9 round trips. Only do this if this server's \`~/.claude.json\` entry sets a \`timeout\` at least as large; without it the client aborts at 60s and the abort is a hard error, unlike the clean \`stillRunning\` the default returns.
 OUTPUT: when \`status\` is "done", \`result\` holds the tool's structured output; "failed"/"interrupted"/"cancelled" set \`error\`. To stop a job, call job_cancel.`,
       inputSchema: {
-        jobId: z.string().describe("The job id returned by check/review."),
+        jobId: z.string().describe("The job id returned by dispatch or another job tool."),
         maxWaitMs: z
           .number()
           .optional()
@@ -265,7 +265,7 @@ WHEN TO CALL: a job you submitted is no longer wanted, is wedged (large and grow
 SIDE EFFECTS: terminates the job's worker process. Work the worker already did is not rolled back — a dispatch \`implement\` episode may already have changed its worktree or pushed a branch. A job that is already finished cannot be cancelled. Calling it again on the same running job is a no-op (no second signal).
 OUTPUT: the job's state (same fields as job_status) plus \`outcome\`: "cancelled" (pending job, terminal now), "cancel_requested" (running job: \`status\` is still "running" and \`cancelRequested\` true — call job_wait to see it land "cancelled"), or "already_terminal" (nothing cancelled; \`status\` is the job's final state). An unknown id is an error.`,
       inputSchema: {
-        jobId: z.string().describe("The job id returned by check/review/dispatch/..."),
+        jobId: z.string().describe("The job id returned by dispatch or another job tool."),
       },
       outputSchema: JOB_CANCEL_OUTPUT.shape,
       annotations: {

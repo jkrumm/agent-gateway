@@ -10,7 +10,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { MCP_TOOLS, registerAllTools } from "../server/mcp/tools/index.ts";
 
 const EXPECTED_ORDER = [
-  "check",
   "decide",
   "dispatch",
   "excalidraw_diagram",
@@ -24,7 +23,6 @@ const EXPECTED_ORDER = [
   "prose",
   "read_drawing",
   "read_image",
-  "review",
   "triage",
   "update_pr",
 ];
@@ -73,7 +71,6 @@ describe("tools/list", () => {
     );
     // Order of letters: readOnly, destructive, idempotent, openWorld.
     expect(hints).toEqual({
-      check: "r---",
       decide: "r---",
       dispatch: "-d-o",
       excalidraw_diagram: "-d--",
@@ -87,7 +84,6 @@ describe("tools/list", () => {
       prose: "r---",
       read_drawing: "r-i-",
       read_image: "r-i-",
-      review: "r--o",
       triage: "r---",
       update_pr: "-dio",
     });
