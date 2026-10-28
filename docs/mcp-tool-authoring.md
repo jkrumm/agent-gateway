@@ -122,6 +122,6 @@ async ({ cwd }, extra) => {
 heartbeat fires every 15s. **Every tool that calls `runSession()` must pass
 `onProgress`** or the client times out at 60s and kills the server.
 
-**Parallel sessions** (e.g. `review.ts`) may use one centralized
+**Parallel sessions** (several `runSession()` calls in one tool) may use one centralized
 `setInterval(15_000)` heartbeat instead of per-session `onProgress`, wrapped
 in `try-finally` to guarantee cleanup.

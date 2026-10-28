@@ -256,7 +256,7 @@ await server.connect(transport);
 
 Register: `claude mcp add --scope user agw -- bun run /path/to/agent-gateway/server/mcp.ts`
 
-Tools appear in Claude Code as `mcp__agent-gateway__check`.
+Tools appear in Claude Code as `mcp__agent-gateway__dispatch`.
 
 ## Context Injection Pattern (for HITL)
 
