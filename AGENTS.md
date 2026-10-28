@@ -9,7 +9,7 @@ an explicit `exclude agent-gateway`: the job API has no auth, so a tailnet twin
 would let any tag:mac/phone/tablet node `POST /api/jobs` with `dispatch
 implement`. Don't remove that exclusion.
 
-**Renamed 2026-10-09.** CLI `agw`, MCP server and tools `mcp__agent-gateway__*`, env prefix `AGENT_GATEWAY_*`, Caddy door `agent-gateway.test`. The persisted usage-tracker contract followed on 2026-10-13: `agent-gateway-iu` and `agent-gateway-sessions` sinks, `src: "agent-gateway"`, `agent-gateway:<tool>` lanes (stored rows and sink files migrated in place).
+**Renamed 2026-10-09.** CLI `agw` (renamed `agw-legacy` 2026-10-28), MCP server and tools `mcp__agent-gateway__*`, env prefix `AGENT_GATEWAY_*`, Caddy door `agent-gateway.test`. The persisted usage-tracker contract followed on 2026-10-13: `agent-gateway-iu` and `agent-gateway-sessions` sinks, `src: "agent-gateway"`, `agent-gateway:<tool>` lanes (stored rows and sink files migrated in place).
 
 Bun loads `.env` automatically from the `agent-gateway/` directory — all env vars
 (`PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH`, `GITHUB_TOKEN`, `AGENT_GATEWAY_*`,
@@ -148,17 +148,17 @@ Skill-prompt and handler-logic edits need only `make reload`.
 
 ### CLI — the same jobs, without an MCP client
 
-`bin/agw.ts` (`make install-cli` → `~/.local/bin/agw`) is a plain
+`bin/agw-legacy.ts` (`make install-cli` → `~/.local/bin/agw-legacy`) is a plain
 HTTP client of the routes below — **no MCP layer**, so OpenCode, Codex, a
 shell, a Makefile or cron can drive the same work Claude Code drives through
 MCP:
 
 ```bash
-agw dispatch --repo warden --tier implement --workspace in-place 'the brief'
-agw check --repo agent-gateway          # submit + wait, progress on stderr
-agw review --pr 42 --json          # stdout carries ONLY the result JSON
-agw prose draft.md --medium vault --out draft.md   # text on stdout/--out, summary + notes on stderr
-agw jobs --running · status|wait|cancel <jobId> · steer <jobId> <text> · routing · policy · health
+agw-legacy dispatch --repo warden --tier implement --workspace in-place 'the brief'
+agw-legacy check --repo agent-gateway          # submit + wait, progress on stderr
+agw-legacy review --pr 42 --json          # stdout carries ONLY the result JSON
+agw-legacy prose draft.md --medium vault --out draft.md   # text on stdout/--out, summary + notes on stderr
+agw-legacy jobs --running · status|wait|cancel <jobId> · steer <jobId> <text> · routing · policy · health
 ```
 
 `--caller <slug>` (global, any submitting command) names the consumer; see **Job caller** below.
@@ -169,7 +169,7 @@ failed/interrupted/cancelled · **2** usage error or `dispatch refused: …` ·
 **3** server unreachable. Same policy, same queue, same concurrency cap as the
 MCP door — the CLI adds no capability, only reach.
 
-`agw prose [<file>|-] [--medium <m>] [--language en|de] [--register <r>] [--brief <text>] [--context <file>] [--no-verdict-first] [--out <file>] [--json]`
+`agw-legacy prose [<file>|-] [--medium <m>] [--language en|de] [--register <r>] [--brief <text>] [--context <file>] [--no-verdict-first] [--out <file>] [--json]`
 submits a `prose` job (flags map 1:1 onto `PROSE_INPUT`; `--context` reads a file; `--medium` defaults to
 `docs` because the schema requires one), waits with no ceiling, and writes the resulting text (the rewrite,
 or the original when the keep gate declined) to stdout or `--out`. stderr gets one summary line (kept, reason,
@@ -191,8 +191,8 @@ Instead:
    (`^[a-z0-9][a-z0-9-]{0,31}$`, e.g. `iris`) naming the consumer that submitted it, so
    spend is attributable per consumer. It is **envelope-level**, not a tool param:
    `POST /api/jobs {"tool":"decide","params":{…},"caller":"iris"}`; MCP: the optional `caller`
-   arg on every job tool (lifted out before submit); CLI: `agw --caller iris …`. A bad slug is a
-   400 (`<tool> refused: caller must match …`; any non-slug value incl. `null`, empty or non-string), no row created; `agw` rejects it before sending (exit 2). One validator, `isValidCaller` in `server/lib/caller.ts`, serves the route, the MCP input and the CLI. It is stored on the `jobs` row
+   arg on every job tool (lifted out before submit); CLI: `agw-legacy --caller iris …`. A bad slug is a
+   400 (`<tool> refused: caller must match …`; any non-slug value incl. `null`, empty or non-string), no row created; `agw-legacy` rejects it before sending (exit 2). One validator, `isValidCaller` in `server/lib/caller.ts`, serves the route, the MCP input and the CLI. It is stored on the `jobs` row
    (nullable `caller` column, append-only migration), immutable, and returned as `caller` in
    `GET /api/jobs/:id` / the submit response (omitted when absent). `executeJob` opens an
    `AsyncLocalStorage` context (`server/lib/caller.ts`), and both usage sinks read it where they
@@ -312,11 +312,11 @@ across a reload, not across `git gc` weeks later. Pending-time accounting: `reco
 requeued job never trips the 15-min rule; `job.requeue` logs `detached`/`detachedForMs`, `job.recover`
 logs `detachedResumed`, `job.start` logs `pendingMs`. A detached session whose job is NOT resumed
 (recover → `interrupted`/`cancelled`) is interrupted on boot. Cancel still interrupts.
-**`POST /api/jobs/:id/steer {text}`** (MCP `job_steer`, CLI `agw steer`)
+**`POST /api/jobs/:id/steer {text}`** (MCP `job_steer`, CLI `agw-legacy steer`)
 injects `delivery: steer` text into a RUNNING dispatch's session (409 when nothing is live; logged
 `job.steer`). A new MCP tool needs a `/mcp` reconnect before a connected client sees it.
 
-**`POST /api/jobs/:id/cancel`** (MCP: `job_cancel`, CLI: `agw cancel`) cancels one job — `pending` lands `cancelled`
+**`POST /api/jobs/:id/cancel`** (MCP: `job_cancel`, CLI: `agw-legacy cancel`) cancels one job — `pending` lands `cancelled`
 immediately, `running` gets a best-effort SIGTERM (`terminateSessionsForJob`)
 and lands `cancelled` once the worker exits, never `failed` and never counted
 in `failedLastHour`; an already-terminal job answers 409, which `job_cancel` returns as `outcome: already_terminal`, not an error. The
@@ -676,7 +676,7 @@ Two constraints carried over regardless of backend:
 
 ### Triage — single-shot, no worker session
 
-`triage` (`server/jobs/handlers/triage.ts`, MCP tool + `agw triage
+`triage` (`server/jobs/handlers/triage.ts`, MCP tool + `agw-legacy triage
 --prompt-file F --schema-file F`) is one tool-less completion, not a session:
 `singleShotJson` (`server/lib/single-shot.ts`) calls `textComplete` over the IU
 OpenAI transport on route `triage` (`transport: "iu-openai"`, the cheap IU model,
@@ -703,8 +703,8 @@ paired with a Claude `AGENT_GATEWAY_MODEL_DISPATCH`, the `kind: "editorial"` par
 Max reverse fallback after an IU failure — so it works with that
 repo's own `AGENTS.md`/`CLAUDE.md`/rules/skills in context. Callers are interactive
 sessions and other automation; an observer like Hermes files unattended work through
-`agw dispatch` or an `rd wave` tab, not directly. One episode, one verdict. Mid-run, the caller can inject new facts
-with `job_steer` / `agw steer` (a running OpenCode episode only); anything beyond that —
+`agw-legacy dispatch` or an `rd wave` tab, not directly. One episode, one verdict. Mid-run, the caller can inject new facts
+with `job_steer` / `agw-legacy steer` (a running OpenCode episode only); anything beyond that —
 redirecting the whole task — is an `rd wave` tab + `rd say`, not this.
 
 **Tiers.** `investigate` (read-only → verdict), `author` (read-only → verdict
@@ -744,7 +744,7 @@ pinned to the fetched tip and the existing open PR is updated (`pr_updated`), no
 Every implement push first rebases onto a freshly fetched default branch (fetch must
 succeed); a conflict aborts, bundles the commits into the salvage dir and returns
 `conflict` — the caller re-dispatches, nothing is hand-resolved. **`update_pr {cwd, pr}`**
-(job tool, MCP tool, `agw update-pr --pr N`) is the same rebase + checks + lease push
+(job tool, MCP tool, `agw-legacy update-pr --pr N`) is the same rebase + checks + lease push
 for an open same-repo `dispatch/*` PR targeting the default branch → `{status:
 updated|up_to_date|conflict, headSha, checks}`; checks are skipped when nothing moved and a
 red result is still pushed (the merge train reads `checks`). **One implement-class episode
@@ -834,7 +834,7 @@ so context quality is the caller's job (warden builds it, `lifecycle/shadow.py`)
 (decision.ts) holds each known model's rate and a conservative `maxStateChars` cap; the state is
 cut to it and `truncatedChars` says how much. Cost is computed from the rate (the provider drops
 IU's own `usage.cost`) and recorded to the `agent-gateway-iu` sink as tool `decide`. Reach:
-MCP tool `decide` (a new tool: `/mcp` reconnect), CLI `agw decide --state-file F --questions-file F
+MCP tool `decide` (a new tool: `/mcp` reconnect), CLI `agw-legacy decide --state-file F --questions-file F
 [--model M]`, or `POST /api/jobs {tool:"decide"}`. Boot recovery
 re-queues it once, like `triage`. The single request has a 30 min hang guard (agent-limits rule),
 no retry here — the caller owns retries.

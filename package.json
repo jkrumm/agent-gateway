@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "bin": {
-    "agw": "bin/agw.ts"
+    "agw-legacy": "bin/agw-legacy.ts"
   },
   "scripts": {
     "dev:server": "bun --watch server/index.ts",

@@ -182,15 +182,17 @@ install-agent:
 	@i=0; until curl -sf --max-time 2 http://127.0.0.1:7705/health >/dev/null 2>&1 || [ $$i -ge 40 ]; do sleep 0.5; i=$$((i+1)); done; \
 	curl -sf --max-time 2 http://127.0.0.1:7705/health >/dev/null && echo "agent-gateway LaunchAgent installed and started" || { echo "agent-gateway did not come back on :7705 after install — tail ~/Library/Logs/agent-gateway.err"; exit 1; }
 
-# Symlink the harness-agnostic CLI (bin/agw.ts, a plain HTTP client of the job
+# Symlink the harness-agnostic CLI (bin/agw-legacy.ts, a plain HTTP client of the job
 # routes — no MCP layer) onto PATH so any tool can drive dispatch/check/review.
 install-cli:
 	@mkdir -p ~/.local/bin
-	@ln -sf "$(CURDIR)/bin/agw.ts" ~/.local/bin/agw
+	@ln -sf "$(CURDIR)/bin/agw-legacy.ts" ~/.local/bin/agw-legacy
+	@# the old `agw` link is dropped only when it points into an agent-gateway checkout; the new CLI owns that path
+	@case "$$(readlink ~/.local/bin/agw 2>/dev/null)" in */agent-gateway/bin/agw.ts) rm ~/.local/bin/agw;; esac
 	@ln -sf "$(CURDIR)/scripts/opencode-safe" ~/.local/bin/opencode-safe
 	@ln -sf "$(CURDIR)/scripts/opencode" ~/.local/bin/opencode
 	@scripts/install-react-doctor.sh || echo "note: react-doctor install failed — review runs report it as not run (make install-react-doctor)"
-	@echo "agent-gateway CLI symlinked to ~/.local/bin/agw (run: agw --help), opencode-safe (bounded opencode for probes), opencode (the pinned build, machine-wide)"
+	@echo "agent-gateway CLI symlinked to ~/.local/bin/agw-legacy (run: agw-legacy --help), opencode-safe (bounded opencode for probes), opencode (the pinned build, machine-wide)"
 
 # The pinned react-doctor the `review` job execs by absolute path (never bunx — its shared install
 # cache races under concurrent reviews). Idempotent; an upgrade is: bump REACT_DOCTOR_VERSION in

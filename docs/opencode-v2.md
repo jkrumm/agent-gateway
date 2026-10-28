@@ -211,7 +211,7 @@ sessions are detached, not drained). A detached session whose job is NOT resumed
 orphaned worktree. Known limit: a session re-attached in "cut off" state is resumed with the prompt of
 the FIRST call of the re-run, which for a retried angle is the original angle prompt, not the retry's.
 
-**Steer (Wave 4, shipped).** `POST /api/jobs/:id/steer {text}` (MCP `job_steer`, CLI `agw steer
+**Steer (Wave 4, shipped).** `POST /api/jobs/:id/steer {text}` (MCP `job_steer`, CLI `agw-legacy steer
 <jobId> <text…|--file F|->`, `server/lib/steer.ts`) posts `delivery: "steer"` into the running
 dispatch's session after checking it is `running`, a `dispatch`, carries an OpenCode session id
 (`ses_…`) and the session is in `session/active`. 400 empty/oversized (20 000 chars), 404 unknown,
@@ -246,7 +246,7 @@ The 2026-10-11 `brew upgrade` changed behaviour under a running agw and broke ev
   `scripts/install-opencode-bin.sh` first, so a bumped pin or a reprovisioned machine provisions itself.
 - An upgrade is a deliberate act, gated on the probes:
   ```bash
-  agw jobs --running                      # step 0: nothing running — a restart kills attached episodes
+  agw-legacy jobs --running                      # step 0: nothing running — a restart kills attached episodes
   D=~/.local/share/agent-gateway/opencode-bin/<new>; mkdir -p $D && (cd $D && npm init -y && npm i @opencode/cli@<new>)
   OPENCODE_BIN=$D/node_modules/@opencode/cli-darwin-arm64/bin/opencode bun scripts/opencode-v2-probe.ts
   # green → bump OPENCODE_PINNED_VERSION, make install-opencode-agent, then
@@ -299,7 +299,7 @@ A real item through the whole platform: `warden run warden` (brief: bounded 90-d
 | intake + decision shadow | event 1565, triaged to warden; a `decision_shadow` row is written by the shadow lane |
 | investigate | dispatch `46802313-9d86-4583-868e-07b65487123b` → `next: implement` |
 | implement #1 | `95d2b744-05fa-434a-91b1-bb3c4248cb43` refused to delete data (`[data_loss]` needs_decision): my brief tagged a retention delete the worker read as an owner question. `warden reinvestigate 1565 --why` carried the decision, no new gate |
-| implement #2 (OpenCode session `ses_ec0f3f21cffeWaiiEe3mBTb35d`) | dispatch `ea5108a5-375d-46bb-b339-aa33784fe47c`; `agw steer` mid-run, logged `job.steer` (120 chars); the steer text (single transaction, constant name `SETTLED_RETENTION_DAYS`) shows in the result |
+| implement #2 (OpenCode session `ses_ec0f3f21cffeWaiiEe3mBTb35d`) | dispatch `ea5108a5-375d-46bb-b339-aa33784fe47c`; `agw-legacy steer` mid-run, logged `job.steer` (120 chars); the steer text (single transaction, constant name `SETTLED_RETENTION_DAYS`) shows in the result |
 | review → merge train | PR jkrumm/warden#42, **5 revision rounds**, each review a new finding |
 | landing | by hand: `make check` green, master ff to `cff7bb9`, `make deploy` → `warden-api healthy`, `/health` schema 22/22 |
 
