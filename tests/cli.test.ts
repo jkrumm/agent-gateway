@@ -1,4 +1,4 @@
-// The harness-agnostic CLI (bin/agw.ts). These pin the argv → POST-body mapping,
+// The harness-agnostic CLI (bin/agw-legacy.ts). These pin the argv → POST-body mapping,
 // the `--repo` name→path resolution, the exit-code mapping, and that `--json` keeps stdout
 // pure JSON — all against exported pure functions plus one mocked-fetch round trip, so no
 // test spawns a server.
@@ -28,7 +28,7 @@ import {
   type FetchLike,
   type JobCommand,
   type RequestBody,
-} from "../bin/agw.ts";
+} from "../bin/agw-legacy.ts";
 import { PROSE_INPUT } from "../server/jobs/handlers/prose.ts";
 
 function bodyFor(argv: string[], cwd = "/repo"): RequestBody {

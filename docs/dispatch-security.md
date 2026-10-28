@@ -160,7 +160,7 @@ both were tested and neither holds.
 
 ## Steering a running episode
 
-`POST /api/jobs/:id/steer` (`job_steer`, `agw steer`) injects text into a running OpenCode
+`POST /api/jobs/:id/steer` (`job_steer`, `agw-legacy steer`) injects text into a running OpenCode
 episode's live loop. The steering caller is trusted exactly like a `dispatch` submitter: the API
 is loopback-only and carries no auth, so anyone who can steer could already submit a brief. The
 text is therefore framed as new facts from the caller but NOT nonce-fenced as hostile data (the

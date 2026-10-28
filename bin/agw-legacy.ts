@@ -290,7 +290,7 @@ export function parseArgs(argv: string[]): Parsed {
 
   const name = rest[0];
   if (help) return { command: { kind: "help", topic: name }, options };
-  if (name === undefined) throw new CliUsageError("no command given (see 'agw --help')");
+  if (name === undefined) throw new CliUsageError("no command given (see 'agw-legacy --help')");
   if (name === "help") return { command: { kind: "help", topic: rest[1] }, options };
 
   switch (name) {
@@ -344,9 +344,9 @@ function parseFlags(
       const eq = arg.indexOf("=");
       const flag = eq === -1 ? arg : arg.slice(0, eq);
       const def = spec[flag];
-      if (def === undefined) throw new CliUsageError(`agw ${command}: unknown flag ${flag}`);
+      if (def === undefined) throw new CliUsageError(`agw-legacy ${command}: unknown flag ${flag}`);
       if (def === "boolean") {
-        if (eq !== -1) throw new CliUsageError(`agw ${command}: flag ${flag} takes no value`);
+        if (eq !== -1) throw new CliUsageError(`agw-legacy ${command}: flag ${flag} takes no value`);
         flags.set(flag, true);
       } else {
         let value: string;
@@ -355,7 +355,7 @@ function parseFlags(
         } else {
           const next = args[i + 1];
           if (next === undefined) {
-            throw new CliUsageError(`agw ${command}: flag ${flag} requires a value`);
+            throw new CliUsageError(`agw-legacy ${command}: flag ${flag} requires a value`);
           }
           value = next;
           i++;
@@ -363,7 +363,7 @@ function parseFlags(
         flags.set(flag, value);
       }
     } else if (arg.startsWith("-") && arg !== "-") {
-      throw new CliUsageError(`agw ${command}: unknown flag ${arg}`);
+      throw new CliUsageError(`agw-legacy ${command}: unknown flag ${arg}`);
     } else {
       positionals.push(arg);
     }
@@ -387,13 +387,13 @@ function parseRepo(value: string | undefined): RepoSpec {
 
 function oneJobId(args: string[], command: string): string {
   if (args.length !== 1 || (args[0] ?? "") === "") {
-    throw new CliUsageError(`agw ${command} requires exactly one <jobId>`);
+    throw new CliUsageError(`agw-legacy ${command} requires exactly one <jobId>`);
   }
   return args[0] as string;
 }
 
 function noArgs(args: string[], command: string): void {
-  if (args.length > 0) throw new CliUsageError(`agw ${command} takes no arguments`);
+  if (args.length > 0) throw new CliUsageError(`agw-legacy ${command} takes no arguments`);
 }
 
 function parseDispatch(args: string[]): DispatchCommand {
@@ -414,7 +414,7 @@ function parseDispatch(args: string[]): DispatchCommand {
     "dispatch",
   );
   const brief = positionals.join(" ").trim();
-  if (brief.length === 0) throw new CliUsageError("agw dispatch requires a <brief>");
+  if (brief.length === 0) throw new CliUsageError("agw-legacy dispatch requires a <brief>");
 
   const command: DispatchCommand = {
     kind: "dispatch",
@@ -427,7 +427,7 @@ function parseDispatch(args: string[]): DispatchCommand {
   if (tier !== undefined) {
     if (!(DISPATCH_TIERS as readonly string[]).includes(tier)) {
       throw new CliUsageError(
-        `agw dispatch: --tier must be one of ${DISPATCH_TIERS.join("|")}, got: ${tier}`,
+        `agw-legacy dispatch: --tier must be one of ${DISPATCH_TIERS.join("|")}, got: ${tier}`,
       );
     }
     command.tier = tier as DispatchTier;
@@ -437,7 +437,7 @@ function parseDispatch(args: string[]): DispatchCommand {
   if (workspace !== undefined) {
     if (!(DISPATCH_WORKSPACES as readonly string[]).includes(workspace)) {
       throw new CliUsageError(
-        `agw dispatch: --workspace must be one of ${DISPATCH_WORKSPACES.join("|")}, got: ${workspace}`,
+        `agw-legacy dispatch: --workspace must be one of ${DISPATCH_WORKSPACES.join("|")}, got: ${workspace}`,
       );
     }
     command.workspace = workspace as DispatchWorkspace;
@@ -456,7 +456,7 @@ function parseDispatch(args: string[]): DispatchCommand {
   if (kind !== undefined) {
     if (!(DISPATCH_KINDS as readonly string[]).includes(kind)) {
       throw new CliUsageError(
-        `agw dispatch: --kind must be one of ${DISPATCH_KINDS.join("|")}, got: ${kind}`,
+        `agw-legacy dispatch: --kind must be one of ${DISPATCH_KINDS.join("|")}, got: ${kind}`,
       );
     }
     command.episodeKind = kind as DispatchKind;
@@ -480,7 +480,7 @@ function parseCheck(args: string[]): CheckCommand {
     { "--repo": "value", "--commands": "value" },
     "check",
   );
-  if (positionals.length > 0) throw new CliUsageError("agw check takes no positional arguments");
+  if (positionals.length > 0) throw new CliUsageError("agw-legacy check takes no positional arguments");
 
   const command: CheckCommand = { kind: "check", repo: parseRepo(flagValue(flags, "--repo")) };
   const commands = flagValue(flags, "--commands");
@@ -500,7 +500,7 @@ function parseReview(args: string[]): ReviewCommand {
     { "--repo": "value", "--scope": "value", "--pr": "value", "--branch": "value" },
     "review",
   );
-  if (positionals.length > 0) throw new CliUsageError("agw review takes no positional arguments");
+  if (positionals.length > 0) throw new CliUsageError("agw-legacy review takes no positional arguments");
 
   const scope = flagValue(flags, "--scope");
   const prRaw = flagValue(flags, "--pr");
@@ -509,7 +509,7 @@ function parseReview(args: string[]): ReviewCommand {
     Boolean,
   ).length;
   if (given > 1) {
-    throw new CliUsageError("agw review: --scope, --pr and --branch are mutually exclusive");
+    throw new CliUsageError("agw-legacy review: --scope, --pr and --branch are mutually exclusive");
   }
 
   const command: ReviewCommand = { kind: "review", repo: parseRepo(flagValue(flags, "--repo")) };
@@ -526,9 +526,9 @@ function parseUpdatePr(args: string[]): UpdatePrCommand {
     "update-pr",
   );
   if (positionals.length > 0)
-    throw new CliUsageError("agw update-pr takes no positional arguments");
+    throw new CliUsageError("agw-legacy update-pr takes no positional arguments");
   const prRaw = flagValue(flags, "--pr");
-  if (prRaw === undefined) throw new CliUsageError("agw update-pr requires --pr <number>");
+  if (prRaw === undefined) throw new CliUsageError("agw-legacy update-pr requires --pr <number>");
   return {
     kind: "update-pr",
     repo: parseRepo(flagValue(flags, "--repo")),
@@ -540,12 +540,12 @@ function parseSteer(args: string[]): SteerCommand {
   const { flags, positionals } = parseFlags(args, { "--file": "value" }, "steer");
   const [jobId, ...words] = positionals;
   const file = flagValue(flags, "--file");
-  if (!jobId) throw new CliUsageError("agw steer requires a <jobId>");
+  if (!jobId) throw new CliUsageError("agw-legacy steer requires a <jobId>");
   if (file === undefined && words.length === 0) {
-    throw new CliUsageError("agw steer requires <text...> or --file <path|->");
+    throw new CliUsageError("agw-legacy steer requires <text...> or --file <path|->");
   }
   if (file !== undefined && words.length > 0) {
-    throw new CliUsageError("agw steer takes <text...> or --file, not both");
+    throw new CliUsageError("agw-legacy steer takes <text...> or --file, not both");
   }
   return file === undefined
     ? { kind: "steer", jobId, text: words.join(" ") }
@@ -558,11 +558,11 @@ function parseTriage(args: string[]): TriageCommand {
     { "--prompt-file": "value", "--schema-file": "value" },
     "triage",
   );
-  if (positionals.length > 0) throw new CliUsageError("agw triage takes no positional arguments");
+  if (positionals.length > 0) throw new CliUsageError("agw-legacy triage takes no positional arguments");
   const promptFile = flagValue(flags, "--prompt-file");
   const schemaFile = flagValue(flags, "--schema-file");
   if (promptFile === undefined || schemaFile === undefined) {
-    throw new CliUsageError("agw triage requires --prompt-file <file> and --schema-file <file>");
+    throw new CliUsageError("agw-legacy triage requires --prompt-file <file> and --schema-file <file>");
   }
   return { kind: "triage", promptFile, schemaFile };
 }
@@ -573,11 +573,11 @@ function parseDecide(args: string[]): DecideCommand {
     { "--state-file": "value", "--questions-file": "value", "--model": "value" },
     "decide",
   );
-  if (positionals.length > 0) throw new CliUsageError("agw decide takes no positional arguments");
+  if (positionals.length > 0) throw new CliUsageError("agw-legacy decide takes no positional arguments");
   const stateFile = flagValue(flags, "--state-file");
   const questionsFile = flagValue(flags, "--questions-file");
   if (stateFile === undefined || questionsFile === undefined) {
-    throw new CliUsageError("agw decide requires --state-file <file> and --questions-file <file>");
+    throw new CliUsageError("agw-legacy decide requires --state-file <file> and --questions-file <file>");
   }
   const model = flagValue(flags, "--model");
   return { kind: "decide", stateFile, questionsFile, ...(model !== undefined && { model }) };
@@ -592,7 +592,7 @@ function enumFlag<T extends string>(
   if (value === undefined) return undefined;
   if (!(allowed as readonly string[]).includes(value)) {
     throw new CliUsageError(
-      `agw prose: ${name} must be one of ${allowed.join("|")}, got: ${value}`,
+      `agw-legacy prose: ${name} must be one of ${allowed.join("|")}, got: ${value}`,
     );
   }
   return value as T;
@@ -613,7 +613,7 @@ function parseProse(args: string[]): ProseCommand {
     "prose",
   );
   if (positionals.length > 1) {
-    throw new CliUsageError("agw prose takes one <file> (or - for stdin)");
+    throw new CliUsageError("agw-legacy prose takes one <file> (or - for stdin)");
   }
   const command: ProseCommand = {
     kind: "prose",
@@ -637,7 +637,7 @@ function parseProse(args: string[]): ProseCommand {
 
 function parseJobs(args: string[]): JobsCommand {
   const { flags, positionals } = parseFlags(args, { "--running": "boolean" }, "jobs");
-  if (positionals.length > 0) throw new CliUsageError("agw jobs takes no positional arguments");
+  if (positionals.length > 0) throw new CliUsageError("agw-legacy jobs takes no positional arguments");
   return { kind: "jobs", running: flags.has("--running") };
 }
 
@@ -757,7 +757,7 @@ export function proseRequestBody(
     }
   };
   const text = command.file === undefined ? io.readStdin() : readFile(command.file, "input file");
-  if (text.trim().length === 0) throw new CliUsageError("agw prose: the input text is empty");
+  if (text.trim().length === 0) throw new CliUsageError("agw-legacy prose: the input text is empty");
   const params: Record<string, unknown> = { text, medium: command.medium };
   if (command.language !== undefined) params.language = command.language;
   if (command.register !== undefined) params.register = command.register;
@@ -899,7 +899,7 @@ function isDispatchOutput(r: Record<string, unknown>): r is DispatchOutput {
   return typeof r.verdict === "string";
 }
 
-/** The fields `agw prose` reads off a done job: the text, and the usage and notes the summary
+/** The fields `agw-legacy prose` reads off a done job: the text, and the usage and notes the summary
  *  line dereferences. A server ahead of or behind the CLI fails this rather than a TypeError. */
 function isProseOutput(r: unknown): r is ProseOutput {
   if (r === null || typeof r !== "object") return false;
@@ -1100,7 +1100,7 @@ export interface CliIo {
 
 export interface CliContext {
   fetchFn: FetchLike;
-  /** The draft for `agw prose` without a file; defaults to reading fd 0. */
+  /** The draft for `agw-legacy prose` without a file; defaults to reading fd 0. */
   readStdin?: () => string;
   gitRoot: (cwd: string) => string | null;
   cwd: string;
@@ -1119,11 +1119,11 @@ export async function run(argv: string[], ctx: CliContext, io: CliIo): Promise<n
     return await execute(command, options, ctx, io, base);
   } catch (err) {
     if (err instanceof CliError) {
-      io.err(`agw: ${err.message}\n`);
-      if (err.code === 2) io.err("Try 'agw --help'.\n");
+      io.err(`agw-legacy: ${err.message}\n`);
+      if (err.code === 2) io.err("Try 'agw-legacy --help'.\n");
       return err.code;
     }
-    io.err(`agw: ${err instanceof Error ? err.message : String(err)}\n`);
+    io.err(`agw-legacy: ${err instanceof Error ? err.message : String(err)}\n`);
     return 1;
   }
 }
@@ -1251,7 +1251,7 @@ async function execute(
   }
 }
 
-/** `agw prose`: submit, wait without a ceiling (a run takes 20-90 s), then write the text — the
+/** `agw-legacy prose`: submit, wait without a ceiling (a run takes 20-90 s), then write the text — the
  *  rewrite, or the original when the keep gate declined — to stdout or `--out`, the summary to
  *  stderr. `--json` prints the whole job result instead of the text. */
 async function executeProse(
@@ -1294,7 +1294,7 @@ async function resolveCwd(ctx: CliContext, base: string, command: JobCommand): P
 }
 
 function timeoutMessage(jobId: string, timeoutSec: number): string {
-  return `agw: timed out after ${timeoutSec}s — job ${jobId} still running\n`;
+  return `agw-legacy: timed out after ${timeoutSec}s — job ${jobId} still running\n`;
 }
 
 async function waitForJob(
@@ -1334,14 +1334,14 @@ async function waitForJob(
       // malformed body) means retrying would just fail the same way.
       if (err instanceof CliUnreachableError && pollFailures < MAX_POLL_RETRIES) {
         pollFailures++;
-        if (pollFailures === 1) io.err(`agw: poll failed (${err.message}) — retrying…\n`);
+        if (pollFailures === 1) io.err(`agw-legacy: poll failed (${err.message}) — retrying…\n`);
         await wait(Math.min(POLL_RETRY_BASE_MS * 2 ** (pollFailures - 1), POLL_RETRY_CAP_MS));
         continue;
       }
       throw err;
     }
     if (pollFailures > 0) {
-      io.err(`agw: poll recovered after ${pollFailures} failed attempt(s)\n`);
+      io.err(`agw-legacy: poll recovered after ${pollFailures} failed attempt(s)\n`);
       pollFailures = 0;
     }
 
@@ -1363,7 +1363,7 @@ async function waitForJob(
     }
     if (isTerminal(job.status)) {
       if (job.status !== "done" && job.error !== null) {
-        io.err(`agw: job ${job.id} ${job.status}: ${job.error}\n`);
+        io.err(`agw-legacy: job ${job.id} ${job.status}: ${job.error}\n`);
       }
       if (finish) return finish(job);
       if (options.json) io.out(`${JSON.stringify(job.result, null, 2)}\n`);
@@ -1444,22 +1444,22 @@ function renderPolicy(data: unknown): string {
 const USAGE = `agent-gateway — plain HTTP client for the agent-gateway job server
 
 Usage:
-  agw dispatch [flags] <brief...>        hand one episode to a repo
-  agw check [--repo R] [--commands "a,b"]   run validation in a repo
-  agw review [--repo R] [--scope S | --pr N | --branch B]   multi-angle review
-  agw update-pr [--repo R] --pr N        rebase a dispatch/* PR onto the latest base, re-check, push
-  agw triage --prompt-file F --schema-file F   one tool-less model call → JSON
-  agw decide --state-file F --questions-file F [--model M]   one decision-model call → typed answers
-  agw prose [<file>|-] [--medium <m>] [--language en|de] [--register <r>] [--brief <text>] [--context <file>] [--no-verdict-first] [--out <file>] [--json]
+  agw-legacy dispatch [flags] <brief...>        hand one episode to a repo
+  agw-legacy check [--repo R] [--commands "a,b"]   run validation in a repo
+  agw-legacy review [--repo R] [--scope S | --pr N | --branch B]   multi-angle review
+  agw-legacy update-pr [--repo R] --pr N        rebase a dispatch/* PR onto the latest base, re-check, push
+  agw-legacy triage --prompt-file F --schema-file F   one tool-less model call → JSON
+  agw-legacy decide --state-file F --questions-file F [--model M]   one decision-model call → typed answers
+  agw-legacy prose [<file>|-] [--medium <m>] [--language en|de] [--register <r>] [--brief <text>] [--context <file>] [--no-verdict-first] [--out <file>] [--json]
                                          lint → cross-lab review → rewrite → keep gate on a draft
-  agw jobs [--running]                   list recent jobs
-  agw status <jobId>                     one-shot job state
-  agw wait <jobId>                       block until a job reaches a terminal state
-  agw cancel <jobId>                     cancel a pending/running job
-  agw steer <jobId> <text...|--file F>   post new facts into a running dispatch episode
-  agw routing                            the model/backend table (GET /api/routing)
-  agw policy                             the dispatch repo policy (GET /api/dispatch-policy)
-  agw health                             queue health (GET /api/jobs/health)
+  agw-legacy jobs [--running]                   list recent jobs
+  agw-legacy status <jobId>                     one-shot job state
+  agw-legacy wait <jobId>                       block until a job reaches a terminal state
+  agw-legacy cancel <jobId>                     cancel a pending/running job
+  agw-legacy steer <jobId> <text...|--file F>   post new facts into a running dispatch episode
+  agw-legacy routing                            the model/backend table (GET /api/routing)
+  agw-legacy policy                             the dispatch repo policy (GET /api/dispatch-policy)
+  agw-legacy health                             queue health (GET /api/jobs/health)
 
 Global flags (any subcommand):
   --json          emit only JSON on stdout, nothing else
@@ -1473,7 +1473,7 @@ Exit codes:
   0 job done · 1 job failed/interrupted/cancelled · 2 usage error or policy refusal · 3 server unreachable
 `;
 
-const DISPATCH_HELP = `agw dispatch [flags] <brief...>
+const DISPATCH_HELP = `agw-legacy dispatch [flags] <brief...>
 
 Flags:
   --repo <name|path>    repo to run in: a bare name under a dispatch root, or an absolute
@@ -1485,32 +1485,32 @@ Flags:
                         refused if the name is taken; not with --revision-of)
   --pr-title <title>    implement only: the PR/MR title and commit subject (the body stays the worker's)
   --kind <kind>         code | editorial (default code). editorial = AGENTS.md/docs/README/prose:
-                        runs on route dispatch_editorial (see agw routing), never auto-detected
+                        runs on route dispatch_editorial (see agw-legacy routing), never auto-detected
   --model <id>          model override (e.g. claude-opus-5[1m])
   --context <text|@file>  raw supporting material, passed as data (leading @ reads a file)
   --sensitive           mark the repo secret-bearing; the server refuses this outside the
                         investigate tier — the CLI does not validate it client-side
 `;
 
-const CHECK_HELP = `agw check [--repo <name|path>] [--commands "cmd1,cmd2"]
+const CHECK_HELP = `agw-legacy check [--repo <name|path>] [--commands "cmd1,cmd2"]
 
   --commands is a comma-separated list run verbatim (skips ecosystem discovery).
 `;
 
-const REVIEW_HELP = `agw review [--repo <name|path>] [--scope S | --pr N | --branch B]
+const REVIEW_HELP = `agw-legacy review [--repo <name|path>] [--scope S | --pr N | --branch B]
 
   --scope, --pr and --branch are mutually exclusive: --scope reviews local state,
   --pr/--branch review a ref fetched from origin.
 `;
 
-const UPDATE_PR_HELP = `agw update-pr [--repo <name|path>] --pr N
+const UPDATE_PR_HELP = `agw-legacy update-pr [--repo <name|path>] --pr N
 
   Rebases the open dispatch/* PR onto the latest default branch, re-runs the repo's checks,
   force-with-lease pushes. Result: { status: updated|up_to_date|conflict, headSha, checks }.
   A conflict is reported, never hand-resolved — re-dispatch from the new base.
 `;
 
-const TRIAGE_HELP = `agw triage --prompt-file <file> --schema-file <file>
+const TRIAGE_HELP = `agw-legacy triage --prompt-file <file> --schema-file <file>
 
   --prompt-file   the whole task, instructions and material together (no tools, no repo)
   --schema-file   a JSON Schema file for the answer; the top level must be "type": "object"
@@ -1518,7 +1518,7 @@ const TRIAGE_HELP = `agw triage --prompt-file <file> --schema-file <file>
   \`.result\` is the validated answer.
 `;
 
-const DECIDE_HELP = `agw decide --state-file <file> --questions-file <file> [--model <id>]
+const DECIDE_HELP = `agw-legacy decide --state-file <file> --questions-file <file> [--model <id>]
 
   --state-file      plain text: the model's whole world (it cannot look anything up)
   --questions-file  a JSON object { "<id>": question }; a question is
@@ -1529,7 +1529,7 @@ const DECIDE_HELP = `agw decide --state-file <file> --questions-file <file> [--m
   \`.answers\` maps each question id to its typed answer with a calibrated confidence.
 `;
 
-const PROSE_HELP = `agw prose [<file>|-] [--medium <m>] [--language en|de] [--register <r>] [--brief <text>] [--context <file>] [--no-verdict-first] [--out <file>] [--json]
+const PROSE_HELP = `agw-legacy prose [<file>|-] [--medium <m>] [--language en|de] [--register <r>] [--brief <text>] [--context <file>] [--no-verdict-first] [--out <file>] [--json]
 
   <file>|-            the draft; stdin when omitted or -
   --medium <m>        ${PROSE_MEDIUMS.join(" | ")} (default ${PROSE_DEFAULT_MEDIUM})
