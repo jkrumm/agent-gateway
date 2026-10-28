@@ -52,6 +52,9 @@ patterns: `docs/mcp-tool-authoring.md`.
 
 ## Fallow Static Analysis
 
+The `check` and `review` MCP tools moved to agent-workflows (`agw check`, `agw review`); the
+job handlers behind them stay for its eval harness and still behave as follows.
+
 `check` runs `fallow audit --quiet` (auto-detects the merge-base against
 upstream) — never `fallow diff` (doesn't exist). Guard: `which fallow` and a
 git remote must both exist. Treat `pass`/`warn` as passed, `fail` as failed.
@@ -71,7 +74,7 @@ review-shaped base) and fallow falls back to its own auto-detection.
 
 The MCP SDK has a 60s client timeout. Every `runSession()` call must pass
 `onProgress: mcpProgressCallback(extra)` (from `session-runner.ts`) or the
-client kills the connection. Parallel-session tools (`review.ts`) may use one
+client kills the connection. A tool running several parallel sessions may use one
 centralized `setInterval(15_000)` heartbeat instead. Details:
 `docs/mcp-tool-authoring.md`.
 

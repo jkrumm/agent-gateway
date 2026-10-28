@@ -293,15 +293,18 @@ bias that same-family multi-reviewer pipelines otherwise carry.
 
 ## MCP Integration
 
-Called via the `review` MCP tool:
+The `review` MCP tool was removed — review moved to agent-workflows (`agw review`). This
+pipeline stays reachable through the `review` job (`POST /api/jobs`) and `agw-legacy review`,
+which agent-workflows' eval harness reruns until its P6. Job input:
 
 ```
-mcp__agent-gateway__review({
+{
+  tool: "review",
   cwd: "/path/to/repo",
   scope: "uncommitted",        // or "head", "HEAD~3", "path/to/file.ts"
   context: "add retry logic",  // optional — helps catch goal mismatches
   angles: ["security", "qa"]   // optional — force a fixed set, skip the router
-})
+}
 ```
 
 `pr` (a pull request number) or `branch` (a remote branch name) may be passed instead of
@@ -311,7 +314,7 @@ the ref from `cwd`'s `origin` into a throwaway read-only worktree and diffs it a
 repo's default branch; `scope` must be omitted with either. See `GET /api/review-schema` for
 the published output shape (`schemaVersion`-pinned, mirrors `/api/dispatch-schema`).
 
-The `/review` skill and `/ship` orchestrator both invoke this tool.
+The dotfiles `/review` skill and `/ship` call `agw review`, not this pipeline.
 
 ### Untracked files
 
@@ -349,5 +352,5 @@ server/skills/review/
 ├── adversary.md       ← adversary critic prompt (cross-family, IU OpenAI transport)
 └── synthesis.md       ← synthesis/classification prompt
 
-server/mcp/tools/review.ts  ← pipeline orchestration + output schema
+server/jobs/handlers/review.ts  ← pipeline orchestration + output schema
 ```
