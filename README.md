@@ -70,7 +70,6 @@ Logs: `~/Library/Logs/agent-gateway.jsonl` (structured, both processes), `agent-
 | `AGENT_GATEWAY_BREAKER_COOLDOWN_MS` (300000) | how long a tripped `tool@iu/model` circuit breaker sends the first attempt straight to the route's fallback before one probe retries the primary |
 | `AGENT_GATEWAY_OPENCODE_PREFLIGHT_MS` (5000) | abort budget of the IU reachability probe run before every OpenCode session; unreachable = attempt fails without creating a session (transport failure for the retry/fallback/breaker ladder) |
 | `OPENCODE_SAFE_TIMEOUT` (120) | seconds before `scripts/opencode-safe` (installed as `opencode-safe` by `make install-cli`) kills the opencode it wraps; reads `IU_OPENAI_BASE`/`IU_BASE_URL`/Keychain for its 5 s preflight, exits 75 when unreachable |
-| `ARGO_URL` | Argo API base for the overview push (default `https://argo.jkrumm.com/api`) |
 
 The HTTP server gets `.env` from Bun's cwd auto-load; the `agw-legacy` CLI reads the same file
 through `server/lib/load-env.ts`. Every routing/backend flag is read at module load —
