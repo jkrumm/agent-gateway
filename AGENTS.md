@@ -158,7 +158,6 @@ MCP:
 ```bash
 agw-legacy dispatch --repo warden --tier implement --workspace in-place 'the brief'
 agw-legacy check --repo agent-gateway          # submit + wait, progress on stderr
-agw-legacy review --pr 42 --json          # stdout carries ONLY the result JSON
 agw-legacy jobs --running · status|wait|cancel <jobId> · steer <jobId> <text> · routing · policy · health
 ```
 
@@ -827,6 +826,11 @@ re-queues it once, like `triage`. The single request has a 30 min hang guard (ag
 no retry here — the caller owns retries.
 
 ### Review — multi-angle pipeline
+
+**Refused at submit (2026-10-29): review moved to agent-workflows.** `POST /api/jobs` with `tool: "review"` (and so
+`agw-legacy review`) answers 400 `{ok:false, error:"review moved to agent-workflows: run \`agw review --cwd <repo> --pr N\` …"}`
+before a job row exists (`REVIEW_MOVED_REFUSAL`, `server/routes/jobs.ts`). The handler below stays for the eval
+harness until agent-gateway is deleted; nothing else reaches it.
 
 The `review` job (`server/jobs/handlers/review.ts`) runs a 3-phase parallel
 pipeline: data gathering (git diff, `fallow review --brief` with a scope-derived

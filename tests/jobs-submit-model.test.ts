@@ -100,25 +100,27 @@ describe("dispatch `model` refusal", () => {
 });
 
 describe("`model` refusal beyond dispatch", () => {
-  test("review with an unknown model is refused too", async () => {
+  test("overview with an unknown model is refused too", async () => {
     const { status, body } = await post({
-      tool: "review",
+      tool: "overview",
       params: { cwd: "/tmp/x", model: "no-such-model" },
     });
     expect(status).toBe(400);
-    expect(body.error).toBe("review refused: model no-such-model is not a verified registry model");
+    expect(body.error).toBe(
+      "overview refused: model no-such-model is not a verified registry model",
+    );
   });
 });
 
 describe("single-shot-only models (the Opus ids)", () => {
-  test("a per-job Opus model on review is refused: evidence covers the prose writer only", async () => {
+  test("a per-job Opus model on narrative is refused: evidence covers the prose writer only", async () => {
     const { status, body } = await post({
-      tool: "review",
+      tool: "narrative",
       params: { cwd: "/tmp/x", model: "claude-opus-4-6" },
     });
     expect(status).toBe(400);
     expect(body.error).toBe(
-      "review refused: model claude-opus-4-6 is not a verified registry model",
+      "narrative refused: model claude-opus-4-6 is not a verified registry model",
     );
   });
 });

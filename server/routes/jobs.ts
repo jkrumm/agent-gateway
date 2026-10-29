@@ -14,6 +14,12 @@ import { steerJob } from "../lib/steer.ts";
 // routes (server/mcp/job-client.ts). Hosted in the always-on HTTP server so jobs
 // outlive the ephemeral MCP process. See server/jobs/store.ts.
 
+// Owner direction 2026-10-29: review moved to agent-workflows. The handler stays until agent-gateway
+// is deleted (the eval harness still drives it), but no submit reaches it — HTTP, `agw-legacy review`
+// (a 4xx surfaces as a usage error, exit 2) and anything else posting here.
+export const REVIEW_MOVED_REFUSAL =
+  "review moved to agent-workflows: run `agw review --cwd <repo> --pr N` (or --scope/--branch); agent-gateway no longer reviews";
+
 // Everything knowable without running the episode that a tool's handler also checks: `dispatch`
 // (the repo/tier policy, malformed params, ...) refuses here, before a job row exists.
 async function toolSubmitRefusal(tool: JobTool, params: unknown): Promise<string | null> {
@@ -38,6 +44,12 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
       if (!isJobTool(body.tool)) {
         set.status = 400;
         return { ok: false as const, error: `unknown tool: ${body.tool}` };
+      }
+      // Before every other check (a bad cwd or model on a review gets this answer, not theirs), and
+      // before a job row exists.
+      if (body.tool === "review") {
+        set.status = 400;
+        return { ok: false as const, error: REVIEW_MOVED_REFUSAL };
       }
       // The submitting consumer's slug, for per-consumer spend attribution. Envelope-level (not
       // a tool param), so it applies to every tool without each handler's schema knowing it.

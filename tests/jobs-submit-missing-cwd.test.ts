@@ -28,12 +28,12 @@ async function post(body: unknown) {
 }
 
 describe("missing cwd refusal", () => {
-  test("a review of a deleted directory is a 400 and creates nothing", async () => {
+  test("an overview of a deleted directory is a 400 and creates nothing", async () => {
     const missing = join(dir, "deleted-worktree");
     const before = listJobs().length;
-    const { status, body } = await post({ tool: "review", params: { cwd: missing } });
+    const { status, body } = await post({ tool: "overview", params: { cwd: missing } });
     expect(status).toBe(400);
-    expect(body.error).toBe(`review refused: directory not found: ${missing}`);
+    expect(body.error).toBe(`overview refused: directory not found: ${missing}`);
     expect(listJobs().length).toBe(before);
   });
 
