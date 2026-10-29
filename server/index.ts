@@ -19,7 +19,6 @@ import {
   setDraining,
 } from "./jobs/store";
 import { executeJob } from "./jobs/executor";
-import { pushOverviewToArgo } from "./lib/argo-push.ts";
 import { startKumaPush, stopKumaPush } from "./lib/kuma-push.ts";
 import {
   activeSessionCount,
@@ -110,19 +109,8 @@ await sweepStaleWorktrees(protectedWorktreePaths()).catch((err: unknown) => {
 
 // Wire the async job system: register the executor and run startup recovery
 // (in-flight jobs from a previous process → re-queued once or interrupted; re-promote
-// pending). A completed `overview` job pushes the merged overview to Argo — the hook
-// fires after the `done` row is committed, so the push sees this job's result.
-initJobStore({
-  executor: executeJob,
-  onDone: (job) => {
-    if (job.tool === "overview") void pushOverviewToArgo("job");
-  },
-});
-
-// The other half of that push: a 10-minute timer, so Argo's view ages out even when no
-// overview job runs (a quiet fleet is a fact worth pushing too).
-const ARGO_PUSH_INTERVAL_MS = 10 * 60 * 1000;
-setInterval(() => void pushOverviewToArgo("timer"), ARGO_PUSH_INTERVAL_MS);
+// pending).
+initJobStore({ executor: executeJob });
 
 // Kuma push heartbeat: `down` with the reason when a route is degraded or the queue unhealthy,
 // else `up`. After initJobStore so the first health read sees a booted store; it keeps pushing
