@@ -17,8 +17,6 @@ import {
   usageLane,
   workerBaseEnv,
 } from "./worker-shared.ts";
-import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import {
   isClaudeModel,
   withModel,
@@ -202,44 +200,6 @@ function describeTool(item: { name?: string; input?: Record<string, unknown> }):
     return `${name} ${path.split("/").pop()}`;
   }
   return name;
-}
-
-// ── Progress helper ────────────────────────────────────────────────────────────
-
-/** The MCP tool handler `extra` param, exactly as the SDK hands it to a `registerTool`
- *  callback. Using the SDK's own type (rather than a hand-rolled structural subset) keeps
- *  `sendNotification`'s contravariant parameter compatible: the SDK expects a typed
- *  `ServerNotification`, which a minimal `{ method, params }` shape cannot satisfy. */
-type McpExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
-
-/** Build an onProgress callback from MCP extra. Returns undefined if the client didn't request progress. */
-export function mcpProgressCallback(extra: McpExtra): SessionOptions["onProgress"] | undefined {
-  const token = extra._meta?.progressToken;
-  if (token === undefined) return undefined;
-  return (progress, total, message) => {
-    extra
-      .sendNotification({
-        method: "notifications/progress",
-        params: { progressToken: token, progress, total, message },
-      })
-      .catch(() => {}); // best-effort, don't crash if client disconnected
-  };
-}
-
-/**
- * Keep a synchronous (non-runSession) MCP handler alive past the SDK's 60s client
- * timeout by emitting a progress heartbeat every 15s. Use for direct-fetch tools
- * (read_image, read_drawing). Returns a cleanup fn — call it in a
- * `finally`. No-op when the client didn't request progress.
- */
-export function mcpHeartbeat(extra: McpExtra, label: string): () => void {
-  const onProgress = mcpProgressCallback(extra);
-  if (!onProgress) return () => {};
-  const t0 = Date.now();
-  const id = setInterval(() => {
-    onProgress(0, 0, `${label} ${Math.round((Date.now() - t0) / 1000)}s`);
-  }, 15_000);
-  return () => clearInterval(id);
 }
 
 // ── Lenient JSON extraction ───────────────────────────────────────────────────

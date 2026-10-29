@@ -2,10 +2,10 @@
 
 Job-queue daemon for agent work on the Mac mini: an always-on HTTP server (`:7705`,
 loopback only, LaunchAgent `com.jkrumm.agent-gateway`) that hosts a durable job queue,
-plus an MCP stdio server (`server/mcp.ts`) that every Claude Code session spawns to submit
-work to it. Tools: `dispatch`, `overview`, `narrative`,
-`read_image`, `read_drawing`, `job_status`/`job_wait`. `check`, `review`, `prose`, `excalidraw_diagram`
-and `otel` moved to agent-workflows (`agw check`, `agw review`, `agw prose`, `agw diagram`, the `/otel` skill). Each long tool
+reached through `POST /api/jobs` and the `agw-legacy` CLI (`agw-legacy dispatch`, `status|wait|cancel|steer`).
+The MCP server is gone (agent-workflows concept §10/§11 P5, 2026-10-29): `check`, `review`, `prose`, `excalidraw_diagram`
+and `otel` moved to agent-workflows (`agw check`, `agw review`, `agw prose`, `agw diagram`, the `/otel` skill), and
+Claude Code no longer registers an `agent-gateway` MCP server. Each long job
 runs as a background job in a worker session (OpenCode by default for dispatch, `claude -p` elsewhere, per the route's
 harness) on the model and backend the routing table assigns it. Mini-only by design — see the dotfiles global CLAUDE.md.
 
@@ -28,9 +28,6 @@ that 60s cap. Full story: `docs/deployment.md` § Two shutdown paths, two window
 sessions are detached, not drained.
 
 Never start the server by hand (`bun server/index.ts`) — the LaunchAgent owns the port.
-The MCP server is registered at user scope by dotfiles' `make setup`
-(`claude mcp add --scope user agent-gateway -- bun run ~/SourceRoot/agent-gateway/server/mcp.ts`).
-A tool **schema** change needs an MCP reconnect (`/mcp`), not just `make reload`.
 A **plist** change (`com.jkrumm.agent-gateway.plist`) needs `make install-agent`
 (`launchctl bootstrap`) — `make reload` only signals the already-loaded job definition and
 refuses if it detects the tracked plist has drifted from the installed one.
@@ -75,7 +72,7 @@ Logs: `~/Library/Logs/agent-gateway.jsonl` (structured, both processes), `agent-
 | `OPENCODE_SAFE_TIMEOUT` (120) | seconds before `scripts/opencode-safe` (installed as `opencode-safe` by `make install-cli`) kills the opencode it wraps; reads `IU_OPENAI_BASE`/`IU_BASE_URL`/Keychain for its 5 s preflight, exits 75 when unreachable |
 | `ARGO_URL` | Argo API base for the overview push (default `https://argo.jkrumm.com/api`) |
 
-The HTTP server gets `.env` from Bun's cwd auto-load; the MCP process reads the same file
+The HTTP server gets `.env` from Bun's cwd auto-load; the `agw-legacy` CLI reads the same file
 through `server/lib/load-env.ts`. Every routing/backend flag is read at module load —
 `make reload` applies it.
 

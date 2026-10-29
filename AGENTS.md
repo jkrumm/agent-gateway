@@ -9,13 +9,13 @@ an explicit `exclude agent-gateway`: the job API has no auth, so a tailnet twin
 would let any tag:mac/phone/tablet node `POST /api/jobs` with `dispatch
 implement`. Don't remove that exclusion.
 
-**Renamed 2026-10-09.** CLI `agw` (renamed `agw-legacy` 2026-10-28), MCP server and tools `mcp__agent-gateway__*`, env prefix `AGENT_GATEWAY_*`, Caddy door `agent-gateway.test`. The persisted usage-tracker contract followed on 2026-10-13: `agent-gateway-iu` and `agent-gateway-sessions` sinks, `src: "agent-gateway"`, `agent-gateway:<tool>` lanes (stored rows and sink files migrated in place).
+**Renamed 2026-10-09.** CLI `agw` (renamed `agw-legacy` 2026-10-28; the MCP server and its `mcp__agent-gateway__*` tools were deleted 2026-10-29), env prefix `AGENT_GATEWAY_*`, Caddy door `agent-gateway.test`. The persisted usage-tracker contract followed on 2026-10-13: `agent-gateway-iu` and `agent-gateway-sessions` sinks, `src: "agent-gateway"`, `agent-gateway:<tool>` lanes (stored rows and sink files migrated in place).
 
 Bun loads `.env` automatically from the `agent-gateway/` directory — all env vars
 (`PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH`, `GITHUB_TOKEN`, `AGENT_GATEWAY_*`,
 `RESEARCH_GATEWAY_*`) live there, listed in `README.md`. That auto-load is
-cwd-based, so the **MCP process** (spawned with the calling session's cwd)
-imports `server/lib/load-env.ts` first thing in `mcp.ts` to read the same
+cwd-based, so the **`agw-legacy` CLI** (runs in the caller's cwd)
+imports `server/lib/load-env.ts` first thing in `bin/agw-legacy.ts` to read the same
 file — existing environment always wins over the file.
 
 ## Validate
@@ -31,8 +31,8 @@ way lint and tests do.
 (retried for ~15 s while the boot settles). On a failed verify it rolls back:
 only with a clean working tree, `git switch --detach HEAD~1` + `make reload` +
 verify, and prints loudly that the checkout is detached (return with `git switch
-master`); with a dirty tree it refuses and says how to recover. `FORCE=1` /
-`RESTART_MCP=1` pass through to `reload`, whose refusals (running jobs, plist
+master`); with a dirty tree it refuses and says how to recover. `FORCE=1`
+passes through to `reload`, whose refusals (running jobs, plist
 drift) stay intact — `scripts/deploy.sh`. Those refusals come from
 `scripts/reload-preflight.sh` (exit 3, which `make` would collapse to 2, so deploy.sh
 runs it directly): a refusal exits 1 with no rollback since the old server was never
@@ -108,9 +108,6 @@ Full forensic story (why BTM denies this specific label/executable):
 
 - **Never start the server standalone** — LaunchAgent only; `make dev`/`make start`
   are broken on purpose (§Deploy).
-- **MCP schema changes need a client reconnect** — `make reload` does not restart the
-  MCP process; Zod strips the unknown field until `/mcp` reconnects
-  (§MCP Server).
 - **`tsc` runs on `tsconfig.server.json`, not the root config** — `tsconfig.json` has
   `files: []`; `bun run typecheck` (part of `make check`) names the project (§Validate).
 - **Logs live in `~/Library/Logs`, never `/tmp`** (§Deploy).
@@ -120,40 +117,30 @@ Full forensic story (why BTM denies this specific label/executable):
   macOS BTM workarounds** — don't "simplify" them (§Deploy).
 - **Edit the tracked plist, never the live one** — `make install-agent` overwrites it.
 
-## MCP Server
+## Job API and CLI
 
-agent-gateway exposes workflow tools (`dispatch`, `update_pr`, `decide`, `overview`,
-`narrative`, `triage`) plus the synchronous multimodal tools (`read_image`,
-`read_drawing`) plus the job-polling tools
-(`job_status`, `job_wait`, `job_steer`, `job_cancel`) as an MCP server — a **separate process** from the
-LaunchAgent, spawned on-demand by Claude Code via stdio transport.
-`check`, `review`, `prose`, `excalidraw_diagram` and `otel` are no longer MCP tools — they moved to
+**The MCP server is gone** (deleted 2026-10-29, agent-workflows concept §10/§11 P5): no stdio entrypoint,
+no tool-wrapper directory, no `claude mcp add` registration. Claude Code and Hermes reach the platform
+through `agw`; what remains here is `dispatch`, reachable as `agw-legacy dispatch` or `POST /api/jobs`,
+plus job `status|wait|cancel|steer`, `routing`, `policy` and `health`. The other handlers
+(`overview`, `narrative`, `triage`, `decide`, `update_pr`) and the multimodal helpers stay as HTTP job
+routes until the Wave 11 shrink. `check`, `review`, `prose`, `excalidraw_diagram` and `otel` moved to
 agent-workflows (`agw check`, `agw review`, `agw prose`, `agw diagram`, the `/otel` skill); the HTTP job
 routes and the `agw-legacy check|review` CLI commands remain for its eval harness. The prose pipeline
 (`server/jobs/handlers/prose.ts`) stays as a library only `narrative` calls, not a job tool.
-`GET /api/agents` (below) is HTTP-only, deliberately outside this MCP
-surface — see `### agents, overview, narrative`.
+`GET /api/agents` (below) is HTTP-only.
 
-Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in
-`server/mcp/tools/`; the actual execution logic + schemas live in
-`server/jobs/handlers/`; skill prompts in `server/skills/`.
+The kept `server/mcp/` directory is **not** an MCP server: it holds the worker-session machinery the
+job server imports (`session-runner.ts`, `session-core.ts`, `opencode-*.ts`, `worker-shared.ts`,
+`logger.ts`) and was left in place to avoid churn in a frozen repo. Execution logic +
+schemas live in `server/jobs/handlers/`; skill prompts in `server/skills/`. Handler-logic and
+skill-prompt edits need only `make reload`.
 
-**Deploying schema changes:** `make reload` only restarts the launchd HTTP
-server (job execution + skill-prompt reads, which load from disk per-run). It
-does NOT restart the MCP process — that's owned by the calling Claude Code
-session. So an edited tool **input/output schema** (e.g. a new
-`commands`/`validateCmd` field) is not visible to a connected client until
-its MCP reconnects; until then the SDK's Zod validation silently **strips**
-the unknown field before it reaches the handler. After changing a tool
-schema, reconnect `/mcp` (or restart the session) — not just `make reload`.
-Skill-prompt and handler-logic edits need only `make reload`.
-
-### CLI — the same jobs, without an MCP client
+### CLI — the way in
 
 `bin/agw-legacy.ts` (`make install-cli` → `~/.local/bin/agw-legacy`) is a plain
-HTTP client of the routes below — **no MCP layer**, so OpenCode, Codex, a
-shell, a Makefile or cron can drive the same work Claude Code drives through
-MCP:
+HTTP client of the routes below, so Claude Code, OpenCode, Codex, a
+shell, a Makefile or cron all drive the same work:
 
 ```bash
 agw-legacy dispatch --repo warden --tier implement --workspace in-place 'the brief'
@@ -166,26 +153,23 @@ agw-legacy jobs --running · status|wait|cancel <jobId> · steer <jobId> <text> 
 (progress stays on stderr); `--timeout` is opt-in, the default wait has no
 ceiling (`.claude/rules/agent-limits.md`). Exit codes: **0** done · **1**
 failed/interrupted/cancelled · **2** usage error or `dispatch refused: …` ·
-**3** server unreachable. Same policy, same queue, same concurrency cap as the
-MCP door — the CLI adds no capability, only reach.
+**3** server unreachable. Same policy, same queue, same concurrency cap as a raw
+`POST /api/jobs`.
 
-### Async job model (durable, off the MCP transport)
+### Async job model (durable)
 
 The long tools (`dispatch`/`overview`/`narrative`/`triage`/`decide`) do
-**not** block the MCP call. A 13-minute worker run held open as a single MCP
-request destabilizes the stdio transport (and the SDK's 60s client timeout).
-Instead:
+**not** block the caller. Instead:
 
-1. The MCP tool **submits a job** to the always-on HTTP server
-   (`POST /api/jobs`) and returns `{ jobId, status }` immediately. (Submit still runs the
+1. The caller **submits a job** to the always-on HTTP server
+   (`POST /api/jobs`) and gets `{ jobId, status }` immediately. (Submit still runs the
    synchronous refusals; a `dispatch` with `branch` adds one `git ls-remote` against origin,
-   capped at 5 s, under the MCP client's 10 s submit abort.)
+   capped at 5 s, under the CLI's 10 s submit abort.)
    **Job caller.** Every job may carry a `caller`: a lowercase slug
    (`^[a-z0-9][a-z0-9-]{0,31}$`, e.g. `iris`) naming the consumer that submitted it, so
    spend is attributable per consumer. It is **envelope-level**, not a tool param:
-   `POST /api/jobs {"tool":"decide","params":{…},"caller":"iris"}`; MCP: the optional `caller`
-   arg on every job tool (lifted out before submit); CLI: `agw-legacy --caller iris …`. A bad slug is a
-   400 (`<tool> refused: caller must match …`; any non-slug value incl. `null`, empty or non-string), no row created; `agw-legacy` rejects it before sending (exit 2). One validator, `isValidCaller` in `server/lib/caller.ts`, serves the route, the MCP input and the CLI. It is stored on the `jobs` row
+   `POST /api/jobs {"tool":"decide","params":{…},"caller":"iris"}`; CLI: `agw-legacy --caller iris …`. A bad slug is a
+   400 (`<tool> refused: caller must match …`; any non-slug value incl. `null`, empty or non-string), no row created; `agw-legacy` rejects it before sending (exit 2). One validator, `isValidCaller` in `server/lib/caller.ts`, serves the route and the CLI. It is stored on the `jobs` row
    (nullable `caller` column, append-only migration), immutable, and returned as `caller` in
    `GET /api/jobs/:id` / the submit response (omitted when absent). `executeJob` opens an
    `AsyncLocalStorage` context (`server/lib/caller.ts`), and both usage sinks read it where they
@@ -197,27 +181,19 @@ Instead:
    persists state to **bun:sqlite** (`~/.local/share/agent-gateway/jobs.db`), not
    `/tmp` for the same sweep reason as the logs (`server/jobs/store.ts`). The
    server binds **`127.0.0.1:7705` only** — every consumer (herdr pane,
-   Hermes, the MCP child, `fetch_usage.py`, devhost-health) is local and the
+   Hermes, `fetch_usage.py`, devhost-health) is local and the
    API carries no auth of its own.
-3. The caller polls **`job_wait({ jobId })`** — a long-poll (~50s,
-   heartbeated) that returns the result the moment the job finishes, or
-   `stillRunning: true` to call again. `job_status` is a one-shot peek.
-   An explicit `maxWaitMs` may go up to **29 min**, turning a `review`'s ~9
-   round trips into one — but only because this server's `~/.claude.json`
-   entry carries a matching `timeout` (1800000). **The two are one setting in
-   two files**: without the client half, a long wait is aborted at 60s as a
-   hard error, where the 50s default would have returned a clean
-   `stillRunning`. Leave the default alone; raise it per call.
+3. The caller polls **`GET /api/jobs/:id`** (`agw-legacy status <jobId>` is a one-shot peek,
+   `agw-legacy wait <jobId>` blocks until the job is terminal; the default wait has no ceiling).
 
-While a job runs, `job_status`/`job_wait` also expose live worker progress
+While a job runs, the job view also exposes live worker progress
 derived from the worker's stream-json output: `turns`, `lastAction` (e.g.
 `"Edit store.ts"`), and **`idleMs`** — ms since the last worker event. A
 _large and still-growing_ `idleMs` means the session may be stuck — peek at
 `git status` rather than waiting indefinitely.
 
-Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on
-`/mcp` disconnect, but the HTTP server is launchd-managed. Jobs survive MCP
-reconnects; disk persistence survives an HTTP restart: on boot `recover()`
+Why the HTTP server hosts jobs (not the calling process): the HTTP server is launchd-managed,
+so jobs survive any client disconnecting; disk persistence survives an HTTP restart: on boot `recover()`
 re-queues an interrupted `check`/`overview`/`narrative`/`review`/`triage`/`decide` **once**
 (all read-only) and marks everything else `interrupted`
 (`dispatch` is never auto re-run — an `implement` episode may already have
@@ -305,18 +281,14 @@ across a reload, not across `git gc` weeks later. Pending-time accounting: `reco
 requeued job never trips the 15-min rule; `job.requeue` logs `detached`/`detachedForMs`, `job.recover`
 logs `detachedResumed`, `job.start` logs `pendingMs`. A detached session whose job is NOT resumed
 (recover → `interrupted`/`cancelled`) is interrupted on boot. Cancel still interrupts.
-**`POST /api/jobs/:id/steer {text}`** (MCP `job_steer`, CLI `agw-legacy steer`)
+**`POST /api/jobs/:id/steer {text}`** (CLI `agw-legacy steer`)
 injects `delivery: steer` text into a RUNNING dispatch's session (409 when nothing is live; logged
-`job.steer`). A new MCP tool needs a `/mcp` reconnect before a connected client sees it.
+`job.steer`).
 
-**`POST /api/jobs/:id/cancel`** (MCP: `job_cancel`, CLI: `agw-legacy cancel`) cancels one job — `pending` lands `cancelled`
+**`POST /api/jobs/:id/cancel`** (CLI: `agw-legacy cancel`) cancels one job — `pending` lands `cancelled`
 immediately, `running` gets a best-effort SIGTERM (`terminateSessionsForJob`)
 and lands `cancelled` once the worker exits, never `failed` and never counted
-in `failedLastHour`; an already-terminal job answers 409, which `job_cancel` returns as `outcome: already_terminal`, not an error. The
-`cancelled` value is a widened enum on `job_status`/`job_wait`'s output schema
-too, so per the MCP-schema-change rule above, an already-connected client needs
-an `/mcp` reconnect (or session restart) before it can poll a cancelled job
-without its Zod validation silently stripping the field.
+in `failedLastHour`; an already-terminal job answers 409.
 
 **Alerting (Wave 4).** `server/lib/health.ts` `computeHealth()` is the payload behind
 `/api/jobs/health` plus `pageable`/`pageReason` (`!ok` or any `degradedRoutes`) and
@@ -337,13 +309,6 @@ the removed proactive quota pre-check.
 no result; tool, status, timings, attempts, backend, model, 300-char error head, repo) is written
 at every terminal transition and kept 90 days. `jobStatsSummary(days)` in `server/jobs/store.ts`
 aggregates it.
-
-**MCP Tasks extension** (`io.modelcontextprotocol/tasks`, SEP-2663, Final; verified 2026-10-09).
-TypeScript SDK 1.x does not implement it (v1 tops out at spec 2025-11-25, only the legacy
-`.experimental.tasks` API), so this server stays on stdio + SDK 1.x. When an SDK ships it:
-`jobId` ≙ `taskId`, `job_wait` ≙ `tasks/get` polling (no `tasks/result` exists in the extension),
-`job_cancel` ≙ `tasks/cancel`; status map pending/running → `working`, done → `completed`,
-failed/interrupted → `failed`, cancelled → `cancelled`.
 
 Job lifecycle events log to `~/Library/Logs/agent-gateway.jsonl` (`job.create` /
 `job.start` / `job.done` / `job.fail` / `job.cancelled` / `job.recover` /
@@ -454,8 +419,8 @@ The Opus ids are `singleShotOnly` in the registry: refused on every route but `p
 other tool's per-job `model`; `AGENT_GATEWAY_MODEL_PROSE_WRITE` must name an anthropic-wire id (refused at startup otherwise). `verdictFirst: false` (an author who builds criteria → candidates → verdict) keeps the section order and drops the `verdict_first` score (stripped in code); the writer's hard rule is to add no recommendation, claim or fact the source lacks (the reviewer flags it as an `invented_content` note); `context` (≤8000 chars, the surrounding outline) rides in its own nonce-fenced read-only block to both calls. The output carries `format`, `mediumNote` (the `MEDIUM_NOTE` table, also printed in the writer's system prompt) and a flat `usage` total plus `usageByCall: {writer, reviewer}`, each with `costUsd` = the gateway's own figure, else `usageCostUsd` (models.ts: registry rates, cache reads at `rate.cacheRead` or 0.1x `in`). English lexicon
 rules never run on German text; a draft whose language cannot be told runs the language-agnostic rules only.
 
-Higher-order tools reuse capabilities at the **code level, not via MCP
-recursion**: `review` angle workers can validate external library/API claims
+Higher-order tools reuse capabilities at the **code level, not via nested
+jobs**: `review` angle workers can validate external library/API claims
 against the standalone **research-gateway** (a bounded bearer-auth `curl`,
 gated on `RESEARCH_GATEWAY_URL`/`RESEARCH_GATEWAY_TOKEN`) and self-validate
 (`check` capability) — no nested jobs, no semaphore deadlock.
@@ -465,7 +430,7 @@ gated on `RESEARCH_GATEWAY_URL`/`RESEARCH_GATEWAY_TOKEN`) and self-validate
 Every worker session (`runSession`) and the adversary text call take
 `{ model, backend, fallback, thinkingTokens }` from one per-tool table;
 nothing else hardcodes an id. Handlers pass `route: routeFor("<tool>")`, the
-MCP tool descriptions print the same route under `MODEL:`, and **`GET
+**`GET
 /api/routing`** shows the effective table plus every applied or refused
 override.
 
@@ -662,7 +627,7 @@ Two constraints carried over regardless of backend:
 
 ### Triage — single-shot, no worker session
 
-`triage` (`server/jobs/handlers/triage.ts`, MCP tool + `agw-legacy triage
+`triage` (`server/jobs/handlers/triage.ts`, `agw-legacy triage
 --prompt-file F --schema-file F`) is one tool-less completion, not a session:
 `singleShotJson` (`server/lib/single-shot.ts`) calls `textComplete` over the IU
 OpenAI transport on route `triage` (`transport: "iu-openai"`, the cheap IU model,
@@ -690,7 +655,7 @@ Max reverse fallback after an IU failure — so it works with that
 repo's own `AGENTS.md`/`CLAUDE.md`/rules/skills in context. Callers are interactive
 sessions and other automation; an observer like Hermes files unattended work through
 `agw-legacy dispatch` or an `rd wave` tab, not directly. One episode, one verdict. Mid-run, the caller can inject new facts
-with `job_steer` / `agw-legacy steer` (a running OpenCode episode only); anything beyond that —
+with `agw-legacy steer` (a running OpenCode episode only); anything beyond that —
 redirecting the whole task — is an `rd wave` tab + `rd say`, not this.
 
 **Tiers.** `investigate` (read-only → verdict), `author` (read-only → verdict
@@ -730,7 +695,7 @@ pinned to the fetched tip and the existing open PR is updated (`pr_updated`), no
 Every implement push first rebases onto a freshly fetched default branch (fetch must
 succeed); a conflict aborts, bundles the commits into the salvage dir and returns
 `conflict` — the caller re-dispatches, nothing is hand-resolved. **`update_pr {cwd, pr}`**
-(job tool, MCP tool, `agw-legacy update-pr --pr N`) is the same rebase + checks + lease push
+(job tool, `agw-legacy update-pr --pr N`) is the same rebase + checks + lease push
 for an open same-repo `dispatch/*` PR targeting the default branch → `{status:
 updated|up_to_date|conflict, headSha, checks}`; checks are skipped when nothing moved and a
 red result is still pushed (the merge train reads `checks`). **One implement-class episode
@@ -820,7 +785,7 @@ so context quality is the caller's job (warden builds it, `lifecycle/shadow.py`)
 (decision.ts) holds each known model's rate and a conservative `maxStateChars` cap; the state is
 cut to it and `truncatedChars` says how much. Cost is computed from the rate (the provider drops
 IU's own `usage.cost`) and recorded to the `agent-gateway-iu` sink as tool `decide`. Reach:
-MCP tool `decide` (a new tool: `/mcp` reconnect), CLI `agw-legacy decide --state-file F --questions-file F
+CLI `agw-legacy decide --state-file F --questions-file F
 [--model M]`, or `POST /api/jobs {tool:"decide"}`. Boot recovery
 re-queues it once, like `triage`. The single request has a 30 min hang guard (agent-limits rule),
 no retry here — the caller owns retries.
@@ -904,51 +869,29 @@ schema JSON. It retries once with a JSON-only directive, then falls back to a
 `needs-human` verdict preserving the raw text (`SessionResult.rawText`) — a
 multi-minute run is never discarded as a bare parse error.
 
-### Multimodal tools — direct IU OpenAI transport (synchronous)
+### Vision transport — library only
 
-`read_image` and `read_drawing` are **not** `runSession()` worker sessions
-and **not** async jobs — plain `fetch` calls to the IU unified endpoint's
-**OpenAI transport** (`/openai/v1/...`), stateless, single call well under
-the 60s SDK timeout. Billed IU per-token, zero Max.
-
-- Credentials (`server/lib/iu-openai.ts`): Keychain (`claude-sdk-api-key`,
-  `claude-sdk-base-url`) or `IU_API_KEY`/`IU_BASE_URL` env; OpenAI base
-  derived from the Anthropic base (`/anthropic` → `/openai/v1`).
-- Model defaults to a fast vision model (see `GET /api/routing`) — a non-EU vendor, fine for
-  git-committed/non-sensitive content, not PII — overridable via
-  `AGENT_GATEWAY_MODEL_READ_IMAGE`/`AGENT_GATEWAY_MODEL_READ_DRAWING` like every other
-  routed tool (`server/lib/routing.ts`); a `AGENT_GATEWAY_BACKEND_*` override is
-  refused instead, since these run over the fixed `iu-openai` transport.
-- `read_image` — vision read of any image (SVGs rasterized first via headless
-  Chrome, `server/lib/chrome.ts`). Sampled at the provider's default
-  temperature — no `temperature` on the wire, since the gateway 503s on a
-  non-default value for the OpenAI GPT family and VISION may be re-pointed there.
-- `read_drawing` — composite: rasterize+read the `.svg` AND deterministically
-  parse the paired `.excalidraw` JSON, merged into one synthesis. Retires the
-  dotfiles `/read-drawing` skill's `claude_iu` path.
-- `generate_image` was retired 2026-07 in favor of the `image-gen` gateway.
-- These bypass `session-runner`, so usage is logged separately:
-  `~/.local/share/usage-tracker/agent-gateway-iu.jsonl` (`recordIuUsage`), ingested
-  by usage-tracker's `agent-gateway-iu` collector. Reasoning tokens (Gemini bills
-  thinking spend outside `completion_tokens`) are derived via
-  `normalizeUsage`, not reported by the gateway — dropping this understated
-  cost several-fold. `cost_usd` is written only when the gateway reports `usage.cost`;
-  otherwise it stays null and usage-tracker prices the row from its own table (off-peak
-  aware) — it treats any numeric `cost_usd` as reported, so never write an estimate here.
+`read_image` and `read_drawing` were MCP-only tools and were deleted with the MCP server
+(2026-10-29), along with the Chrome SVG rasterizer (`server/lib/chrome.ts`, `image.ts`) and the
+`.excalidraw` parser they used; neither was ever an HTTP job. What stays is the transport:
+`server/lib/iu-openai.ts` (`visionRead`, `recordIuUsage`) over the IU unified endpoint's
+**OpenAI transport**, and the `read_image`/`read_drawing` rows in the routing table, left in place
+for the Wave 11 shrink. Usage is logged outside `session-runner`:
+`~/.local/share/usage-tracker/agent-gateway-iu.jsonl` (`recordIuUsage`), ingested
+by usage-tracker's `agent-gateway-iu` collector. Reasoning tokens (Gemini bills
+thinking spend outside `completion_tokens`) are derived via
+`normalizeUsage`, not reported by the gateway — dropping this understated
+cost several-fold. `cost_usd` is written only when the gateway reports `usage.cost`;
+otherwise it stays null and usage-tracker prices the row from its own table (off-peak
+aware) — it treats any numeric `cost_usd` as reported, so never write an estimate here.
 
 ```bash
-# Register at user scope — handled by `make setup` in ~/SourceRoot/dotfiles.
-# Manual fallback:
-claude mcp add --scope user agent-gateway -- bun run "$HOME/SourceRoot/agent-gateway/server/mcp.ts"
-
-# Structured logs (both HTTP + MCP processes write here)
+# Structured logs (the HTTP server and the agw-legacy CLI write here)
 tail -f ~/Library/Logs/agent-gateway.jsonl | jq .
-tail -f ~/Library/Logs/agent-gateway.jsonl | jq 'select(.source == "mcp")'
 ```
 
-Inner sessions spawned by MCP tools use `claude -p` via `session-runner.ts`,
+Worker sessions use `claude -p` or OpenCode via `session-runner.ts`,
 model and backend per tool from `server/lib/routing.ts` (`GET /api/routing`).
-See `.claude/rules/mcp-tools.md` for authoring conventions.
 
 ## Git Workflow
 

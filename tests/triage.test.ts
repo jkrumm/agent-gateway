@@ -1,5 +1,5 @@
 // `triage`: handler (server/jobs/handlers/triage.ts), job wiring (types / executor / store
-// recovery) and the MCP registration. The model call is stubbed at `globalThis.fetch`, as in
+// recovery). The model call is stubbed at `globalThis.fetch`, as in
 // tests/single-shot.test.ts.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -13,12 +13,10 @@ process.env.AGENT_GATEWAY_IU_USAGE_LOG = join(
 process.env.IU_API_KEY = "test-key";
 process.env.IU_BASE_URL = "https://iu.example.com/anthropic";
 
-const { runTriage, TRIAGE_INPUT } = await import("../server/jobs/handlers/triage.ts");
+const { runTriage } = await import("../server/jobs/handlers/triage.ts");
 const { executeJob } = await import("../server/jobs/executor.ts");
 const { recoveryStatusFor } = await import("../server/jobs/store.ts");
 const { isJobTool } = await import("../server/jobs/types.ts");
-const { registerTriageTool } = await import("../server/mcp/tools/triage.ts");
-const { describeRoute, routeFor } = await import("../server/lib/routing.ts");
 
 const originalFetch = globalThis.fetch;
 let bodies: Record<string, unknown>[] = [];
@@ -138,26 +136,5 @@ describe("triage job wiring", () => {
     )) as { result: unknown; attempts: number };
     expect(result.result).toEqual({ action: "new" });
     expect(result.attempts).toBe(1);
-  });
-});
-
-describe("triage MCP tool", () => {
-  test("registers through registerJobSubmitTool with the handler's input shape and the route in its description", () => {
-    const registered: { name: string; config: { description: string; inputSchema: object } }[] = [];
-    const server = {
-      registerTool: (name: string, config: { description: string; inputSchema: object }) => {
-        registered.push({ name, config });
-      },
-    };
-    registerTriageTool(server as never);
-    expect(registered).toHaveLength(1);
-    expect(registered[0]?.name).toBe("triage");
-    expect(Object.keys(registered[0]?.config.inputSchema ?? {})).toEqual([
-      ...Object.keys(TRIAGE_INPUT.shape),
-      "caller",
-    ]);
-    expect(registered[0]?.config.description).toContain(
-      `MODEL: ${describeRoute(routeFor("triage"))}`,
-    );
   });
 });
