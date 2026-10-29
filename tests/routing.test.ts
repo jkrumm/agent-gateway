@@ -5,7 +5,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildRoutingTable,
-  claudeSafeRoute,
   DEEPSEEK_FLASH,
   DEEPSEEK_PRO,
   DEEPSEEK_V41_FLASH,
@@ -17,6 +16,7 @@ import {
   logStaleQuotaEnvVars,
   MAX_ONLY_TOOLS,
   maxOnlyModelRefusal,
+  NEVER_MAX_TOOLS,
   ROUTED_TOOLS,
   routeFor,
   routeForReviewAngle,
@@ -110,7 +110,7 @@ describe("buildRoutingTable defaults", () => {
     ]);
   });
 
-  test("otel: Sonnet on max with the quota fallback to iu (the JUDGE tier — deliberately NOT on glm, see routing.ts); claudeSafeRoute() is the same seat", () => {
+  test("otel: Sonnet on max with the quota fallback to iu (the JUDGE tier — deliberately NOT on glm, see routing.ts)", () => {
     expect(routes.otel).toEqual({
       model: SONNET,
       backend: "max",
@@ -119,27 +119,62 @@ describe("buildRoutingTable defaults", () => {
       harness: "claude",
       variant: undefined,
     });
-    expect(claudeSafeRoute()).toEqual(routes.otel);
   });
 
-  test("review (synthesis + keyless angles): the CLASSIFY shape since Wave 10 — Haiku 5.5 EU via opencode on iu with the Sonnet-on-max fallback, no thinking budget", () => {
+  test("review (synthesis + keyless angles): the CLASSIFY shape since Wave 10 minus the Max lane (owner direction 2026-10-29) — Haiku 5.5 EU via opencode on iu, no fallback, no thinking budget", () => {
     expect(routes.review).toEqual({
       model: HAIKU_5_5,
       backend: "iu",
-      fallback: { backend: "max", model: SONNET },
+      fallback: null,
       transport: "session",
       thinkingTokens: undefined,
       harness: "opencode",
       variant: undefined,
     });
-    expect(routes.review).toEqual(routes.check);
+    expect(routes.review).toEqual({ ...routes.check, fallback: null });
   });
 
-  test("review.ts falls back to claudeSafeRoute() when the live checkout carries its own opencode config — that route must run on the claude harness", () => {
-    // runReview swaps an angle onto this route when `liveOpencodeConfig` is set (an opencode
-    // plugin there would execute code regardless of permissions), so it must never be opencode.
-    expect(claudeSafeRoute().harness).toBe("claude");
-    expect(routeFor("review").harness).toBe("opencode");
+  test("review never spends Max: every review key resolves with no max backend and no max fallback", () => {
+    const reviewKeys = ROUTED_TOOLS.filter((t) => t === "review" || t.startsWith("review_"));
+    expect([...NEVER_MAX_TOOLS].sort()).toEqual([...reviewKeys].sort());
+    for (const tool of reviewKeys) {
+      expect(routes[tool].backend).toBe("iu");
+      expect(routes[tool].fallback).toBeNull();
+    }
+  });
+
+  test("a max backend override on any review key is refused and the route stays on iu", () => {
+    for (const tool of NEVER_MAX_TOOLS) {
+      const key = tool.toUpperCase();
+      const { routes: r, overrides } = buildRoutingTable({
+        [`AGENT_GATEWAY_MODEL_${key}`]: SONNET,
+        [`AGENT_GATEWAY_BACKEND_${key}`]: "max",
+      });
+      expect(r[tool].backend).toBe("iu");
+      expect(r[tool].fallback).toBeNull();
+      expect(overrides.some((o) => o.tool === tool && o.field === "backend" && o.refused)).toBe(
+        true,
+      );
+    }
+    const { routes: r, overrides } = buildRoutingTable({ AGENT_GATEWAY_BACKEND_REVIEW: "max" });
+    expect(r.review.backend).toBe("iu");
+    expect(overrides[0]?.refused).toContain("never runs on Max");
+  });
+
+  test("a per-job Claude model on a review route stays on iu with no fallback", () => {
+    for (const tool of ["review", "review_angle_qa"] as const) {
+      const r = withModel(routeFor(tool), SONNET);
+      expect(r.backend).toBe("iu");
+      expect(r.fallback).toBeNull();
+    }
+  });
+
+  test("non-review routes keep their Max reverse lane", () => {
+    for (const tool of ["check", "overview", "narrative", "excalidraw"] as const) {
+      expect(routes[tool].fallback).toEqual({ backend: "max", model: SONNET });
+    }
+    expect(routes.dispatch.fallback).toEqual({ backend: "max", model: SONNET });
+    expect(routes.dispatch_editorial.fallback).toEqual({ backend: "max", model: SONNET });
   });
 
   test("review_ocr: deepseek-v4.1-flash on iu, no fallback, over the fixed external-iu transport", () => {
@@ -342,12 +377,12 @@ describe("buildRoutingTable env overrides", () => {
     expect(routes.otel.fallback).toBeNull();
   });
 
-  test("a gateway model override on an iu angle route stays on iu and keeps the Sonnet-on-max reverse lane", () => {
+  test("a gateway model override on an iu angle route stays on iu with no Max lane", () => {
     const { routes, overrides } = buildRoutingTable({
       AGENT_GATEWAY_MODEL_REVIEW_ANGLE_FRONTEND: DEEPSEEK_FLASH,
     });
     expect(routes.review_angle_frontend.backend).toBe("iu");
-    expect(routes.review_angle_frontend.fallback).toEqual({ backend: "max", model: SONNET });
+    expect(routes.review_angle_frontend.fallback).toBeNull();
     // iu is already the primary: no backend flip to report
     expect(overrides.some((o) => o.field === "backend")).toBe(false);
   });
@@ -672,7 +707,7 @@ describe("per-angle review routes", () => {
       expect(routes[key], key).toEqual({
         model: HAIKU_5_5,
         backend: "iu",
-        fallback: { backend: "max", model: SONNET },
+        fallback: null,
         transport: "session",
         harness: "opencode",
         variant: undefined,
@@ -680,7 +715,6 @@ describe("per-angle review routes", () => {
     }
     expect(routes.review_angle_frontend).toEqual(routes.review_angle_senior_dev);
     expect(routes.otel.harness).toBe("claude");
-    expect(routes.otel).toEqual(claudeSafeRoute());
   });
 
   test("angle ids map to their key; angles without a key (and unknown ids) fall back to review", () => {
@@ -725,7 +759,7 @@ describe("per-angle review routes", () => {
     expect(routes.review_angle_frontend).toEqual(defaults.review_angle_frontend);
   });
 
-  test("a model + harness override on an opencode angle swaps the model, stays on opencode and keeps the iu->max Sonnet fallback", () => {
+  test("a model + harness override on an opencode angle swaps the model, stays on opencode with no Max fallback", () => {
     const { routes, overrides } = buildRoutingTable({
       AGENT_GATEWAY_MODEL_REVIEW_ANGLE_FRONTEND: DEEPSEEK_V41_FLASH,
       AGENT_GATEWAY_HARNESS_REVIEW_ANGLE_FRONTEND: "opencode",
@@ -734,7 +768,7 @@ describe("per-angle review routes", () => {
       model: DEEPSEEK_V41_FLASH,
       backend: "iu",
       harness: "opencode",
-      fallback: { backend: "max", model: SONNET },
+      fallback: null,
     });
     expect(overrides.some((o) => o.refused)).toBe(false);
     // The override is scoped: the JUDGE route (otel) keeps its shape.
@@ -770,7 +804,7 @@ describe("per-angle review routes", () => {
     ]);
   });
 
-  test("an operator can pin an ANGLE_OC angle back onto the review route (Sonnet on Max) via MODEL+BACKEND+HARNESS overrides", () => {
+  test("pinning an ANGLE_OC angle onto Max (MODEL+BACKEND+HARNESS) is refused on the backend; the claude harness runs on iu", () => {
     const { routes, overrides } = buildRoutingTable({
       AGENT_GATEWAY_MODEL_REVIEW_ANGLE_QA: SONNET,
       AGENT_GATEWAY_BACKEND_REVIEW_ANGLE_QA: "max",
@@ -778,11 +812,12 @@ describe("per-angle review routes", () => {
     });
     expect(routes.review_angle_qa).toMatchObject({
       model: SONNET,
-      backend: "max",
+      backend: "iu",
       harness: "claude",
+      fallback: null,
       variant: undefined,
     });
-    expect(overrides.some((o) => o.refused)).toBe(false);
+    expect(overrides.filter((o) => o.refused).map((o) => o.field)).toEqual(["backend"]);
   });
 
   test("a variant override on an opencode angle applies when the model exposes it, is refused when it does not; on a claude-harness angle it is refused", () => {
@@ -1022,16 +1057,6 @@ describe("logStaleQuotaEnvVars", () => {
       "AGENT_GATEWAY_MAX_WEEKLY_CEILING",
       "AGENT_GATEWAY_QUOTA_FILE_MAX_AGE_S",
     ]);
-  });
-});
-
-describe("claudeSafeRoute", () => {
-  test("is the claude-harness Sonnet-on-Max seat, a copy that cannot poison the next call", () => {
-    const route = claudeSafeRoute();
-    expect(route).toMatchObject({ model: SONNET, backend: "max", harness: "claude" });
-    route.model = "mutated";
-    if (route.fallback) route.fallback.backend = "max";
-    expect(claudeSafeRoute()).toMatchObject({ model: SONNET, fallback: { backend: "iu" } });
   });
 });
 

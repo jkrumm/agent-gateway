@@ -3,7 +3,7 @@ import { join } from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
 import { runSession, SessionDetachedError, zodValidator } from "../../mcp/session-runner.ts";
-import { claudeSafeRoute, routeFor, routeForReviewAngle } from "../../lib/routing.ts";
+import { routeFor, routeForReviewAngle } from "../../lib/routing.ts";
 import { textComplete, type IuUsage } from "../../lib/iu-openai.ts";
 import { dataBlock, newFenceNonce } from "../../lib/prompt-fence.ts";
 import { parseJsonLoose, singleShotJson } from "../../lib/single-shot.ts";
@@ -1165,6 +1165,28 @@ export async function runReview(
     );
   }
   if (branch != null) validateBranchRef(branch);
+  // Scope mode runs in the caller's LIVE checkout, which must never be stripped (another session
+  // may own those files), and a repo-local opencode config/plugin executes on load regardless of
+  // the permission profile. The only other route is Max (`claude -p`), and review never spends Max
+  // (owner direction 2026-10-29), so such a checkout is refused before any angle runs. Ref mode
+  // strips its throwaway worktree instead, so this is scope-mode only.
+  if (!refMode) {
+    const liveOpencodeConfig = opencodeRepoConfigPresent(cwd);
+    if (liveOpencodeConfig.length > 0) {
+      logger.warn(
+        {
+          event: "review.refused_opencode_config",
+          tool: "review",
+          project: cwd,
+          files: liveOpencodeConfig,
+        },
+        "refusing a scope-mode review of a checkout carrying its own opencode config",
+      );
+      throw new Error(
+        "this checkout carries its own opencode config; review it with agw review (agent-workflows)",
+      );
+    }
+  }
 
   // Shared liveness bump across this pipeline's many sessions. Per-session turn
   // counts would clobber under parallel angles, so we keep a single monotonic
@@ -1274,14 +1296,6 @@ export async function runReview(
       // Same base as fallow (shape and `-`-prefix sanitisation both come from `validateScope`).
       reactDoctorCmd = reactDoctorCommand(fallowBaseFor(resolvedScope));
     }
-
-    // Scope mode runs in the caller's LIVE checkout, which must never be stripped — another
-    // session may own those files. Instead, each opencode-harness angle is refused below and
-    // falls back to the claude route when the repo carries a repo-local opencode config/plugin
-    // (`.opencode/` executes on load regardless of the permission profile; `opencode.json[c]`
-    // is the same vector for hooks/env). Ref mode stripped its throwaway worktree above, so
-    // this is scope-mode only.
-    const liveOpencodeConfig = refMode ? [] : opencodeRepoConfigPresent(cwd);
 
     // ── Phase 1: Data gathering (parallel) ──────────────────────────────
     bump("gathering diff, fallow, ocr");
@@ -1479,24 +1493,7 @@ export async function runReview(
         prompt += contextBlock;
         prompt += researchBlock;
 
-        // Scope mode + a repo-local opencode config: refuse this angle's opencode route and
-        // run it on the claude (frontend-angle) route instead — never delete the caller's own files.
-        // Mirrors dispatch's `assertInPlaceOpencodeConfigAllowed`, but per-angle (a fallback,
-        // not a refusal of the whole review).
-        let angleRoute = routeForReviewAngle(agent.angle);
-        if (liveOpencodeConfig.length > 0 && angleRoute.harness === "opencode") {
-          logger.warn(
-            {
-              event: "review.opencode_angle_refused_config",
-              tool: "review",
-              project: cwd,
-              angle: agent.angle,
-              files: liveOpencodeConfig,
-            },
-            "refusing an opencode-harness angle in a live checkout carrying its own opencode config — using the claude route",
-          );
-          angleRoute = claudeSafeRoute();
-        }
+        const angleRoute = routeForReviewAngle(agent.angle);
 
         // Retry a failed angle once — session-runner does not retry a non-transport failure,
         // so an idle-watchdog kill here would otherwise be final and force needs-human/blocker
@@ -1659,21 +1656,7 @@ export async function runReview(
       .replace("[REACT_DOCTOR_RESULTS]", () => reactDoctorBlock)
       .replace("[OCR_RESULTS]", () => ocrResult.block);
 
-    // Same guard as the angles: an OpenCode synthesis session in a live checkout with its own
-    // opencode config would run that config's plugins — use the claude route instead.
-    let synthesisRoute = routeFor("review");
-    if (liveOpencodeConfig.length > 0 && synthesisRoute.harness === "opencode") {
-      logger.warn(
-        {
-          event: "review.opencode_synthesis_refused_config",
-          tool: "review",
-          project: cwd,
-          files: liveOpencodeConfig,
-        },
-        "refusing an opencode-harness synthesis in a live checkout carrying its own opencode config — using the claude route",
-      );
-      synthesisRoute = claudeSafeRoute();
-    }
+    const synthesisRoute = routeFor("review");
 
     const runSynthesis = (synthPrompt: string) =>
       runSession<SynthesisOutput>({

@@ -250,12 +250,13 @@ const MAX_ONLY_IMPLEMENT: ToolRoute = {
 //   2026-10-05; frontend on 2026-10-15, Wave 11 — on three real weatherorb commits Haiku 5.5 EU
 //   named the defects the repo's own fix commit corrected at least as often as Sonnet on Max, in
 //   ~18 s vs ~160 s) — the same cheap OpenCode shape as AGENT_OC, with the review route's Sonnet on
-//   Max as the reverse lane. Evidence: docs/routing-and-quota.md § Review-angle A/B (Wave 4) and
+//   Max as the reverse lane until 2026-10-29 (owner direction: review never spends Max, so
+//   `fallback: null`). Evidence: docs/routing-and-quota.md § Review-angle A/B (Wave 4) and
 //   § Wave 11 frontend angle.
 const ANGLE_OC: ToolRoute = {
   model: HAIKU_5_5,
   backend: "iu",
-  fallback: { backend: "max", model: SONNET },
+  fallback: null,
   transport: "session",
   harness: "opencode",
 };
@@ -280,6 +281,15 @@ const CLASSIFY: ToolRoute = {
   model: HAIKU_5_5,
   backend: "iu",
   fallback: { backend: "max", model: SONNET },
+  transport: "session",
+  harness: "opencode",
+};
+// REVIEW_OC: review's synthesis and keyless angles — CLASSIFY's shape without the Max reverse lane.
+//   Owner direction 2026-10-29: review never spends Max, so an IU failure fails the attempt.
+const REVIEW_OC: ToolRoute = {
+  model: HAIKU_5_5,
+  backend: "iu",
+  fallback: null,
   transport: "session",
   harness: "opencode",
 };
@@ -338,7 +348,7 @@ const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
   prose_write: PROSE_WRITE,
   prose_review: PROSE_REVIEW,
   narrative: CLASSIFY,
-  review: CLASSIFY,
+  review: REVIEW_OC,
   review_angle_senior_dev: ANGLE_OC,
   review_angle_typescript: ANGLE_OC,
   review_angle_frontend: ANGLE_OC,
@@ -423,6 +433,19 @@ export function validateModel(
 export const MAX_ONLY_TOOLS: ReadonlySet<RoutedTool> = new Set(
   ROUTED_TOOLS.filter((tool) => DEFAULT_ROUTES[tool].maxOnly),
 );
+
+/** Every route the `review` tool resolves — owner direction 2026-10-29: review never spends Max
+ *  (no `max` backend, no `max` fallback). `buildRoutingTable` refuses a `max` backend override on
+ *  them; the defaults above already carry `fallback: null`. */
+export const NEVER_MAX_TOOLS: ReadonlySet<RoutedTool> = new Set<RoutedTool>([
+  "review",
+  "review_router",
+  "review_angle_senior_dev",
+  "review_angle_typescript",
+  "review_angle_frontend",
+  "review_angle_qa",
+  "review_ocr",
+]);
 
 /** The one wording of every Max-only refusal (model, backend, harness, per-job model). */
 function maxOnlyRefusal(tool: string, detail: string): string {
@@ -539,6 +562,13 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
           field: "backend",
           value: backendOverride,
           refused: maxOnlyRefusal(tool, `the ${backendOverride} backend is not allowed`),
+        });
+      } else if (backendOverride === "max" && NEVER_MAX_TOOLS.has(tool)) {
+        overrides.push({
+          tool,
+          field: "backend",
+          value: backendOverride,
+          refused: `${tool} never runs on Max (owner direction 2026-10-29: review never spends Max)`,
         });
       } else if (backendOverride === "max" && !servesOnMax(model)) {
         overrides.push({
@@ -826,15 +856,6 @@ export function routeFor(tool: RoutedTool): ToolRoute {
 export function reviewAngleRouteKey(angle: string): RoutedTool {
   const key = `review_angle_${angle.replaceAll("-", "_")}`;
   return (ROUTED_TOOLS as readonly string[]).includes(key) ? (key as RoutedTool) : "review";
-}
-
-/** The route a session runs on when an OpenCode harness is unsafe in the cwd (a live checkout
- *  carrying its own `opencode.json`/`.opencode/`: a plugin there executes regardless of the
- *  permission profile). Built from the JUDGE constant — Sonnet on Max over `claude -p` — and
- *  deliberately NOT read from the env-overridable table, so no operator override can point the
- *  fallback back at OpenCode. */
-export function claudeSafeRoute(): ToolRoute {
-  return { ...JUDGE, fallback: JUDGE.fallback ? { ...JUDGE.fallback } : null };
 }
 
 /** The effective route for one review angle session — its own key when it has one, else `review`. */

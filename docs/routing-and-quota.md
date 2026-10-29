@@ -8,6 +8,8 @@ demand when touching routing or the fallback retry logic.
 
 **Owner rule (2026-10-24): `dispatch_implement` and `dispatch_implement_escalation` run on Max only — no code is written on IU tokens.** Both are Sonnet on `max` over `claude -p` with `fallback: null` (`MAX_ONLY_TOOLS` in `routing.ts`): a model override that Max cannot serve, a `iu` backend override and an `opencode` harness override are refused at table-build time, and a per-job `model` that Max cannot serve is refused at submit (`dispatchSubmitRefusal`) and ignored by `withModel`. With no IU fallback, an exhausted Max account pool fails the attempt closed (`resolveAttemptAccount`: no IU spill). Editorial and investigate stay on IU.
 
+**Owner direction (2026-10-29): review never spends Max.** Every review key (`review`, `review_angle_*`, `review_router`, `review_ocr`; `NEVER_MAX_TOOLS` in `routing.ts`) has `fallback: null` and no `max` backend, and a `AGENT_GATEWAY_BACKEND_<REVIEW KEY>=max` override is refused at table-build time: an IU failure fails the attempt. The "Sonnet on Max reverse lane" wording for review in the history below predates this.
+
 **`iu`** injects `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` from
 `getIuConfig()` (the IU unified endpoint's native Anthropic transport, metered
 per token, serves Claude _and_ gateway ids — a gateway id additionally gets
@@ -164,17 +166,16 @@ The worker angle sessions in `review` resolve their route through
 `review_angle_qa`); every other angle (architect, backend, security, …) and the
 synthesis keep using `review`. `senior-dev`, `typescript` and `qa` default to the
 cheap OpenCode route (`ANGLE_OC` in `routing.ts`: `claude-haiku-5-5-eu` on `iu` via
-the opencode harness, no variant since Wave 5 (flash `"high"` before), with the `review` route's Sonnet on Max
-as the reverse lane). `frontend` and every angle without a key of its own stay
+the opencode harness, no variant since Wave 5 (flash `"high"` before), with no Max reverse lane
+since 2026-10-29). `frontend` and every angle without a key of its own stay
 on the `review` route. The env names follow the usual rule (route key
 upper-cased): `AGENT_GATEWAY_MODEL_REVIEW_ANGLE_TYPESCRIPT`,
 `AGENT_GATEWAY_HARNESS_REVIEW_ANGLE_TYPESCRIPT`, `AGENT_GATEWAY_VARIANT_...`, etc. A model
 that only the opencode harness can run needs its `AGENT_GATEWAY_HARNESS_...=opencode`
 override alongside, otherwise the model override is refused and the angle stays
-on its default. Pinning an `ANGLE_OC` angle back onto the review route takes a
-Claude model override plus `AGENT_GATEWAY_BACKEND_...=max` (the harness normalizes
-back to `claude` on its own; a bare `AGENT_GATEWAY_HARNESS_...=claude` with the
-default opencode-only model is refused). A job's `model` param still applies to
+on its default. Pinning an `ANGLE_OC` angle onto Max is refused (2026-10-29); a Claude
+model override runs on `iu` (the harness normalizes back to `claude` on its own; a bare
+`AGENT_GATEWAY_HARNESS_...=claude` with the default opencode-only model is refused). A job's `model` param still applies to
 every angle session via `withModel`, on top of whatever the angle's own route
 resolved to.
 
@@ -192,8 +193,8 @@ review angle were closed 2026-10-05:
 2. **Repo agent config in review's cwd.** Ref mode strips `opencode.json`/`opencode.jsonc`/
    `.opencode/` from the throwaway worktree — the same `stripProjectSettings`/
    `restoreStrippedSettings` pairing dispatch uses. Scope mode never deletes the caller's
-   files: an opencode-harness angle in a live checkout carrying any of those runs on the
-   claude route instead, logged `review.opencode_angle_refused_config`.
+   files: a scope-mode review of a live checkout carrying any of those is refused up front
+   (2026-10-29: the old claude-route fallback was Max; logged `review.refused_opencode_config`).
 3. **True read-only profile.** OpenCode `readOnly` now uses the granular `bash` permission
    object: a leading `"*": "deny"`, an allowlist of read commands (`git log/diff/show/status/
    grep/ls-files/rev-parse`, `rg`, `cat`, `ls`, `find`, `head`, `tail`, `wc`, `jq`, `curl`),

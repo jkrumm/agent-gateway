@@ -3,8 +3,8 @@
 //   - `opencodeRepoConfigPresent` (dispatch-git.ts): which of opencode.json / opencode.jsonc /
 //     .opencode exist directly under a repo root. Read-only; the caller decides what it means.
 //   - scope mode (runReview in the caller's LIVE checkout): never stripped — an opencode-harness
-//     angle is instead refused and falls back to `claudeSafeRoute()` (claude harness) when the repo carries
-//     its own opencode config.
+//     review is refused up front (no session, no Max route) when the repo carries its own
+//     opencode config — owner direction 2026-10-29: review never spends Max.
 //   - ref mode (runReview with `branch`): the angle runs inside a throwaway read worktree, from
 //     which `stripProjectSettings` has already removed opencode.json / opencode.jsonc /
 //     .opencode before any session starts; the `finally` restores them from the pinned base.
@@ -23,7 +23,7 @@ import { join } from "path";
 import { opencodeRepoConfigPresent } from "../server/jobs/handlers/dispatch-git.ts";
 import { runReview } from "../server/jobs/handlers/review.ts";
 import * as sessionRunner from "../server/mcp/session-runner.ts";
-import { claudeSafeRoute, routeFor } from "../server/lib/routing.ts";
+import { routeFor } from "../server/lib/routing.ts";
 import { Fixture, git, makeFixture } from "./git-fixture.ts";
 
 // ── opencodeRepoConfigPresent ────────────────────────────────────────────────
@@ -169,10 +169,8 @@ describe("runReview scope mode — live checkout is never stripped", () => {
 
     await runReview({ cwd: fx.repo, scope: "uncommitted", angles: ["senior-dev"] });
 
-    // Guards the premise of the tests below: this angle's default route IS opencode, and the
-    // route review.ts swaps in for a live opencode config (claudeSafeRoute()) is claude.
+    // Guards the premise of the tests below: this angle's default route IS opencode.
     expect(routeFor("review_angle_senior_dev").harness).toBe("opencode");
-    expect(claudeSafeRoute().harness).toBe("claude");
     const harnesses = angleSessions().map((s) => s.harness);
     expect(harnesses).toContain("opencode");
     expect(synthesisSessions().map((s) => s.harness)).toEqual(["opencode"]);
@@ -183,20 +181,19 @@ describe("runReview scope mode — live checkout is never stripped", () => {
     ["opencode.jsonc", () => fx.write("opencode.jsonc", "{}\n")],
     [".opencode/", () => fx.write(".opencode/plugin.js", "export default {};\n")],
   ])(
-    "%s in the live root forces every angle onto the claude route and is left in place",
+    "%s in the live root refuses the whole review: no session opened, file left in place",
     async (_name, plant) => {
       plant();
       fx.write("src/app.ts", "export const changed = 1;\n");
 
-      await runReview({ cwd: fx.repo, scope: "uncommitted", angles: ["senior-dev"] });
+      await expect(
+        runReview({ cwd: fx.repo, scope: "uncommitted", angles: ["senior-dev"] }),
+      ).rejects.toThrow(
+        "this checkout carries its own opencode config; review it with agw review (agent-workflows)",
+      );
 
-      const angles = angleSessions();
-      expect(angles.length).toBeGreaterThan(0);
-      expect(angles.every((s) => s.harness === "claude")).toBe(true);
-      // The synthesis session runs in the same checkout, so it takes the same guard.
-      expect(synthesisSessions().map((s) => s.harness)).toEqual(["claude"]);
-      // Sessions still run in the caller's own checkout, and nothing was deleted from it.
-      expect(angles.every((s) => s.cwd === fx.repo)).toBe(true);
+      // No session at all — in particular none on a claude/Max route.
+      expect(seen).toEqual([]);
       expect(opencodeRepoConfigPresent(fx.repo)).not.toEqual([]);
     },
   );
