@@ -3,9 +3,9 @@
 Job-queue daemon for agent work on the Mac mini: an always-on HTTP server (`:7705`,
 loopback only, LaunchAgent `com.jkrumm.agent-gateway`) that hosts a durable job queue,
 plus an MCP stdio server (`server/mcp.ts`) that every Claude Code session spawns to submit
-work to it. Tools: `dispatch`, `overview`, `narrative`, `prose`, `otel`,
-`read_image`, `read_drawing`, `excalidraw_diagram`, `job_status`/`job_wait`. `check` and `review`
-moved to agent-workflows (`agw check`, `agw review`). Each long tool
+work to it. Tools: `dispatch`, `overview`, `narrative`,
+`read_image`, `read_drawing`, `job_status`/`job_wait`. `check`, `review`, `prose`, `excalidraw_diagram`
+and `otel` moved to agent-workflows (`agw check`, `agw review`, `agw prose`, `agw diagram`, the `/otel` skill). Each long tool
 runs as a background job in a worker session (OpenCode by default for dispatch, `claude -p` elsewhere, per the route's
 harness) on the model and backend the routing table assigns it. Mini-only by design — see the dotfiles global CLAUDE.md.
 
@@ -66,7 +66,7 @@ Logs: `~/Library/Logs/agent-gateway.jsonl` (structured, both processes), `agent-
 | `AGENT_GATEWAY_REVIEW_OCR=0` | disable the OpenCodeReview (`ocr` CLI) phase-1 review input |
 | `AGENT_GATEWAY_JOB_CONCURRENCY` (3) | running-job cap for the session lane (everything but `triage`/`decide`) |
 | `AGENT_GATEWAY_SINGLE_SHOT_CONCURRENCY` (6) | running-job cap for the single-shot lane (`triage`, `decide`); these do not count against the session cap |
-| `AGENT_GATEWAY_VOICE_PATH` (`~/SourceRoot/brain/voice.md`) | the voice guide `prose` writes to and `narrative` styles pages with, capped at 16 KB (a larger file is truncated with a warn). A missing file fails a `prose` job; `narrative` runs without it |
+| `AGENT_GATEWAY_VOICE_PATH` (`~/SourceRoot/brain/voice.md`) | the voice guide `narrative` styles pages with, capped at 16 KB (a larger file is truncated with a warn). `narrative` runs without it |
 | `AGENT_GATEWAY_AGENT_STALE_HOURS` (24) | agent snapshot stale threshold |
 | `AGENT_GATEWAY_KUMA_PUSH_URL` (else `~/.config/uptime-kuma/agent-gateway-push-url`, chmod 600) | full Uptime Kuma push-monitor URL (`https://<kuma-host>/api/push/<token>`); each tick pushes `down` + reason when a route is degraded or the queue unhealthy, else `up`. Unset = no push, one warn, Kuma's missed-heartbeat alert fires |
 | `AGENT_GATEWAY_KUMA_PUSH_INTERVAL_MS` (60000) | Kuma heartbeat interval |

@@ -23,8 +23,6 @@ import { dataBlock, endOfData, fencePreamble, newFenceNonce } from "../../lib/pr
 import { readVoiceGuide } from "../../lib/voice.ts";
 import type { IuUsage } from "../../lib/iu-openai.ts";
 import { appLogger as logger } from "../../logger.ts";
-import type { ProgressSink } from "../store.ts";
-import { parseParams } from "./util.ts";
 
 // `prose` — turns human-facing text (an article section, a vault page, landing or UI copy, a
 // briefing) into a version that communicates better. A fixed three-stage pipeline, not an open
@@ -33,7 +31,8 @@ import { parseParams } from "./util.ts";
 // user turn) → RE-LINT (keep the rewrite only if it carries over every fenced code block, URL
 // and wikilink target of the original, adds none, stays in the draft's format (markdown or
 // html), and no lint rule has more findings than in the original).
-// Execution lives here; the MCP door is server/mcp/tools/prose.ts.
+// A library, not a job tool: `narrative` polishes its page through `runProsePipeline`; the
+// standalone door moved to agent-workflows (`agw prose`).
 
 const MAX_TEXT_CHARS = 60_000;
 const MAX_BRIEF_CHARS = 2_000;
@@ -771,23 +770,4 @@ export async function runProsePipeline(
     usage: usage.total,
     usageByCall: { writer: usage.writer, reviewer: usage.reviewer },
   };
-}
-
-/** The job entry point: validate, refuse same-lab pairs, then run the pipeline on the real
- *  adapters. The writer and reviewer resolve from per-job overrides, else the routes. */
-export async function runProse(
-  rawParams: Record<string, unknown>,
-  onProgress?: ProgressSink,
-  jobId?: string,
-  isCancelled?: (jobId: string) => boolean,
-): Promise<ProseOutput> {
-  const params = parseParams(PROSE_INPUT, rawParams);
-  const refusal = proseSubmitRefusal(params);
-  if (refusal) throw new Error(refusal);
-  const models = resolveProseModels(params);
-  const cancelled = jobId !== undefined && isCancelled ? () => isCancelled(jobId) : undefined;
-  return runProsePipeline(params, models, defaultProseDeps("prose", cancelled), {
-    onStage: (label) => onProgress?.({ turns: 1, lastAction: label, lastActivityAt: Date.now() }),
-    isCancelled: cancelled,
-  });
 }

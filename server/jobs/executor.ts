@@ -4,14 +4,12 @@ import type { ProgressSink } from "./store.ts";
 import { isCancelRequested, updateJobSessionId, updateJobWorktreeMeta } from "./store.ts";
 import { runCheck } from "./handlers/check.ts";
 import { runReview } from "./handlers/review.ts";
-import { runExcalidrawDiagram } from "./handlers/excalidraw-diagram.ts";
 import { runDispatch } from "./handlers/dispatch.ts";
 import { runOverview } from "./handlers/overview.ts";
 import { runNarrative } from "./handlers/narrative.ts";
 import { runTriage } from "./handlers/triage.ts";
 import { runDecide } from "./handlers/decide.ts";
 import { runUpdatePr } from "./handlers/update-pr.ts";
-import { runProse } from "./handlers/prose.ts";
 
 /** Dispatch a job to its tool handler. Returns the typed result, or throws on
  *  failure — the store turns a throw into `status: "failed"` with the message.
@@ -40,8 +38,6 @@ function runHandler(job: JobRecord, onProgress: ProgressSink): Promise<unknown> 
         worktreeMeta: job.worktreeMeta,
         onWorktreeReady: (meta) => updateJobWorktreeMeta(job.id, meta),
       });
-    case "excalidraw_diagram":
-      return runExcalidrawDiagram(job.params, onProgress, job.id, isCancelRequested);
     case "dispatch":
       // `job.sessionId`/`job.worktreeMeta` are non-null only when `store.ts`'s `recover()`
       // landed this row `pending` with a "resume" decision (`dispatchRecoveryStatusFor`) — a
@@ -68,8 +64,6 @@ function runHandler(job: JobRecord, onProgress: ProgressSink): Promise<unknown> 
       return runDecide(job.params, onProgress, job.id, isCancelRequested);
     case "update_pr":
       return runUpdatePr(job.params, onProgress, job.id, isCancelRequested);
-    case "prose":
-      return runProse(job.params, onProgress, job.id, isCancelRequested);
     default: {
       const exhaustive: never = job.tool;
       throw new Error(`unknown job tool: ${String(exhaustive)}`);

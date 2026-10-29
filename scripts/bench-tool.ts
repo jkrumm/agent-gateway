@@ -3,14 +3,14 @@
 // route the env selects (routes are read at module load, so one process = one candidate):
 //   AGENT_GATEWAY_MODEL_OVERVIEW=claude-haiku-5-5-eu AGENT_GATEWAY_HARNESS_OVERVIEW=opencode \
 //     bun scripts/bench-tool.ts overview [--reps 2] [--out dir]
-// Tools: overview, narrative, excalidraw, editorial (dispatch kind=editorial, in-place on
+// Tools: overview, narrative, editorial (dispatch kind=editorial, in-place on
 // dispatch-scratch), review (the synthesis route; angles keep their own routes).
 // Each rep prints one JSON line (wall, ok, cost from the attribution rows written during the rep,
 // a tool-specific quality probe) and saves the full output under <out>/ for a blind read.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { routeFor, type RoutedTool } from "../server/lib/routing.ts";
 
@@ -90,29 +90,6 @@ const TOOLS: Record<string, { route: RoutedTool; run: (rep: number) => Promise<R
         output: out,
         attrTool: "narrative",
         probe: { changed: (out as { changed?: boolean }).changed, pageChars: page?.length ?? 0 },
-      };
-    },
-  },
-  excalidraw: {
-    route: "excalidraw",
-    run: async (rep) => {
-      const { runExcalidrawDiagram } =
-        await import("../server/jobs/handlers/excalidraw-diagram.ts");
-      const outputPath = join(tmpdir(), `bench-excalidraw-${process.pid}-${rep}.excalidraw`);
-      const out = await runExcalidrawDiagram({
-        prompt:
-          "Flow diagram: a dispatch request enters the agw HTTP server, is queued in the job " +
-          "store (sqlite), a worker session runs on the shared OpenCode server, the handler " +
-          "pushes a branch and opens a draft PR. Show a drain/detach arrow from the HTTP server " +
-          "to the OpenCode server labelled 're-attach on boot'. 7-9 boxes, left to right.",
-        outputPath,
-      });
-      const file = existsSync(outputPath) ? readFileSync(outputPath, "utf8") : "";
-      const elements = file ? ((JSON.parse(file) as { elements?: unknown[] }).elements ?? []) : [];
-      return {
-        output: { out, file },
-        attrTool: "excalidraw-diagram",
-        probe: { elements: elements.length, bytes: file.length },
       };
     },
   },

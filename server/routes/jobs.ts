@@ -6,7 +6,6 @@ import { isJobTool, type JobTool } from "../jobs/types.ts";
 import { resolveDispatchTarget } from "../lib/dispatch-policy.ts";
 import { computeHealth } from "../lib/health.ts";
 import { dispatchSubmitRefusal } from "../jobs/handlers/dispatch.ts";
-import { proseSubmitRefusal } from "../jobs/handlers/prose.ts";
 import { isDecisionModel } from "../lib/decision.ts";
 import { validateModel } from "../lib/routing.ts";
 import { steerJob } from "../lib/steer.ts";
@@ -16,9 +15,7 @@ import { steerJob } from "../lib/steer.ts";
 // outlive the ephemeral MCP process. See server/jobs/store.ts.
 
 // Everything knowable without running the episode that a tool's handler also checks: `dispatch`
-// (the repo/tier policy, malformed params, ...) and `prose` (a same-lab writer/reviewer pair, a
-// non-anthropic writer, an anthropic reviewer — see proseSubmitRefusal) refuse here, before a job
-// row exists.
+// (the repo/tier policy, malformed params, ...) refuses here, before a job row exists.
 async function toolSubmitRefusal(tool: JobTool, params: unknown): Promise<string | null> {
   // A `cwd` that does not exist is the caller's mistake (a deleted worktree, a typo), not a job
   // failure: as a job it would count toward `failedLastHour` and could fail a correct deploy's
@@ -28,7 +25,6 @@ async function toolSubmitRefusal(tool: JobTool, params: unknown): Promise<string
   if (typeof cwd === "string" && !statSync(cwd, { throwIfNoEntry: false })?.isDirectory())
     return `${tool} refused: directory not found: ${cwd}`;
   if (tool === "dispatch") return dispatchSubmitRefusal((params ?? {}) as Record<string, unknown>);
-  if (tool === "prose") return proseSubmitRefusal(params);
   return null;
 }
 
@@ -74,9 +70,7 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
       const isDecide = body.tool === "decide";
       if (
         typeof model === "string" &&
-        (isDecide
-          ? !isDecisionModel(model)
-          : !validateModel(model, { singleShot: body.tool === "prose" }).ok)
+        (isDecide ? !isDecisionModel(model) : !validateModel(model).ok)
       ) {
         set.status = 400;
         return {

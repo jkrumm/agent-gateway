@@ -468,15 +468,12 @@ describe("recover() — detached rows with nothing to resume", () => {
 });
 
 describe("recover() — tools without a detachable session ignore the marker", () => {
-  test("update_pr and excalidraw_diagram are recovered by the ordinary rules, never given a free re-run", () => {
+  test("update_pr is recovered by the ordinary rules, never given a free re-run", () => {
     const updatePr = createJob("update_pr", {});
     seedRunning(updatePr.id, { attempts: 1, detachedAt: Date.now() });
-    const excalidraw = createJob("excalidraw_diagram", {});
-    seedRunning(excalidraw.id, { attempts: 1, detachedAt: Date.now() });
     initJobStore({ executor: NEVER_EXECUTE });
-    // Neither is requeued on recovery today; the marker changes nothing.
+    // It is not requeued on recovery today; the marker changes nothing.
     expect(getJob(updatePr.id)?.status).toBe("interrupted");
-    expect(getJob(excalidraw.id)?.status).toBe("interrupted");
   });
 });
 

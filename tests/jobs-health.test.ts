@@ -46,7 +46,7 @@ describe("recoveryStatusFor", () => {
     // (dispatchRecoveryStatusFor below is dispatch's real path) — pinned here anyway so this
     // function stays honest if something ever calls it with "dispatch" directly.
     expect(recoveryStatusFor("dispatch", 1)).toBe("interrupted");
-    expect(recoveryStatusFor("excalidraw_diagram", 1)).toBe("interrupted");
+    expect(recoveryStatusFor("update_pr", 1)).toBe("interrupted");
   });
 });
 

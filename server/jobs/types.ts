@@ -10,14 +10,12 @@
 export type JobTool =
   | "check"
   | "review"
-  | "excalidraw_diagram"
   | "dispatch"
   | "overview"
   | "narrative"
   | "triage"
   | "decide"
-  | "update_pr"
-  | "prose";
+  | "update_pr";
 
 // Not exported — nothing outside this file needs the raw list, only the `isJobTool` guard
 // built from it (fallow flagged the export itself as consumer-less; the guard is the public
@@ -25,14 +23,12 @@ export type JobTool =
 const JOB_TOOLS: readonly JobTool[] = [
   "check",
   "review",
-  "excalidraw_diagram",
   "dispatch",
   "overview",
   "narrative",
   "triage",
   "decide",
   "update_pr",
-  "prose",
 ];
 
 export function isJobTool(value: string): value is JobTool {
@@ -44,7 +40,7 @@ export function isJobTool(value: string): value is JobTool {
  *   pending → running → done | failed
  *   pending → cancelled              (POST /api/jobs/:id/cancel: never ran)
  *   running → cancelled              (POST /api/jobs/:id/cancel: worker SIGTERMed)
- *   running → pending                (restart recovery: check/overview/narrative/review/triage/decide/prose, once)
+ *   running → pending                (restart recovery: check/overview/narrative/review/triage/decide, once)
  *   running → interrupted            (restart recovery: everything else, or a 2nd interruption)
  *
  * `pending` jobs are admitted but waiting for a concurrency slot. `interrupted`
