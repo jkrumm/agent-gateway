@@ -1,7 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerDecideTool } from "./decide.ts";
 import { registerDispatchTool } from "./dispatch.ts";
-import { registerExcalidrawDiagramTool } from "./excalidraw-diagram.ts";
 import {
   registerJobCancelTool,
   registerJobStatusTool,
@@ -9,9 +8,7 @@ import {
   registerJobWaitTool,
 } from "./jobs.ts";
 import { registerNarrativeTool } from "./narrative.ts";
-import { registerOtelTool } from "./otel.ts";
 import { registerOverviewTool } from "./overview.ts";
-import { registerProseTool } from "./prose.ts";
 import { registerReadDrawingTool } from "./read-drawing.ts";
 import { registerReadImageTool } from "./read-image.ts";
 import { registerTriageTool } from "./triage.ts";
@@ -24,15 +21,12 @@ import { registerUpdatePrTool } from "./update-pr.ts";
 export const MCP_TOOLS: ReadonlyArray<{ name: string; register: (server: McpServer) => void }> = [
   { name: "decide", register: registerDecideTool },
   { name: "dispatch", register: registerDispatchTool },
-  { name: "excalidraw_diagram", register: registerExcalidrawDiagramTool },
   { name: "job_cancel", register: registerJobCancelTool },
   { name: "job_status", register: registerJobStatusTool },
   { name: "job_steer", register: registerJobSteerTool },
   { name: "job_wait", register: registerJobWaitTool },
   { name: "narrative", register: registerNarrativeTool },
-  { name: "otel", register: registerOtelTool },
   { name: "overview", register: registerOverviewTool },
-  { name: "prose", register: registerProseTool },
   { name: "read_drawing", register: registerReadDrawingTool },
   { name: "read_image", register: registerReadImageTool },
   { name: "triage", register: registerTriageTool },

@@ -121,15 +121,6 @@ describe("single-shot-only models (the Opus ids)", () => {
       "review refused: model claude-opus-4-6 is not a verified registry model",
     );
   });
-
-  test("prose accepts an Opus writer", async () => {
-    const { status, body } = await post({
-      tool: "prose",
-      params: { text: "A draft.", medium: "article", model: "claude-opus-5-5" },
-    });
-    expect(status).toBe(200);
-    expect(body.ok).toBe(true);
-  });
 });
 
 describe("decide `model`", () => {

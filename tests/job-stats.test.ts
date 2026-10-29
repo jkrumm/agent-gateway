@@ -108,7 +108,7 @@ describe("job_stats recording", () => {
   });
 
   test("boot recovery landing a running row interrupted records it", () => {
-    const created = createJob("excalidraw_diagram", {});
+    const created = createJob("update_pr", {});
     withDb((db) =>
       db.run("UPDATE jobs SET status = 'running', started_at = ?, attempts = 1 WHERE id = ?", [
         Date.now(),

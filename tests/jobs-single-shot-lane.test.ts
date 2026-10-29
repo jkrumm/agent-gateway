@@ -56,18 +56,9 @@ describe("laneOf", () => {
   test("triage and decide are single-shot, every other tool is a session", () => {
     expect(laneOf("triage")).toBe("single_shot");
     expect(laneOf("decide")).toBe("single_shot");
-    for (const tool of [
-      "check",
-      "review",
-      "dispatch",
-      "overview",
-      "narrative",
-      "update_pr",
-      "prose",
-    ]) {
+    for (const tool of ["check", "review", "dispatch", "overview", "narrative", "update_pr"]) {
       expect(laneOf(tool)).toBe("session");
     }
-    expect(laneOf("excalidraw_diagram")).toBe("session");
   });
 });
 

@@ -123,16 +123,16 @@ Full forensic story (why BTM denies this specific label/executable):
 ## MCP Server
 
 agent-gateway exposes workflow tools (`dispatch`, `update_pr`, `decide`, `overview`,
-`narrative`, `triage`, `otel`, `prose`) plus the synchronous multimodal tools (`read_image`,
-`read_drawing`, `excalidraw_diagram`) plus the job-polling tools
+`narrative`, `triage`) plus the synchronous multimodal tools (`read_image`,
+`read_drawing`) plus the job-polling tools
 (`job_status`, `job_wait`, `job_steer`, `job_cancel`) as an MCP server — a **separate process** from the
 LaunchAgent, spawned on-demand by Claude Code via stdio transport.
-`check` and `review` are no longer MCP tools — they moved to agent-workflows (`agw check`, `agw review`);
-the HTTP job routes and the `agw-legacy check|review` CLI commands remain for its eval harness.
+`check`, `review`, `prose`, `excalidraw_diagram` and `otel` are no longer MCP tools — they moved to
+agent-workflows (`agw check`, `agw review`, `agw prose`, `agw diagram`, the `/otel` skill); the HTTP job
+routes and the `agw-legacy check|review` CLI commands remain for its eval harness. The prose pipeline
+(`server/jobs/handlers/prose.ts`) stays as a library only `narrative` calls, not a job tool.
 `GET /api/agents` (below) is HTTP-only, deliberately outside this MCP
-surface — see `### agents, overview, narrative`. `otel` alone runs inline via
-`runSession`, never as a job — no `jobId`, no `job_wait` — by decision:
-`brain/wiki/engineering/model-routing.md`.
+surface — see `### agents, overview, narrative`.
 
 Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in
 `server/mcp/tools/`; the actual execution logic + schemas live in
@@ -159,7 +159,6 @@ MCP:
 agw-legacy dispatch --repo warden --tier implement --workspace in-place 'the brief'
 agw-legacy check --repo agent-gateway          # submit + wait, progress on stderr
 agw-legacy review --pr 42 --json          # stdout carries ONLY the result JSON
-agw-legacy prose draft.md --medium vault --out draft.md   # text on stdout/--out, summary + notes on stderr
 agw-legacy jobs --running · status|wait|cancel <jobId> · steer <jobId> <text> · routing · policy · health
 ```
 
@@ -171,16 +170,9 @@ failed/interrupted/cancelled · **2** usage error or `dispatch refused: …` ·
 **3** server unreachable. Same policy, same queue, same concurrency cap as the
 MCP door — the CLI adds no capability, only reach.
 
-`agw-legacy prose [<file>|-] [--medium <m>] [--language en|de] [--register <r>] [--brief <text>] [--context <file>] [--no-verdict-first] [--out <file>] [--json]`
-submits a `prose` job (flags map 1:1 onto `PROSE_INPUT`; `--context` reads a file; `--medium` defaults to
-`docs` because the schema requires one), waits with no ceiling, and writes the resulting text (the rewrite,
-or the original when the keep gate declined) to stdout or `--out`. stderr gets one summary line (kept, reason,
-language, format, cost, duration) plus the reviewer notes; `--json` prints the full result instead of the text.
-Exit 0 whenever the job finished, even if it kept the original.
-
 ### Async job model (durable, off the MCP transport)
 
-The long tools (`dispatch`/`overview`/`narrative`/`triage`/`decide`/`prose`) do
+The long tools (`dispatch`/`overview`/`narrative`/`triage`/`decide`) do
 **not** block the MCP call. A 13-minute worker run held open as a single MCP
 request destabilizes the stdio transport (and the SDK's 60s client timeout).
 Instead:
@@ -199,7 +191,7 @@ Instead:
    `GET /api/jobs/:id` / the submit response (omitted when absent). `executeJob` opens an
    `AsyncLocalStorage` context (`server/lib/caller.ts`), and both usage sinks read it where they
    write — `writeAttribution` (`agent-gateway-sessions.jsonl`, `caller`) and `recordIuUsage`
-   (`agent-gateway-iu` rows: single-shot `triage`/`decide`/`prose` and review OCR/router spend,
+   (`agent-gateway-iu` rows: single-shot `triage`/`decide` and review OCR/router spend,
    `caller`) — so a job's every usage row is tagged. No caller → no field, anywhere
    (backwards compatible). usage-tracker groups by it; agent-gateway does not change that side.
 2. The HTTP server (LaunchAgent, durable) runs the job in the background and
@@ -227,8 +219,8 @@ _large and still-growing_ `idleMs` means the session may be stuck — peek at
 Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on
 `/mcp` disconnect, but the HTTP server is launchd-managed. Jobs survive MCP
 reconnects; disk persistence survives an HTTP restart: on boot `recover()`
-re-queues an interrupted `check`/`overview`/`narrative`/`review`/`triage`/`decide`/`prose` **once**
-(all read-only; `prose` is not cost-idempotent — a crash after the writer's billed reply re-bills both calls) and marks everything else `interrupted`
+re-queues an interrupted `check`/`overview`/`narrative`/`review`/`triage`/`decide` **once**
+(all read-only) and marks everything else `interrupted`
 (`dispatch` is never auto re-run — an `implement` episode may already have
 pushed). A job whose OpenCode session(s) a drain **detached** is not a crash and is
 requeued whatever its attempts say — see _Durable and steerable OpenCode
@@ -326,7 +318,6 @@ in `failedLastHour`; an already-terminal job answers 409, which `job_cancel` ret
 too, so per the MCP-schema-change rule above, an already-connected client needs
 an `/mcp` reconnect (or session restart) before it can poll a cancelled job
 without its Zod validation silently stripping the field.
-A `prose` cancel lands after the in-flight writer call returns, as `cancelled`: `isCancelled` is checked between stages and after the writer, and no `AbortSignal` is threaded into the model call. A running prose job is a drain blocker, so `make reload` refuses while one runs.
 
 **Alerting (Wave 4).** `server/lib/health.ts` `computeHealth()` is the payload behind
 `/api/jobs/health` plus `pageable`/`pageReason` (`!ok` or any `degradedRoutes`) and
@@ -443,16 +434,16 @@ re-bills the polish on recovery (accepted). Full input/output contract and gathe
 
 ### prose — human-facing text, improved in a fixed pipeline
 
-The `prose` job (`server/jobs/handlers/prose.ts`, MCP `prose`) turns a draft (article section,
+No longer a job or MCP tool (the door moved to agent-workflows, `agw prose`); the pipeline in
+`server/jobs/handlers/prose.ts` stays as the library `narrative` polishes its page with. It turns a draft (article section,
 vault page, landing or UI copy, docs, briefing) into clearer prose: LINT (`server/lib/prose-lint.ts`,
 pure code) → REVIEW (`prose_review`, a different lab, notes and scores only) → REWRITE (`prose_write`,
 the voice guide plus the review) → RE-LINT. The voice guide is read by `server/lib/voice.ts` from
 `AGENT_GATEWAY_VOICE_PATH` (default `~/SourceRoot/brain/voice.md`, capped at `VOICE_MAX_BYTES` = 16 KB with a
-warn when exceeded), shared with `narrative`; a missing file fails a prose job, while narrative runs without it.
+warn when exceeded), shared with `narrative`; narrative runs without it.
 The rewrite is kept only if it stays in the draft's format (`html` when the prose has block-level tags, else `markdown`; an html rewrite may carry no markdown `> [visual:` line, table or heading), carries over every fenced code block (exact text), URL (html `href`/`src` values included) and Obsidian wikilink target (`[[t]]`, `[[t|alias]]`, `![[embed]]`; compared as a multiset by target, the alias may change) of the original, adds none, AND no
 lint rule has more findings than in the original; otherwise the original comes back with `kept: "original"` and
-`keptReason`. The job runs on the **session lane** (up to three long calls on up to 60k chars would hold a
-single-shot slot and block the drain) and checks `isCancelled` between review and write and between writer retries. The writer is one anthropic-wire
+`keptReason`. The pipeline checks `isCancelled` between review and write and between writer retries. The writer is one anthropic-wire
 Messages call (`anthropicComplete`, single-shot.ts: 32000 max tokens, adaptive thinking at high effort; empty
 text on `max_tokens` is `starved`, text cut off by it is `truncated`; both are content failures that keep the
 original with the billed usage carried and a warn `prose.writer_content_failed`, while transport errors
@@ -657,12 +648,6 @@ swept by `pruneSessionAccounts()` (regular `<id>.json` only, once per process be
 Reset epochs are clamped to now+7d. Exit 3 is a spill only for `pick`. `__setSpawnForTests` stubs the
 `claude -p` spawn.
 The spill signal is exit code 3 (stdout `spill`, or `iu` from an older picker; stdout is not keyed on).
-
-**`otel` also injects the real ClickStack/HyperDX MCP** (bearer-authed
-`http` server) into its own worker session — key resolution fails soft
-(local `.env`, then `HYPERDX_PROD_ACCESS_KEY`, then `secrets-run` — never a
-bare `op`, hangs headless); `readOnly: true` plus mutating tool names in
-`extraDisallowedTools` keep it query-only.
 
 Two constraints carried over regardless of backend:
 

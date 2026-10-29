@@ -2,11 +2,10 @@
 // pipeline with injected adapters (no IU call), the keep/fall-back rules, the submit-time gate
 // (proseSubmitRefusal) and the voice-guide failure. Same adapter-injection shape as narrative.
 
-import { describe, expect, spyOn, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   PROSE_INPUT,
   defaultProseDeps,
-  runProse,
   labOf,
   proseSubmitRefusal,
   runProsePipeline,
@@ -510,25 +509,6 @@ describe("the voice guide path", () => {
     } finally {
       if (prev === undefined) delete process.env.AGENT_GATEWAY_VOICE_PATH;
       else process.env.AGENT_GATEWAY_VOICE_PATH = prev;
-    }
-  });
-});
-
-describe("runProse — same-lab pair", () => {
-  test("is refused before any model call", async () => {
-    const fetchSpy = spyOn(globalThis, "fetch");
-    try {
-      await expect(
-        runProse({
-          text: DRAFT,
-          medium: "article",
-          model: "claude-opus-5-5",
-          reviewModel: "claude-sonnet-5",
-        }),
-      ).rejects.toThrow("prose refused");
-      expect(fetchSpy).not.toHaveBeenCalled();
-    } finally {
-      fetchSpy.mockRestore();
     }
   });
 });
