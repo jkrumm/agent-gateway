@@ -9,7 +9,7 @@ check:
 	bun test
 
 # Ships the checked-out HEAD: reload + verify; on a failed verify rolls back to HEAD~1
-# (detached, clean tree only). FORCE=1 / RESTART_MCP=1 pass through to `reload`.
+# (detached, clean tree only). FORCE=1 passes through to `reload`.
 deploy:
 	@./scripts/deploy.sh
 
@@ -59,11 +59,6 @@ start:
 # and this fallback exists so it stays reloadable rather than a `make reload` that can no longer
 # reach it silently hanging forever.
 #
-# The stdio MCP child is left alive by default — it's a thin HTTP client of the job queue, so
-# stale handler code in it is harmless, and Claude Code marks a killed stdio server failed
-# without respawning it. RESTART_MCP=1 make reload after a tool input/output schema change,
-# because the SDK's Zod validation silently strips an unknown field until the client reconnects.
-#
 # Before any of that: refuses if the tracked plist differs from the one launchd actually has
 # loaded, checked TWO ways — a file compare AND, separately, launchd's own live ExitTimeOut.
 # `launchctl kill` (used only by the fallback above now, not the normal path) only signals the
@@ -110,11 +105,6 @@ start:
 # directly to tell a refusal (nothing was touched) from a post-restart failure.
 reload:
 	@scripts/reload-preflight.sh
-	@if [ -n "$(RESTART_MCP)" ]; then \
-	  pkill -f "agent-gateway/server/mcp.ts" 2>/dev/null || true; \
-	else \
-	  echo "(MCP children left alive — RESTART_MCP=1 to restart them after a tool-schema change)"; \
-	fi
 	@# The self-exit below is a clean exit 0 that KeepAlive respawns — to the mini heartbeat's
 	@# launchd-restart check that is a crash loop unless marked (dotfiles
 	@# scripts/lib/launchd-restarts.sh: one epoch line excuses one `runs` bump).

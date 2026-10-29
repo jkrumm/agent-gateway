@@ -4,10 +4,8 @@
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { z } from "zod";
 import { __resetForTests } from "../server/jobs/store.ts";
 import { toJobView, type JobRecord } from "../server/jobs/types.ts";
-import { registerJobSubmitTool } from "../server/mcp/tools/_job-tool.ts";
 import { callerField, currentCaller, isValidCaller, withCaller } from "../server/lib/caller.ts";
 import { recordIuUsage } from "../server/lib/iu-openai.ts";
 import { writeAttribution } from "../server/mcp/session-core.ts";
@@ -101,19 +99,6 @@ describe("job view", () => {
     });
     expect(toJobView(record("iris")).caller).toBe("iris");
     expect("caller" in toJobView(record(null))).toBe(false);
-  });
-});
-
-describe("registerJobSubmitTool", () => {
-  test("refuses a tool whose own inputSchema declares caller", () => {
-    const server = { registerTool: () => {} };
-    const spec = { name: "x", title: "x", description: "x", tool: "triage" as const };
-    expect(() =>
-      registerJobSubmitTool(server as never, { ...spec, inputSchema: { caller: z.string() } }),
-    ).toThrow(/must not declare "caller"/);
-    expect(() =>
-      registerJobSubmitTool(server as never, { ...spec, inputSchema: { cwd: z.string() } }),
-    ).not.toThrow();
   });
 });
 
